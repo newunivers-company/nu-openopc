@@ -929,6 +929,86 @@ class NUResourceGenConfig(BaseModel):
     max_catalog_results: int = Field(default=50, ge=1, le=200)
 
 
+class OutcomeEvaluationConfig(BaseModel):
+    """Deterministic run acceptance and regression thresholds."""
+
+    minimum_total_score: float = Field(default=0.75, ge=0.0, le=1.0)
+    maximum_regression: float = Field(default=0.05, ge=0.0, le=1.0)
+    quality_weight: float = Field(default=0.45, ge=0.0)
+    evidence_weight: float = Field(default=0.20, ge=0.0)
+    budget_weight: float = Field(default=0.15, ge=0.0)
+    reliability_weight: float = Field(default=0.10, ge=0.0)
+    autonomy_weight: float = Field(default=0.10, ge=0.0)
+
+    def normalized_weights(self) -> dict[str, float]:
+        values = {
+            "quality": self.quality_weight,
+            "evidence": self.evidence_weight,
+            "budget": self.budget_weight,
+            "reliability": self.reliability_weight,
+            "autonomy": self.autonomy_weight,
+        }
+        total = sum(values.values())
+        if total <= 0:
+            raise ValueError("at least one outcome evaluation weight must be positive")
+        return {name: value / total for name, value in values.items()}
+
+
+class DurableOperationsConfig(BaseModel):
+    """Lease, outbox, recovery, and deadlock defaults."""
+
+    lease_seconds: int = Field(default=30, ge=1, le=3600)
+    outbox_max_attempts: int = Field(default=5, ge=1, le=100)
+    retry_base_seconds: int = Field(default=5, ge=1, le=3600)
+    retry_max_seconds: int = Field(default=900, ge=1, le=86_400)
+    deadlock_after_seconds: int = Field(default=900, ge=1, le=604_800)
+
+
+class LearningOperationsConfig(BaseModel):
+    """Promotion policy for self-grown operating assets."""
+
+    minimum_offline_score: float = Field(default=0.75, ge=0.0, le=1.0)
+    minimum_shadow_score: float = Field(default=0.78, ge=0.0, le=1.0)
+    minimum_canary_score: float = Field(default=0.80, ge=0.0, le=1.0)
+    minimum_sample_size: int = Field(default=3, ge=1, le=100_000)
+    maximum_regression: float = Field(default=0.02, ge=0.0, le=1.0)
+
+
+class StaffingOperationsConfig(BaseModel):
+    """Evidence weights for deterministic staffing decisions."""
+
+    quality_weight: float = Field(default=0.35, ge=0.0)
+    domain_weight: float = Field(default=0.20, ge=0.0)
+    reliability_weight: float = Field(default=0.15, ge=0.0)
+    experience_weight: float = Field(default=0.15, ge=0.0)
+    availability_weight: float = Field(default=0.10, ge=0.0)
+    cost_weight: float = Field(default=0.05, ge=0.0)
+
+    def normalized_weights(self) -> dict[str, float]:
+        values = {
+            "quality": self.quality_weight,
+            "domain": self.domain_weight,
+            "reliability": self.reliability_weight,
+            "experience": self.experience_weight,
+            "availability": self.availability_weight,
+            "cost": self.cost_weight,
+        }
+        total = sum(values.values())
+        if total <= 0:
+            raise ValueError("at least one staffing weight must be positive")
+        return {name: value / total for name, value in values.items()}
+
+
+class OperationsConfig(BaseModel):
+    """Configuration for the goal-to-learning operating loop."""
+
+    enabled: bool = True
+    evaluation: OutcomeEvaluationConfig = Field(default_factory=OutcomeEvaluationConfig)
+    durable: DurableOperationsConfig = Field(default_factory=DurableOperationsConfig)
+    learning: LearningOperationsConfig = Field(default_factory=LearningOperationsConfig)
+    staffing: StaffingOperationsConfig = Field(default_factory=StaffingOperationsConfig)
+
+
 class SystemConfig(BaseModel):
     opc_home: str = ""
     default_channel: str = "cli"
@@ -944,6 +1024,7 @@ class SystemConfig(BaseModel):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     nu_resource_gen: NUResourceGenConfig = Field(default_factory=NUResourceGenConfig)
+    operations: OperationsConfig = Field(default_factory=OperationsConfig)
     native_runtime: NativeRuntimeConfig = Field(default_factory=NativeRuntimeConfig)
     task_mode: TaskModeConfig = Field(
         default_factory=TaskModeConfig,

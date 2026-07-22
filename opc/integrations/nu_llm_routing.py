@@ -156,6 +156,7 @@ class NULlmRoutingBridge:
         gpu_free_vram_mib: int | None = None,
         hardware_profile: str | None = None,
     ) -> dict[str, Any]:
+        from nu_llm_routing_lib import agentic_tools_metadata, coding_metadata
         from nu_llm_routing_lib.api import route_metadata
 
         extra = {
@@ -171,11 +172,27 @@ class NULlmRoutingBridge:
             ),
             "source_application": "openopc",
         }
+        common = {
+            "hardware_profile": hardware_profile or self.config.hardware_profile or None,
+            "tags": list(tags or ()),
+            "gpu_free_vram_mib": extra.pop("gpu_free_vram_mib"),
+            "extra": extra,
+        }
+        if workload == "agentic_tools":
+            return agentic_tools_metadata(
+                sandboxed_tools=bool(common["extra"].pop("sandboxed_tools", False)),
+                **common,
+            )
+        if workload == "coding":
+            return coding_metadata(**common)
         return route_metadata(
             workload=workload,
-            hardware_profile=(hardware_profile or self.config.hardware_profile or None),
-            tags=list(tags or ()),
-            extra=extra,
+            hardware_profile=common["hardware_profile"],
+            tags=common["tags"],
+            extra={
+                **common["extra"],
+                "gpu_free_vram_mib": common["gpu_free_vram_mib"],
+            },
         )
 
     def _request(self, metadata: Mapping[str, Any]) -> Any:

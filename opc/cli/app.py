@@ -8363,6 +8363,10 @@ async def _run_channel_runtime(config, project: str | None) -> None:
 
 
 # ── Plugins ────────────────────────────────────────────────────────────────
+from opc.cli.operations import register_operations_cli
+
+register_operations_cli(app)
+
 try:
     from opc.plugins.office_ui import register_cli
     register_cli(app)

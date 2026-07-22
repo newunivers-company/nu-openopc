@@ -27,6 +27,35 @@ system:
     archive_live_artifacts: true
     max_timeout_seconds: 900
     max_catalog_results: 50
+  operations:
+    enabled: true
+    evaluation:
+      minimum_total_score: 0.75
+      maximum_regression: 0.05
+      quality_weight: 0.45
+      evidence_weight: 0.20
+      budget_weight: 0.15
+      reliability_weight: 0.10
+      autonomy_weight: 0.10
+    durable:
+      lease_seconds: 30
+      outbox_max_attempts: 5
+      retry_base_seconds: 5
+      retry_max_seconds: 900
+      deadlock_after_seconds: 900
+    learning:
+      minimum_offline_score: 0.75
+      minimum_shadow_score: 0.78
+      minimum_canary_score: 0.80
+      minimum_sample_size: 3
+      maximum_regression: 0.02
+    staffing:
+      quality_weight: 0.35
+      domain_weight: 0.20
+      reliability_weight: 0.15
+      experience_weight: 0.15
+      availability_weight: 0.10
+      cost_weight: 0.05
   native_runtime:
     enabled: true
     stream_llm: true
@@ -132,7 +161,7 @@ system:
         allow_direct_fallback: false
         allow_network: true
         windows:
-          mode: off
+          mode: "off"
           wrapper: none
         linux:
           mode: workspace-write

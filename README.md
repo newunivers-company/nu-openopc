@@ -32,6 +32,7 @@
 - [When To Use OpenOPC](#when-to-use-openopc)
 - [Demos](#demos)
 - [How OpenOPC Works](#how-openopc-works)
+- [Outcome-Driven Operations](#outcome-driven-operations)
 - [Quick Start](#quick-start)
 - [Office UI Guide](#office-ui-guide)
 - [CLI Guide](#cli-guide)
@@ -181,6 +182,12 @@ Execution generates raw experience; Self-Grown turns it into lasting improvement
 - The role inspector can set runtime policy and preferred external agent for Company Mode roles.
 - During execution, Workspace `Agents` and the Execution Progress panel show which role is active, which work item it owns, and which execution agent is doing the concrete work.
 </details>
+
+## Outcome-Driven Operations
+
+OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events/outbox delivery, leases and fencing, bounded recovery, governed learning promotion, unified NU capability planning, evidence-based staffing regret, and secretary Mission Control.
+
+The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md).
 
 ## Quick Start
 

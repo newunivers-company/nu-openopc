@@ -1490,6 +1490,9 @@ class OPCStore:
                 timestamp TEXT NOT NULL
             );
         """)
+        from opc.operations.repository import create_operations_schema
+
+        await create_operations_schema(self._db)
         await self._db.commit()
 
     async def _ensure_schema(self) -> None:

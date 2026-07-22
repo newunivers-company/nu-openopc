@@ -199,7 +199,9 @@ from opc.layer4_tools.todo import create_todo_tools
 from opc.layer4_tools.agent_runtime import create_agent_runtime_tools
 from opc.layer4_tools.nu_llm import create_nu_llm_tools
 from opc.layer4_tools.nu_resource_gen import create_nu_resource_gen_tools
+from opc.layer4_tools.operations import create_operations_tools
 from opc.integrations.nu_resource_gen import NUResourceGenBridge
+from opc.operations.service import OperationsService
 from opc.layer2_organization.heartbeat import HeartbeatScheduler
 from opc.mcp_client import MCPManager
 from opc.layer5_memory.memory_manager import MemoryManager
@@ -410,6 +412,7 @@ class OPCEngine:
         )
         self.llm: LLMProvider | None = None
         self.nu_resource_gen: NUResourceGenBridge | None = None
+        self.operations: OperationsService | None = None
         self.attachment_store: AttachmentStore | None = None
 
         # Layers
@@ -491,6 +494,8 @@ class OPCEngine:
             if getattr(self.company_executor, "runtime", None):
                 self.company_executor.runtime.store = store
                 self.company_executor.runtime.save_runtime_session = store.save_runtime_session
+        if self.operations:
+            self.operations.rebind(store)
 
     def _runtime_config_signature_for(self, config_dir: Path) -> tuple[tuple[str, float], ...]:
         tracked = (
@@ -607,6 +612,15 @@ class OPCEngine:
             opc_home=self.opc_home,
             project_id=self.project_id,
         )
+        if self.config.system.operations.enabled:
+            self.operations = OperationsService(
+                self.store,
+                self.config.system.operations,
+                llm_router=self.llm.nu_router,
+                resource_bridge=self.nu_resource_gen,
+                default_llm_model=self.config.llm.default_model,
+                default_llm_api_base=self.config.llm.api_base,
+            )
 
         # Layer 4: Tools
         self._register_tools()
@@ -635,6 +649,8 @@ class OPCEngine:
         # Layer 3: External Agents
         self.adapter_registry = AdapterRegistry(self.config.agents)
         await self.adapter_registry.initialize()
+        if self.operations is not None:
+            self.operations.bind_adapter_registry(self.adapter_registry)
         self.capability_manager = CapabilityManager(
             config=self.config.capabilities,
             skill_library=self.skills,
@@ -681,9 +697,17 @@ class OPCEngine:
             preferences=self.preferences,
             skills=self.skills,
             policies=self.secretary_policies,
+            mission_control=(
+                self.operations.mission_control if self.operations is not None else None
+            ),
         )
         self.company_runtime_spec_builder = CompanyRuntimeSpecBuilder(self.org_engine, self.llm)
-        self.company_recruiter = CompanyRecruiter(self.llm, self.org_engine, self.talent_market)
+        self.company_recruiter = CompanyRecruiter(
+            self.llm,
+            self.org_engine,
+            self.talent_market,
+            staffing_optimizer=(self.operations.staffing if self.operations is not None else None),
+        )
         self.company_executor = CompanyWorkItemExecutor(
             org_engine=self.org_engine,
             communication=self.communication,
@@ -816,6 +840,9 @@ class OPCEngine:
             self.tool_registry.register(tool)
         if self.nu_resource_gen is not None:
             for tool in create_nu_resource_gen_tools(self.nu_resource_gen):
+                self.tool_registry.register(tool)
+        if self.operations is not None:
+            for tool in create_operations_tools(self.operations):
                 self.tool_registry.register(tool)
         logger.debug(f"Registered {len(self.tool_registry.list_tools())} tools")
 
