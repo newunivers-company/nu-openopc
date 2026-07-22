@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+import os
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 from opc.core.config import OperationsConfig
 from opc.operations.capabilities import UnifiedCapabilityBroker
+from opc.operations.canary import ProviderCanaryService
 from opc.operations.durable import DurableRunKernel
 from opc.operations.evaluation import OutcomeEvaluator
 from opc.operations.learning import LearningAssetManager
 from opc.operations.mission_control import MissionControlService
 from opc.operations.outbox import OutboxDispatcher, event_bus_handler
 from opc.operations.repository import OperationsRepository
+from opc.operations.resource_pipeline import ApprovedResourcePipeline, ResourceApprovalTokenIssuer
+from opc.operations.routing_outcomes import RoutingOutcomeService
 from opc.operations.staffing import StaffingOptimizer
 
 
@@ -47,6 +52,23 @@ class OperationsService:
             default_llm_transport_ready=default_llm_transport_ready,
         )
         self.staffing = StaffingOptimizer(self.repository, self.config.staffing)
+        self.canaries = ProviderCanaryService(self.repository, self.capabilities)
+        self.routing_outcomes = RoutingOutcomeService(self.repository, self.learning)
+        approval_secret = os.environ.get("OPENOPC_RESOURCE_APPROVAL_SECRET", "")
+        self.resource_pipeline = (
+            ApprovedResourcePipeline(
+                self.capabilities,
+                resource_bridge,
+                artifact_root=Path(store.db_path).parent / "operations" / "resource_pipelines",
+                approval_issuer=(
+                    ResourceApprovalTokenIssuer(approval_secret)
+                    if len(approval_secret.encode("utf-8")) >= 16
+                    else None
+                ),
+            )
+            if resource_bridge is not None
+            else None
+        )
         self.mission_control = MissionControlService(self.repository, self.durable)
         self.outbox_dispatcher: OutboxDispatcher | None = None
 
@@ -55,6 +77,25 @@ class OperationsService:
 
     def bind_adapter_registry(self, registry: Any | None) -> None:
         self.capabilities.bind_adapter_registry(registry)
+
+    async def execute_llm(
+        self,
+        request: Any,
+        llm_provider: Any,
+        messages: Sequence[Mapping[str, Any]],
+        **chat_kwargs: Any,
+    ) -> tuple[Any, Any]:
+        """Execute an LLM through the persisted capability route contract."""
+
+        async def execute(route: Any, parsed: Any) -> Any:
+            return await llm_provider.chat(
+                [dict(item) for item in messages],
+                task_type=parsed.task_type,
+                route_contract=route.to_dict(),
+                **chat_kwargs,
+            )
+
+        return await self.capabilities.execute(request, execute)
 
     async def start_outbox_dispatcher(self, event_bus: Any) -> None:
         if not self.config.durable.outbox_dispatcher_enabled:

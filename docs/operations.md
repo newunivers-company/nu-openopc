@@ -6,10 +6,12 @@ OpenOPC's operating kernel turns the Self-Built → Self-Run → Self-Grown visi
 
 1. A `GoalContract` fixes the objective, non-goals, deliverables, acceptance criteria, evidence requirements, budgets, deadline, and human gates. Updates require the next version and prior versions remain queryable.
 2. A `RunManifest` pins the exact goal version, organization, source revision, model/provider/skill versions, and route decisions used for one attempt.
-3. The durable kernel records append-only events and transactional outbox deliveries under leases and fencing tokens.
-4. A `RunScorecard` deterministically evaluates quality, evidence, budget, reliability, and autonomy.
-5. Role outcomes feed staffing evidence. Candidate memories, skills, and policies enter a governed learning lifecycle.
-6. Mission Control aggregates risks and recommended actions for the secretary, CLI, and agent tools.
+3. Every brokered call persists a `RouteExecutionContract` before execution, then verifies that the actual provider, model, or candidate is the planned primary or an approved fallback.
+4. Every completed call persists a `ProviderUsageEvent`. Unknown subscription usage stays explicitly unmeasured with null token and cost fields; it is never converted to zero.
+5. The durable kernel records append-only events and transactional outbox deliveries under leases and fencing tokens.
+6. A `RunScorecard` deterministically evaluates quality, evidence, budget, reliability, and autonomy, and settles an eligible goal in the same database transaction.
+7. Role and route outcomes feed staffing and shadow-policy evidence. Candidate memories, skills, and policies enter a governed learning lifecycle.
+8. Mission Control aggregates risks, provider SLOs, unmeasured usage, and recommended actions for the secretary, CLI, and agent tools.
 
 All records live in the existing project-scoped database at `.opc/projects/<project>/tasks.db`. Cross-project writes are rejected.
 
@@ -147,6 +149,14 @@ A stale worker cannot write with a fencing token after another owner takes over 
 
 When the OpenOPC engine is running, the configured outbox dispatcher claims pending deliveries in bounded batches, publishes them to the internal event bus, and acknowledges them with the claim's fencing token. Handler failures are retried with the durable backoff policy and move to `dead_letter` after the configured attempt limit. Shutdown stops the dispatcher before closing the store. Set `system.operations.durable.outbox_dispatcher_enabled: false` only when a separate process owns delivery.
 
+For an independently deployed consumer, use a stable consumer ID. Delivery receipts survive worker restarts and prevent a successfully acknowledged message from being handled twice by that consumer:
+
+```bash
+uv run opc ops outbox work --consumer-id audit-v1 --batch-size 50 --project demo
+```
+
+The database boundary is at-least-once: a process may perform an external side effect and fail before acknowledging it. External handlers must therefore pass the durable `message_id` as their idempotency key. `outbox_delivery_receipts` provides consumer-side deduplication inside OpenOPC; it cannot make a third-party API atomic.
+
 ## Governed Self-Grown assets
 
 Learned memory, skill, and policy assets follow this state machine:
@@ -172,6 +182,14 @@ uv run opc ops learning rollback <asset-id> --reason "quality incident" --projec
 
 Only promoted and non-expired assets are returned by `operations_active_learning`.
 
+Measured execution outcomes can propose a routing asset, but never activate one automatically:
+
+```bash
+uv run opc ops learning propose-routing --min-samples 3 --project demo
+```
+
+Eligibility requires enough samples, at least 90% successful execution, passing scorecard evidence, at least 0.8 average quality, and at least 80% measured usage. The result remains a `candidate` with `application_mode=shadow_only`, `automatic_promotion=false`, and the normal offline → shadow → canary release gates. A subscription route whose usage is unknown cannot supply measured evidence by itself.
+
 ## Unified capability broker
 
 The broker plans three capability kinds through one audit contract:
@@ -192,6 +210,62 @@ The agent tool `operations_capability_plan` is permanently dry-run. CLI requests
 uv run opc ops capability plan --request capability-request.json --project demo
 ```
 
+Execution through `OperationsService.execute_llm()` first freezes the selected route, ordered fallbacks, request snapshot, budget, and expiry in a `RouteExecutionContract`. The LLM bridge receives that contract and may only try those candidates in that order. A provider/model outside the contract, an expired contract, or a reported cost above its ceiling fails closed and is recorded as a contract violation or budget exceedance.
+
+Subscription CLIs often do not expose trustworthy token or cost counters. Their successful responses are recorded with `measured=false`, `source=unknown`, and null token/cost values. This is a valid execution result but not evidence that the call was free.
+
+## Provider canaries and SLOs
+
+Status canaries persist provider, model, readiness, latency, model drift, and normalized failure category without generating content:
+
+```bash
+uv run opc ops capability canary --request capability-request.json \
+  --expected-model gpt-5.6-sol --project demo
+uv run opc ops capability slo --availability-target 0.95 --project demo
+```
+
+SLO summaries report sample count, availability, p50/p95 latency, consecutive failures, and model-drift count by provider. Mission Control raises an SLO alert after at least three samples fall below 95% availability and separately exposes unmeasured usage. Live canaries exist at the service layer only and require both `allow_live=true`, explicit confirmation, and an injected executor; the CLI intentionally exposes only the no-generation canary.
+
+## Approval-gated resource pipeline
+
+`ops resource run` composes the shared NU planner, provider-specific prompt evaluation, candidate readiness, generation policy, and a grounded artifact-quality gate. A request defaults to dry-run and the real local `local_gemma4_12b_nvfp4` VLM candidate for QA planning:
+
+```json
+{
+  "prompt": "A cinematic vertical portrait with consistent character identity",
+  "candidate_id": "local_comfyui_krea2_t2i",
+  "task_type": "image_generation",
+  "allow_live": false,
+  "require_free": true,
+  "max_cost_usd": 0.0,
+  "gpu_free_vram_mib": 12000,
+  "hardware_profile": "Ampere sm_86"
+}
+```
+
+```bash
+uv run opc ops resource run --request resource-request.json --project demo
+```
+
+Live generation requires all of the following gates:
+
+1. `system.nu_resource_gen.allow_live: true` and the exact candidate in `allowed_live_candidates`;
+2. a passing shared prompt evaluation and transport/hardware readiness;
+3. `allow_live=true` and `confirm_live=true` in the request;
+4. `OPENOPC_RESOURCE_APPROVAL_SECRET` containing at least 16 bytes;
+5. a short-lived HMAC approval bound to the exact project, candidate, prompt hash, and cost ceiling;
+6. the underlying provider's credential, billing, identity, publication, and policy checks.
+
+Issue the approval only after reviewing the dry plan, then copy the returned token into the otherwise unchanged request:
+
+```bash
+OPENOPC_RESOURCE_APPROVAL_SECRET='<operator-managed-secret>' \
+  uv run opc ops resource approve --request resource-request.json \
+  --expires-in-seconds 300 --project demo
+```
+
+Approvals are single-use. Prompt, candidate, project, expiry, or cost changes invalidate them. Generated artifacts cannot pass automatically without a configured VLM executor returning a score, grounded findings, and evidence; otherwise the result remains `review`. Simulation candidates, including `local_vlm_lab_mock`, are useful for schema tests only and are never production quality proof. GPU-backed live routes also require explicit hardware profile and free-VRAM evidence and fail closed on architecture or capacity mismatch.
+
 ## Staffing evidence and regret
 
 The staffing optimizer combines quality, domain fit, reliability, experience, availability, and cost. Historical `RoleOutcome` rows from scorecards replace cold-start estimates when available. A declared cost ceiling is a hard eligibility constraint, not merely a ranking penalty. The recruiter receives the recommendation; its deterministic fallback selects it directly.
@@ -206,7 +280,7 @@ uv run opc ops staffing observe <decision-id> --observed-score 0.83 \
 
 ## Mission Control
 
-Mission Control is deterministic and model-free. It reports active/blocked runs, failed or missing scorecards, pending and dead-letter deliveries, approval checkpoints, deadlines, learning candidates, promoted assets, tracked score, and cost. Alerts are ordered critical → high → medium → low.
+Mission Control is deterministic and model-free. It reports active/blocked runs, failed or missing scorecards, pending and dead-letter deliveries, approval checkpoints, deadlines, learning candidates, promoted assets, tracked score and cost, provider SLOs, and unmeasured usage. Alerts are ordered critical → high → medium → low.
 
 It is available through:
 
@@ -216,10 +290,12 @@ It is available through:
 
 ## Schema and migration
 
-`OPCStore.initialize()` creates additive schema version 1 tables:
+`OPCStore.initialize()` creates additive schema version 2 tables:
 
 - `goal_contracts`, `goal_contract_versions`, `run_manifests`, `run_scorecards`;
 - `operating_events`, `outbox_messages`, `run_leases`;
+- `outbox_delivery_receipts`, `route_execution_contracts`, `provider_usage_events`;
+- `provider_canary_results`, `resource_approval_uses`;
 - `learning_assets`, `learning_asset_evaluations`;
 - `capability_attempts`, `staffing_decisions`.
 
@@ -237,3 +313,11 @@ uv run python scripts/operations_regression_gate.py \
 ```
 
 Replace the candidate artifact with a generated benchmark scorecard when a live benchmark pipeline is available; the comparison contract and failure behavior remain the same.
+
+CI also builds both private NU dependencies as wheels and verifies only their public facades in an isolated environment. The repeatable golden loop then executes 20 goal → route contract → measured usage → scorecard → atomic goal settlement → canary → outbox → shadow-learning cycles and fails if any invariant is false:
+
+```bash
+uv run python scripts/verify_nu_compatibility.py
+uv run python scripts/operations_golden_e2e.py --iterations 20 \
+  --output-dir .artifacts/operations-golden
+```

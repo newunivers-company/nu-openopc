@@ -45,6 +45,14 @@ class MissionControlService:
         scorecards = await self.repository.list_scorecards(project_id=project_id, limit=1000)
         outbox = await self.repository.list_outbox(limit=5000)
         assets = await self.repository.list_learning_assets(project_id=project_id, limit=1000)
+        usage_events = await self.repository.list_provider_usage_events(
+            project_id=project_id,
+            limit=5000,
+        )
+        canary_results = await self.repository.list_provider_canary_results(
+            project_id=project_id,
+            limit=5000,
+        )
         active_goals = [item for item in goals if item.status == GoalContractStatus.ACTIVE]
         active_runs = [
             item
@@ -74,6 +82,8 @@ class MissionControlService:
         ]
         pending_approvals = await self._pending_approval_count(project_id)
         alerts: list[MissionAlert] = []
+        unmeasured_usage_events = sum(not item.measured for item in usage_events)
+        provider_slo = _provider_slo_summary(canary_results)
 
         for run in active_runs:
             deadlock = await self.durable_kernel.detect_deadlock(run.run_id, now=timestamp)
@@ -205,6 +215,31 @@ class MissionControlService:
                     )
                 )
 
+        if unmeasured_usage_events:
+            alerts.append(
+                MissionAlert(
+                    severity="medium",
+                    kind="unmeasured_provider_usage",
+                    title=f"{unmeasured_usage_events} provider call(s) have unmeasured usage",
+                    detail="Missing token or cost telemetry remains unknown rather than being counted as zero.",
+                    action="Enable provider usage reporting or keep explicit call-count quota guards.",
+                )
+            )
+        for provider, slo in provider_slo.items():
+            if slo["samples"] >= 3 and slo["availability"] < 0.95:
+                alerts.append(
+                    MissionAlert(
+                        severity="high",
+                        kind="provider_slo",
+                        title=f"Provider {provider} is below the 95% availability target",
+                        detail=(
+                            f"Availability {slo['availability']:.1%} over {slo['samples']} canaries; "
+                            f"p95 {slo['p95_latency_ms']:.1f}ms."
+                        ),
+                        action=f"Demote {provider} from primary routing until its canary recovers.",
+                    )
+                )
+
         for asset in assets:
             if asset.status == LearningAssetStatus.PROMOTED and asset.expires_at and asset.expires_at <= timestamp:
                 alerts.append(
@@ -243,6 +278,8 @@ class MissionControlService:
             promoted_assets=len(promoted_assets),
             average_score=(fmean(item.total_score for item in scorecards) if scorecards else 0.0),
             total_cost_usd=sum(item.metrics.cost_usd for item in scorecards),
+            unmeasured_usage_events=unmeasured_usage_events,
+            provider_slo=provider_slo,
             alerts=alerts,
             recommendations=recommendations,
             generated_at=timestamp,
@@ -277,6 +314,10 @@ class MissionControlService:
                 f"Learning {snapshot.learning_candidates} candidates / "
                 f"{snapshot.promoted_assets} promoted · Average score {snapshot.average_score:.3f} · "
                 f"Tracked cost ${snapshot.total_cost_usd:.4f}"
+            ),
+            (
+                f"Provider telemetry {len(snapshot.provider_slo)} tracked / "
+                f"{snapshot.unmeasured_usage_events} unmeasured usage event(s)"
             ),
         ]
         if snapshot.alerts:
@@ -316,3 +357,20 @@ def _recommendations(
     if pending_outbox_count and not any(item.kind in {"dead_letter", "outbox_backlog"} for item in alerts):
         recommendations.append("Keep the outbox dispatcher running until the pending delivery queue drains.")
     return list(dict.fromkeys(recommendations))[:12]
+
+
+def _provider_slo_summary(rows: list[Any]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[Any]] = {}
+    for row in rows:
+        grouped.setdefault(row.provider, []).append(row)
+    result: dict[str, dict[str, Any]] = {}
+    for provider, values in sorted(grouped.items()):
+        latencies = sorted(float(item.latency_ms) for item in values)
+        percentile_index = max(0, min(len(latencies) - 1, int(len(latencies) * 0.95)))
+        result[provider] = {
+            "samples": len(values),
+            "availability": sum(bool(item.success) for item in values) / len(values),
+            "p95_latency_ms": latencies[percentile_index],
+            "model_drift_count": sum(bool(item.model_drift) for item in values),
+        }
+    return result

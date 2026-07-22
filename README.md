@@ -185,7 +185,7 @@ Execution generates raw experience; Self-Grown turns it into lasting improvement
 
 ## Outcome-Driven Operations
 
-OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events with an automatic fenced outbox dispatcher, leases and bounded recovery, explicit goal closure, governed learning promotion, readiness-aware NU capability planning, authenticated Codex/Claude/Grok subscription routing for text-only work, evidence-based staffing regret, and secretary Mission Control.
+OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events and an independently deployable fenced outbox worker, leases and bounded recovery, atomic goal settlement, plan-to-execution route contracts, explicit measured/unmeasured usage records, provider canaries and SLOs, an approval-gated NU resource pipeline, shadow-only outcome routing candidates, authenticated Codex/Claude/Grok subscription routing for text-only work, evidence-based staffing regret, and secretary Mission Control.
 
 The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md).
 

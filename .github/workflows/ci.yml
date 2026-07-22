@@ -36,8 +36,25 @@ jobs:
           enable-cache: true
       - run: uv python install 3.12
       - run: uv sync --locked --extra dev --extra nu
+      - name: Verify NU stable package contracts
+        run: uv run python scripts/verify_nu_compatibility.py
+      - name: Verify NU wheel-only package contracts
+        run: |
+          NU_WHEEL_ROOT="$RUNNER_TEMP/openopc-nu-wheels"
+          uv build --project ../nu-llm-routing-lib --wheel --out-dir "$NU_WHEEL_ROOT/llm"
+          uv build --project ../nu-resource-gen-lib --wheel --out-dir "$NU_WHEEL_ROOT/resource"
+          uv venv "$NU_WHEEL_ROOT/venv" --python 3.12
+          uv pip install --python "$NU_WHEEL_ROOT/venv/bin/python" \
+            "$NU_WHEEL_ROOT"/llm/*.whl "$NU_WHEEL_ROOT"/resource/*.whl
+          "$NU_WHEEL_ROOT/venv/bin/python" scripts/verify_nu_compatibility.py
       - run: uv run ruff check --select E9,F601,F63,F7,F82 opc tests scripts
       - run: uv run pytest -q -p no:cacheprovider
+      - name: Run repeatable operations golden loop
+        run: |
+          uv run python scripts/operations_golden_e2e.py \
+            --iterations 20 \
+            --output-dir "$RUNNER_TEMP/openopc-operations-golden" \
+            > "$RUNNER_TEMP/openopc-operations-golden.stdout.json"
       - name: Enforce operations scorecard regression gate
         run: >
           uv run python scripts/operations_regression_gate.py

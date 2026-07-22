@@ -191,6 +191,46 @@ class NULlmRoutingBridgeTests(unittest.TestCase):
 
 
 class NULlmProviderIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execution_contract_controls_primary_and_fallback_order(self) -> None:
+        provider = LLMProvider(LLMConfig(default_model="openai/default"))
+        cloud = RoutedLLMTarget(
+            provider="cloud",
+            model="openai/cloud",
+            api_base="https://cloud.example/v1",
+            api_key="cloud-key",
+        )
+        local = RoutedLLMTarget(
+            provider="ollama-local",
+            model="openai/local",
+            api_base="http://127.0.0.1:11434/v1",
+            credential_configured=True,
+            transport_ready=True,
+        )
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="local-ok", tool_calls=[]),
+                finish_reason="stop",
+            )],
+            usage=None,
+        )
+
+        with patch.object(provider, "_candidate_targets", return_value=[cloud, local]), patch(
+            "opc.llm.provider.litellm.acompletion",
+            AsyncMock(return_value=response),
+        ) as completion:
+            result = await provider.chat(
+                [{"role": "user", "content": "hello"}],
+                route_contract={
+                    "provider": "ollama-local",
+                    "model": "openai/local",
+                    "alternatives": [{"provider": "cloud", "model": "openai/cloud"}],
+                },
+            )
+
+        self.assertEqual(result["provider"], "ollama-local")
+        self.assertEqual(completion.await_args.kwargs["api_base"], "http://127.0.0.1:11434/v1")
+        self.assertNotIn("api_key", completion.await_args.kwargs)
+
     def test_keyless_routed_target_does_not_inherit_default_api_key(self) -> None:
         provider = LLMProvider(LLMConfig(
             default_model="openai/default-model",
@@ -280,6 +320,20 @@ class NULlmProviderIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["content"], "subscription-ok")
         self.assertEqual(result["model"], "claude-sonnet-test")
         self.assertEqual(result["usage"], {"prompt_tokens": 3, "completion_tokens": 2})
+        self.assertEqual(
+            result["usage_accounting"],
+            {
+                "measured": True,
+                "source": "provider_reported",
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "total_tokens": 5,
+                "cost_usd": 0.01,
+                "subscription_quota": {},
+            },
+        )
+        self.assertEqual(provider.stats["measured_calls"], 2)
+        self.assertEqual(provider.stats["unmeasured_calls"], 0)
         self.assertEqual(
             [event.event_type for event in events],
             ["message_start", "assistant_delta", "usage", "message_stop"],

@@ -9,12 +9,19 @@ from typing import Any, Mapping, TYPE_CHECKING
 
 from opc.operations.models import (
     CapabilityAttempt,
+    GateStatus,
     GoalContract,
+    GoalContractStatus,
     LearningAsset,
     LearningAssetEvaluation,
     OutboxMessage,
+    OutboxDeliveryReceipt,
+    ProviderUsageEvent,
+    ProviderCanaryResult,
+    RouteExecutionContract,
     RunManifest,
     RunScorecard,
+    RunStatus,
     StaffingDecision,
     utc_now,
 )
@@ -23,7 +30,7 @@ if TYPE_CHECKING:
     from opc.database.store import OPCStore, _SQLiteConnectionAdapter
 
 
-OPERATIONS_SCHEMA_VERSION = 1
+OPERATIONS_SCHEMA_VERSION = 2
 
 
 async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
@@ -116,6 +123,17 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
             delivered_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS outbox_delivery_receipts (
+            message_id TEXT NOT NULL,
+            consumer_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            PRIMARY KEY(message_id, consumer_id)
+        );
+
         CREATE TABLE IF NOT EXISTS run_leases (
             run_id TEXT PRIMARY KEY,
             lease_owner TEXT NOT NULL,
@@ -167,6 +185,67 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
             created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS route_execution_contracts (
+            contract_id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL,
+            route_id TEXT NOT NULL UNIQUE,
+            run_id TEXT DEFAULT '',
+            project_id TEXT NOT NULL,
+            capability_kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            planned_provider TEXT DEFAULT '',
+            actual_provider TEXT DEFAULT '',
+            planned_model TEXT DEFAULT '',
+            actual_model TEXT DEFAULT '',
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_usage_events (
+            usage_event_id TEXT PRIMARY KEY,
+            contract_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            route_id TEXT NOT NULL,
+            run_id TEXT DEFAULT '',
+            project_id TEXT NOT NULL,
+            capability_kind TEXT NOT NULL,
+            provider TEXT DEFAULT '',
+            model TEXT DEFAULT '',
+            measured INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL,
+            total_tokens INTEGER,
+            cost_usd REAL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_canary_results (
+            canary_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            capability_kind TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            candidate_id TEXT DEFAULT '',
+            model TEXT DEFAULT '',
+            mode TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            latency_ms REAL NOT NULL,
+            model_drift INTEGER NOT NULL DEFAULT 0,
+            error_category TEXT DEFAULT '',
+            payload TEXT NOT NULL,
+            checked_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS resource_approval_uses (
+            token_digest TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            claims TEXT NOT NULL,
+            consumed_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS staffing_decisions (
             decision_id TEXT PRIMARY KEY,
             run_id TEXT DEFAULT '',
@@ -195,12 +274,28 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
             ON operating_events(run_id, sequence);
         CREATE INDEX IF NOT EXISTS idx_outbox_claim
             ON outbox_messages(status, next_attempt_at, lease_expires_at);
+        CREATE INDEX IF NOT EXISTS idx_outbox_receipts_consumer_completed
+            ON outbox_delivery_receipts(consumer_id, completed_at);
         CREATE INDEX IF NOT EXISTS idx_learning_assets_project_status
             ON learning_assets(project_id, status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_learning_asset_eval_asset_phase
             ON learning_asset_evaluations(asset_id, phase, evaluated_at);
         CREATE INDEX IF NOT EXISTS idx_capability_attempts_run_created
             ON capability_attempts(run_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_route_contracts_project_status
+            ON route_execution_contracts(project_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_route_contracts_run_created
+            ON route_execution_contracts(run_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_usage_project_created
+            ON provider_usage_events(project_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_usage_provider_created
+            ON provider_usage_events(provider, created_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_canary_project_checked
+            ON provider_canary_results(project_id, checked_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_canary_provider_checked
+            ON provider_canary_results(provider, checked_at);
+        CREATE INDEX IF NOT EXISTS idx_resource_approval_project_consumed
+            ON resource_approval_uses(project_id, consumed_at);
         CREATE INDEX IF NOT EXISTS idx_staffing_decisions_run_role
             ON staffing_decisions(run_id, role_id, created_at);
         """
@@ -491,6 +586,130 @@ class OperationsRepository:
         await self.db.commit()
         return scorecard
 
+    async def save_scorecard_and_settle_goal(
+        self,
+        scorecard: RunScorecard,
+        *,
+        evaluated_goal: GoalContract,
+        manifest: RunManifest,
+        completion_requested: bool,
+    ) -> tuple[RunScorecard, bool]:
+        """Persist a scorecard and its optional goal closure in one transaction."""
+
+        self._assert_project(scorecard.project_id)
+        if (
+            scorecard.run_id != manifest.run_id
+            or scorecard.goal_id != manifest.goal_id
+            or scorecard.project_id != manifest.project_id
+        ):
+            raise ValueError("scorecard identity must match its run manifest")
+        if evaluated_goal.goal_id != manifest.goal_id:
+            raise ValueError("evaluated goal must match its run manifest")
+
+        async with self.transaction_lock:
+            async with self.db.execute("BEGIN IMMEDIATE") as cursor:
+                if cursor is None:
+                    raise RuntimeError("could not begin scorecard settlement transaction")
+            try:
+                latest_payload = await self._payload_one(
+                    "SELECT payload FROM goal_contracts WHERE goal_id = ?",
+                    (evaluated_goal.goal_id,),
+                )
+                latest = GoalContract.from_dict(latest_payload) if latest_payload else None
+                completed = False
+                if (
+                    completion_requested
+                    and scorecard.gate_status == GateStatus.PASS
+                    and latest is not None
+                    and latest.status == GoalContractStatus.ACTIVE
+                    and latest.version == manifest.goal_version
+                ):
+                    active_statuses = (
+                        RunStatus.PENDING.value,
+                        RunStatus.RUNNING.value,
+                        RunStatus.BLOCKED.value,
+                    )
+                    async with self.db.execute(
+                        """SELECT COUNT(*) FROM run_manifests
+                           WHERE goal_id = ? AND status IN (?, ?, ?)""",
+                        (latest.goal_id, *active_statuses),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                    if int(row[0] if row else 0) == 0:
+                        terminal = GoalContract.from_dict(latest.to_dict())
+                        terminal.version = latest.version + 1
+                        terminal.status = GoalContractStatus.COMPLETED
+                        terminal.updated_at = utc_now()
+                        terminal.metadata = {
+                            **dict(latest.metadata),
+                            "completion": {
+                                "source": "passing_run_scorecard",
+                                "run_id": manifest.run_id,
+                                "scorecard_id": scorecard.scorecard_id,
+                                "score": scorecard.total_score,
+                            },
+                        }
+                        terminal_payload = _dump(terminal.to_dict())
+                        await self.db.execute(
+                            """INSERT INTO goal_contract_versions
+                               (goal_id, version, project_id, organization_id, payload, recorded_at)
+                               VALUES (?, ?, ?, ?, ?, ?)""",
+                            (
+                                terminal.goal_id,
+                                terminal.version,
+                                terminal.project_id,
+                                terminal.organization_id,
+                                terminal_payload,
+                                terminal.updated_at.isoformat(),
+                            ),
+                        )
+                        await self.db.execute(
+                            """UPDATE goal_contracts SET status = ?, version = ?, payload = ?,
+                               updated_at = ? WHERE goal_id = ? AND version = ?""",
+                            (
+                                terminal.status.value,
+                                terminal.version,
+                                terminal_payload,
+                                terminal.updated_at.isoformat(),
+                                terminal.goal_id,
+                                latest.version,
+                            ),
+                        )
+                        scorecard.metadata["goal_auto_completed"] = True
+                        completed = True
+
+                await self.db.execute(
+                    """INSERT INTO run_scorecards
+                       (scorecard_id, run_id, goal_id, project_id, gate_status, total_score,
+                        baseline_label, payload, evaluated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(run_id) DO UPDATE SET
+                           scorecard_id = excluded.scorecard_id,
+                           goal_id = excluded.goal_id,
+                           project_id = excluded.project_id,
+                           gate_status = excluded.gate_status,
+                           total_score = excluded.total_score,
+                           baseline_label = excluded.baseline_label,
+                           payload = excluded.payload,
+                           evaluated_at = excluded.evaluated_at""",
+                    (
+                        scorecard.scorecard_id,
+                        scorecard.run_id,
+                        scorecard.goal_id,
+                        scorecard.project_id,
+                        scorecard.gate_status.value,
+                        scorecard.total_score,
+                        scorecard.baseline_label,
+                        _dump(scorecard.to_dict()),
+                        scorecard.evaluated_at.isoformat(),
+                    ),
+                )
+                await self.db.commit()
+                return scorecard, completed
+            except Exception:
+                await self.db.rollback()
+                raise
+
     async def get_scorecard(self, run_id: str) -> RunScorecard | None:
         payload = await self._payload_one(
             "SELECT payload FROM run_scorecards WHERE run_id = ?",
@@ -601,6 +820,46 @@ class OperationsRepository:
         async with self.db.execute(query, params) as cursor:
             rows = await cursor.fetchall()
         return [_outbox_from_row(row) for row in rows]
+
+    async def save_outbox_delivery_receipt(
+        self,
+        receipt: OutboxDeliveryReceipt,
+    ) -> OutboxDeliveryReceipt:
+        if not receipt.message_id.strip() or not receipt.consumer_id.strip():
+            raise ValueError("outbox receipt message_id and consumer_id are required")
+        await self.db.execute(
+            """INSERT INTO outbox_delivery_receipts
+               (message_id, consumer_id, event_id, status, payload, created_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(message_id, consumer_id) DO UPDATE SET
+                   event_id = excluded.event_id,
+                   status = excluded.status,
+                   payload = excluded.payload,
+                   completed_at = excluded.completed_at""",
+            (
+                receipt.message_id,
+                receipt.consumer_id,
+                receipt.event_id,
+                receipt.status,
+                _dump(receipt.to_dict()),
+                receipt.created_at.isoformat(),
+                receipt.completed_at.isoformat(),
+            ),
+        )
+        await self.db.commit()
+        return receipt
+
+    async def get_outbox_delivery_receipt(
+        self,
+        message_id: str,
+        consumer_id: str,
+    ) -> OutboxDeliveryReceipt | None:
+        payload = await self._payload_one(
+            """SELECT payload FROM outbox_delivery_receipts
+               WHERE message_id = ? AND consumer_id = ?""",
+            (message_id, consumer_id),
+        )
+        return OutboxDeliveryReceipt.from_dict(payload) if payload else None
 
     async def save_learning_asset(self, asset: LearningAsset, *, commit: bool = True) -> LearningAsset:
         asset.validate()
@@ -774,6 +1033,255 @@ class OperationsRepository:
         params.append(max(1, min(int(limit), 1000)))
         return [CapabilityAttempt.from_dict(item) for item in await self._payload_all(query, params)]
 
+    async def save_route_execution_contract(
+        self,
+        contract: RouteExecutionContract,
+    ) -> RouteExecutionContract:
+        contract.validate()
+        self._assert_project(contract.project_id)
+        now = utc_now().isoformat()
+        await self.db.execute(
+            """INSERT INTO route_execution_contracts
+               (contract_id, request_id, route_id, run_id, project_id, capability_kind,
+                status, planned_provider, actual_provider, planned_model, actual_model,
+                payload, created_at, updated_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(contract_id) DO UPDATE SET
+                   status = excluded.status,
+                   actual_provider = excluded.actual_provider,
+                   actual_model = excluded.actual_model,
+                   payload = excluded.payload,
+                   updated_at = excluded.updated_at,
+                   completed_at = excluded.completed_at""",
+            (
+                contract.contract_id,
+                contract.request_id,
+                contract.route_id,
+                contract.run_id,
+                contract.project_id,
+                contract.capability_kind.value,
+                contract.status,
+                contract.planned_provider,
+                contract.actual_provider,
+                contract.planned_model,
+                contract.actual_model,
+                _dump(contract.to_dict()),
+                contract.created_at.isoformat(),
+                now,
+                _iso(contract.completed_at),
+            ),
+        )
+        await self.db.commit()
+        return contract
+
+    async def get_route_execution_contract(
+        self,
+        contract_id: str,
+    ) -> RouteExecutionContract | None:
+        payload = await self._payload_one(
+            "SELECT payload FROM route_execution_contracts WHERE contract_id = ?",
+            (contract_id,),
+        )
+        return RouteExecutionContract.from_dict(payload) if payload else None
+
+    async def list_route_execution_contracts(
+        self,
+        *,
+        project_id: str | None = None,
+        run_id: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[RouteExecutionContract]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        clean_statuses = [str(item).strip() for item in statuses or [] if str(item).strip()]
+        if clean_statuses:
+            clauses.append(f"status IN ({','.join('?' for _ in clean_statuses)})")
+            params.extend(clean_statuses)
+        query = "SELECT payload FROM route_execution_contracts"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 5000)))
+        return [
+            RouteExecutionContract.from_dict(item)
+            for item in await self._payload_all(query, params)
+        ]
+
+    async def save_provider_usage_event(
+        self,
+        usage: ProviderUsageEvent,
+    ) -> ProviderUsageEvent:
+        usage.validate()
+        self._assert_project(usage.project_id)
+        await self.db.execute(
+            """INSERT INTO provider_usage_events
+               (usage_event_id, contract_id, request_id, route_id, run_id, project_id,
+                capability_kind, provider, model, measured, source, total_tokens,
+                cost_usd, payload, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(usage_event_id) DO UPDATE SET
+                   measured = excluded.measured,
+                   source = excluded.source,
+                   total_tokens = excluded.total_tokens,
+                   cost_usd = excluded.cost_usd,
+                   payload = excluded.payload""",
+            (
+                usage.usage_event_id,
+                usage.contract_id,
+                usage.request_id,
+                usage.route_id,
+                usage.run_id,
+                usage.project_id,
+                usage.capability_kind.value,
+                usage.provider,
+                usage.model,
+                int(usage.measured),
+                usage.source,
+                usage.total_tokens,
+                usage.cost_usd,
+                _dump(usage.to_dict()),
+                usage.created_at.isoformat(),
+            ),
+        )
+        await self.db.commit()
+        return usage
+
+    async def list_provider_usage_events(
+        self,
+        *,
+        project_id: str | None = None,
+        run_id: str | None = None,
+        provider: str | None = None,
+        limit: int = 100,
+    ) -> list[ProviderUsageEvent]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("project_id", project_id),
+            ("run_id", run_id),
+            ("provider", provider),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        query = "SELECT payload FROM provider_usage_events"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 5000)))
+        return [ProviderUsageEvent.from_dict(item) for item in await self._payload_all(query, params)]
+
+    async def save_provider_canary_result(
+        self,
+        result: ProviderCanaryResult,
+    ) -> ProviderCanaryResult:
+        self._assert_project(result.project_id)
+        await self.db.execute(
+            """INSERT INTO provider_canary_results
+               (canary_id, project_id, capability_kind, provider, candidate_id,
+                model, mode, success, latency_ms, model_drift, error_category,
+                payload, checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(canary_id) DO UPDATE SET
+                   success = excluded.success,
+                   latency_ms = excluded.latency_ms,
+                   model_drift = excluded.model_drift,
+                   error_category = excluded.error_category,
+                   payload = excluded.payload,
+                   checked_at = excluded.checked_at""",
+            (
+                result.canary_id,
+                result.project_id,
+                result.capability_kind.value,
+                result.provider,
+                result.candidate_id,
+                result.model,
+                result.mode,
+                int(result.success),
+                result.latency_ms,
+                int(result.model_drift),
+                result.error_category,
+                _dump(result.to_dict()),
+                result.checked_at.isoformat(),
+            ),
+        )
+        await self.db.commit()
+        return result
+
+    async def list_provider_canary_results(
+        self,
+        *,
+        project_id: str | None = None,
+        provider: str | None = None,
+        limit: int = 100,
+    ) -> list[ProviderCanaryResult]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if provider:
+            clauses.append("provider = ?")
+            params.append(provider)
+        query = "SELECT payload FROM provider_canary_results"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY checked_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 5000)))
+        return [ProviderCanaryResult.from_dict(item) for item in await self._payload_all(query, params)]
+
+    async def consume_resource_approval(
+        self,
+        *,
+        token_digest: str,
+        project_id: str,
+        candidate_id: str,
+        request_id: str,
+        claims: Mapping[str, Any],
+    ) -> None:
+        """Consume a signed live-resource approval exactly once."""
+
+        self._assert_project(project_id)
+        normalized = str(token_digest or "").strip()
+        if not normalized:
+            raise ValueError("resource approval token digest is required")
+        async with self.transaction_lock:
+            async with self.db.execute("BEGIN IMMEDIATE") as cursor:
+                if cursor is None:
+                    raise RuntimeError("could not begin resource approval transaction")
+            try:
+                async with self.db.execute(
+                    "SELECT 1 FROM resource_approval_uses WHERE token_digest = ?",
+                    (normalized,),
+                ) as cursor:
+                    existing = await cursor.fetchone()
+                if existing is not None:
+                    raise PermissionError("resource approval token has already been consumed")
+                await self.db.execute(
+                    """INSERT INTO resource_approval_uses
+                       (token_digest, project_id, candidate_id, request_id, claims, consumed_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        normalized,
+                        project_id,
+                        candidate_id,
+                        request_id,
+                        _dump(dict(claims)),
+                        utc_now().isoformat(),
+                    ),
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+
     async def save_staffing_decision(self, decision: StaffingDecision) -> StaffingDecision:
         self._assert_project(decision.project_id)
         decision.updated_at = utc_now()
@@ -845,8 +1353,13 @@ class OperationsRepository:
             "run_scorecards",
             "operating_events",
             "outbox_messages",
+            "outbox_delivery_receipts",
             "learning_assets",
             "capability_attempts",
+            "route_execution_contracts",
+            "provider_usage_events",
+            "provider_canary_results",
+            "resource_approval_uses",
             "staffing_decisions",
         }
         if table not in allowed:

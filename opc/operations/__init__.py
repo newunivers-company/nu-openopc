@@ -11,6 +11,9 @@ from opc.operations.models import (
     CapabilityKind,
     CapabilityRequest,
     CapabilityRoute,
+    ProviderCanaryResult,
+    ProviderUsageEvent,
+    RouteExecutionContract,
     GoalContract,
     GateStatus,
     LearningAsset,
@@ -26,11 +29,19 @@ from opc.operations.models import (
     StaffingDecision,
 )
 from opc.operations.capabilities import UnifiedCapabilityBroker
+from opc.operations.canary import ProviderCanaryService
 from opc.operations.durable import DurableRunKernel
 from opc.operations.evaluation import OutcomeEvaluator
 from opc.operations.learning import LearningAssetManager
 from opc.operations.mission_control import MissionControlService
 from opc.operations.repository import OperationsRepository
+from opc.operations.resource_pipeline import (
+    ApprovedResourcePipeline,
+    ResourceApprovalTokenIssuer,
+    ResourcePipelineRequest,
+    ResourcePipelineResult,
+)
+from opc.operations.routing_outcomes import RoutingOutcomeService
 from opc.operations.service import OperationsService
 from opc.operations.staffing import StaffingOptimizer
 
@@ -39,6 +50,9 @@ __all__ = [
     "CapabilityKind",
     "CapabilityRequest",
     "CapabilityRoute",
+    "ProviderCanaryResult",
+    "ProviderUsageEvent",
+    "RouteExecutionContract",
     "GoalContract",
     "GateStatus",
     "LearningAsset",
@@ -60,4 +74,10 @@ __all__ = [
     "OutcomeEvaluator",
     "StaffingOptimizer",
     "UnifiedCapabilityBroker",
+    "ProviderCanaryService",
+    "ApprovedResourcePipeline",
+    "ResourceApprovalTokenIssuer",
+    "ResourcePipelineRequest",
+    "ResourcePipelineResult",
+    "RoutingOutcomeService",
 ]

@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Mapping
 from urllib.parse import urlparse
 
 from opc.core.windows_ssl import sanitize_windows_sslkeylogfile
@@ -215,6 +215,9 @@ class LLMProvider:
         self._total_tokens_in = 0
         self._total_tokens_out = 0
         self._total_cost = 0.0
+        self._measured_calls = 0
+        self._unmeasured_calls = 0
+        self._calls_by_provider: dict[str, int] = {}
 
         self._api_key = config.api_key or (
             os.environ.get(config.api_key_env) if config.api_key_env else None
@@ -246,6 +249,9 @@ class LLMProvider:
             "tokens_in": self._total_tokens_in,
             "tokens_out": self._total_tokens_out,
             "estimated_cost": self._total_cost,
+            "measured_calls": self._measured_calls,
+            "unmeasured_calls": self._unmeasured_calls,
+            "calls_by_provider": dict(sorted(self._calls_by_provider.items())),
         }
         if self._last_route_target is not None:
             stats["nu_route_target"] = self._last_route_target.safe_dict()
@@ -274,6 +280,56 @@ class LLMProvider:
         if routed:
             return routed
         return [self._configured_target(self.config.default_model)]
+
+    def _targets_for_execution_contract(
+        self,
+        targets: list[RoutedLLMTarget],
+        contract: Mapping[str, Any] | Any | None,
+    ) -> list[RoutedLLMTarget]:
+        if contract is None:
+            return targets
+        payload = (
+            dict(contract)
+            if isinstance(contract, Mapping)
+            else dict(contract.to_dict())
+            if callable(getattr(contract, "to_dict", None))
+            else {}
+        )
+        order = [
+            dict(item)
+            for item in payload.get("fallback_order", []) or []
+            if isinstance(item, Mapping)
+        ]
+        if not order:
+            primary = {
+                "provider": payload.get("planned_provider", payload.get("provider", "")),
+                "model": payload.get("planned_model", payload.get("model", "")),
+            }
+            order = [primary]
+            order.extend(
+                dict(item)
+                for item in payload.get("alternatives", []) or []
+                if isinstance(item, Mapping)
+            )
+        selected: list[RoutedLLMTarget] = []
+        for planned in order:
+            provider = str(planned.get("provider", "") or "")
+            model = str(planned.get("model", "") or "")
+            match = next(
+                (
+                    target
+                    for target in targets
+                    if target not in selected
+                    and target.provider == provider
+                    and (not model or target.model == model)
+                ),
+                None,
+            )
+            if match is not None:
+                selected.append(match)
+        if not selected:
+            raise RuntimeError("no currently available LLM target satisfies the execution contract")
+        return selected
 
     def _select_target(
         self,
@@ -571,9 +627,13 @@ class LLMProvider:
         task_type: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        route_contract: Mapping[str, Any] | Any | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        targets = self._candidate_targets(task_type, has_tools=bool(tools))
+        targets = self._targets_for_execution_contract(
+            self._candidate_targets(task_type, has_tools=bool(tools)),
+            route_contract,
+        )
         temp = temperature if temperature is not None else self.config.temperature
         requested_max = max_tokens if max_tokens is not None else self.config.max_tokens
         timeout_seconds = float(kwargs.pop("timeout", kwargs.pop("timeout_seconds", 120.0)) or 120.0)
@@ -652,14 +712,18 @@ class LLMProvider:
 
         usage = getattr(response, "usage", None)
         cost = 0.0
+        accounted_cost: float | None = None
         if usage:
             self._total_tokens_in += getattr(usage, "prompt_tokens", 0)
             self._total_tokens_out += getattr(usage, "completion_tokens", 0)
             try:
                 cost = litellm.completion_cost(completion_response=response)
+                accounted_cost = max(0.0, float(cost))
                 self._total_cost += cost
             except Exception:
                 pass
+        measured = usage is not None
+        self._record_call_accounting(target.provider, measured=measured)
 
         choice = response.choices[0]
         message = choice.message
@@ -669,10 +733,25 @@ class LLMProvider:
             "tool_calls": [],
             "finish_reason": choice.finish_reason,
             "model": model,
+            "provider": target.provider,
             "cost": cost,
             "usage": {
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
                 "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+            },
+            "usage_accounting": {
+                "measured": measured,
+                "source": "provider_reported" if measured else "unknown",
+                "input_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
+                "output_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+                "total_tokens": (
+                    int(getattr(usage, "prompt_tokens", 0) or 0)
+                    + int(getattr(usage, "completion_tokens", 0) or 0)
+                    if usage
+                    else None
+                ),
+                "cost_usd": accounted_cost,
+                "subscription_quota": {},
             },
         }
 
@@ -698,12 +777,18 @@ class LLMProvider:
         target: RoutedLLMTarget,
     ) -> dict[str, Any]:
         usage = dict(getattr(response, "usage", {}) or {})
+        measured = any(
+            key in usage
+            for key in ("input_tokens", "output_tokens", "total_tokens", "total_cost_usd")
+        )
         prompt_tokens = int(usage.get("input_tokens", 0) or 0)
         completion_tokens = int(usage.get("output_tokens", 0) or 0)
         cost = float(usage.get("total_cost_usd", 0.0) or 0.0)
         self._total_tokens_in += prompt_tokens
         self._total_tokens_out += completion_tokens
         self._total_cost += cost
+        self._record_call_accounting(target.provider, measured=measured)
+        quota = usage.get("subscription_quota")
         return {
             "content": str(getattr(response, "content", "") or ""),
             "tool_calls": [],
@@ -715,7 +800,24 @@ class LLMProvider:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
             },
+            "usage_accounting": {
+                "measured": measured,
+                "source": "provider_reported" if measured else "unknown",
+                "input_tokens": prompt_tokens if measured else None,
+                "output_tokens": completion_tokens if measured else None,
+                "total_tokens": prompt_tokens + completion_tokens if measured else None,
+                "cost_usd": cost if "total_cost_usd" in usage else None,
+                "subscription_quota": dict(quota) if isinstance(quota, dict) else {},
+            },
         }
+
+    def _record_call_accounting(self, provider: str, *, measured: bool) -> None:
+        normalized = str(provider or "unknown")
+        self._calls_by_provider[normalized] = self._calls_by_provider.get(normalized, 0) + 1
+        if measured:
+            self._measured_calls += 1
+        else:
+            self._unmeasured_calls += 1
 
     def normalize_stream_event(
         self,
@@ -791,9 +893,15 @@ class LLMProvider:
         task_type: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        route_contract: Mapping[str, Any] | Any | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[RuntimeLLMEvent]:
-        target = self._select_target(task_type, has_tools=bool(tools))
+        targets = self._targets_for_execution_contract(
+            self._candidate_targets(task_type, has_tools=bool(tools)),
+            route_contract,
+        )
+        target = targets[0]
+        self._last_route_target = target
         if target.transport_kind in {"subscription_cli", "nu_native"}:
             try:
                 result = await self.chat(
@@ -802,6 +910,7 @@ class LLMProvider:
                     task_type=task_type,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    route_contract=route_contract,
                     **kwargs,
                 )
             except Exception as exc:

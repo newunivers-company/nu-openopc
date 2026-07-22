@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from datetime import timedelta
 from pathlib import Path
@@ -152,6 +153,40 @@ class OperationsEvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest.status, GoalContractStatus.COMPLETED)
         self.assertEqual(latest.version, 2)
         self.assertEqual(pinned.status, GoalContractStatus.ACTIVE)
+
+    async def test_concurrent_passing_scorecards_settle_goal_once_atomically(self) -> None:
+        await self._create_run(run_id="run-final-a")
+        await self._create_run(run_id="run-final-b")
+        for run_id in ("run-final-a", "run-final-b"):
+            manifest = await self.repository.get_manifest(run_id)
+            assert manifest is not None
+            manifest.metadata["complete_goal_on_pass"] = True
+            await self.repository.save_manifest(manifest)
+
+        async def evaluate(run_id: str):
+            return await self.evaluator.evaluate_run(
+                run_id,
+                criterion_scores={"tests": 1.0, "docs": 1.0},
+                evidence={
+                    "tests": [f"artifact://{run_id}-tests"],
+                    "docs": [f"artifact://{run_id}-docs"],
+                    "test_report": [f"artifact://{run_id}-tests"],
+                },
+                metrics=RunMetrics(total_attempts=1),
+            )
+
+        first, second = await asyncio.gather(
+            evaluate("run-final-a"),
+            evaluate("run-final-b"),
+        )
+        latest = await self.repository.get_goal("goal-1")
+        assert latest is not None
+        self.assertEqual(latest.status, GoalContractStatus.COMPLETED)
+        self.assertEqual(latest.version, 2)
+        self.assertEqual(
+            sum(bool(item.metadata.get("goal_auto_completed")) for item in (first, second)),
+            1,
+        )
 
     async def test_non_terminal_run_is_review_not_acceptance(self) -> None:
         await self._create_run(run_id="run-live", status=RunStatus.RUNNING)

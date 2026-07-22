@@ -219,6 +219,43 @@ class NUResourceGenBridge:
             "live_guard": self._live_guard(spec.candidate_id),
         }
 
+    def evaluate_prompt(
+        self,
+        *,
+        candidate_id: str,
+        prompt: str,
+        params: Mapping[str, Any] | None = None,
+        media: Mapping[str, Any] | None = None,
+        task_type: str | None = None,
+        metric_threshold: float = 70.0,
+        overall_threshold: float = 70.0,
+    ) -> dict[str, Any]:
+        """Run the shared, provider-specific prompt gate without generation."""
+
+        generator = self._require_generator()
+        spec = generator.get_candidate(str(candidate_id).strip())
+        request = self._request(
+            prompt=prompt,
+            params=params,
+            media=media,
+            task_type=task_type,
+            quality_preset=None,
+            task=None,
+        )
+        # ``evaluate_prompt`` is a wheel-exported operational helper in the
+        # exactly pinned 0.2.x package. Keep the import at the package boundary
+        # and verify it in ``scripts/verify_nu_compatibility.py``.
+        from nu_resource_gen_lib import evaluate_prompt
+
+        return dict(
+            evaluate_prompt(
+                spec,
+                request,
+                metric_threshold=float(metric_threshold),
+                overall_threshold=float(overall_threshold),
+            )
+        )
+
     def generate(
         self,
         *,
@@ -342,4 +379,9 @@ class NUResourceGenBridge:
             "simulation_only": bool(extras.get("simulation_only", False)),
             "supported_task_types": list(extras.get("supported_task_types") or ()),
             "deprecated": bool(extras.get("deprecated", False)),
+            "execution": str(extras.get("execution", "") or ""),
+            "device": str(extras.get("device", "") or ""),
+            "requires_gpu_arch": str(extras.get("requires_gpu_arch", "") or ""),
+            "approx_loaded_vram_gb": extras.get("approx_loaded_vram_gb"),
+            "approx_weights_vram_gb": extras.get("approx_weights_vram_gb"),
         }

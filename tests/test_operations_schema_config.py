@@ -28,10 +28,15 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
                     "run_scorecards",
                     "operating_events",
                     "outbox_messages",
+                    "outbox_delivery_receipts",
                     "run_leases",
                     "learning_assets",
                     "learning_asset_evaluations",
                     "capability_attempts",
+                    "route_execution_contracts",
+                    "provider_usage_events",
+                    "provider_canary_results",
+                    "resource_approval_uses",
                     "staffing_decisions",
                 }
                 self.assertTrue(expected.issubset(tables))
@@ -39,7 +44,7 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT version FROM operations_schema WHERE component = 'operating_kernel'"
                 ) as cursor:
                     row = await cursor.fetchone()
-                self.assertEqual(row[0], 1)
+                self.assertEqual(row[0], 2)
             finally:
                 await store.close()
 

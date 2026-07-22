@@ -10,7 +10,7 @@ from opc.core.events import EventBus
 from opc.database.store import OPCStore
 from opc.operations.durable import DurableRunKernel
 from opc.operations.models import AcceptanceCriterion, GoalContract, RunManifest, RunStatus
-from opc.operations.outbox import OutboxDispatcher, event_bus_handler
+from opc.operations.outbox import IndependentOutboxWorker, OutboxDispatcher, event_bus_handler
 from opc.operations.repository import OperationsRepository
 
 
@@ -142,6 +142,49 @@ class OutboxDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(dispatcher.running)
         stored = (await self.repository.list_outbox(run_id="run-dispatch"))[0]
         self.assertEqual(stored.status, "delivered")
+
+    async def test_independent_worker_persists_receipt_and_deduplicates_after_restart(self) -> None:
+        message = await self._append("independent")
+        delivered = []
+
+        async def handle(current):
+            delivered.append(current.message_id)
+
+        first = IndependentOutboxWorker(
+            self.kernel,
+            handle,
+            consumer_id="analytics-v1",
+            worker_id="independent-a",
+        )
+        first_report = await first.dispatch_once()
+        receipt = await self.repository.get_outbox_delivery_receipt(
+            message.message_id,
+            "analytics-v1",
+        )
+        self.assertEqual(first_report.delivered, 1)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(delivered, [message.message_id])
+
+        await self.repository.db.execute(
+            """UPDATE outbox_messages SET status = 'pending', delivered_at = NULL,
+               next_attempt_at = ?, lease_owner = '', lease_expires_at = NULL
+               WHERE message_id = ?""",
+            (message.created_at.isoformat(), message.message_id),
+        )
+        await self.repository.db.commit()
+
+        async def must_not_repeat(_current):
+            raise AssertionError("completed receipt must suppress duplicate side effect")
+
+        restarted = IndependentOutboxWorker(
+            self.kernel,
+            must_not_repeat,
+            consumer_id="analytics-v1",
+            worker_id="independent-b",
+        )
+        second_report = await restarted.dispatch_once()
+        self.assertEqual(second_report.deduplicated, 1)
+        self.assertEqual(second_report.delivered, 0)
 
 
 if __name__ == "__main__":

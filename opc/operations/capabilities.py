@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import time
+from datetime import timedelta
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from opc.operations.models import (
@@ -13,6 +15,9 @@ from opc.operations.models import (
     CapabilityKind,
     CapabilityRequest,
     CapabilityRoute,
+    ProviderUsageEvent,
+    RouteExecutionContract,
+    utc_now,
 )
 from opc.operations.repository import OperationsRepository
 
@@ -38,6 +43,7 @@ class UnifiedCapabilityBroker:
         default_llm_api_base: str = "",
         default_llm_credential_ready: bool = False,
         default_llm_transport_ready: bool = False,
+        execution_contract_ttl_seconds: float = 300.0,
     ) -> None:
         self.repository = repository
         self.llm_router = llm_router
@@ -47,6 +53,7 @@ class UnifiedCapabilityBroker:
         self.default_llm_api_base = str(default_llm_api_base or "")
         self.default_llm_credential_ready = bool(default_llm_credential_ready)
         self.default_llm_transport_ready = bool(default_llm_transport_ready)
+        self.execution_contract_ttl_seconds = max(1.0, float(execution_contract_ttl_seconds))
 
     def bind_adapter_registry(self, registry: Any | None) -> None:
         self.adapter_registry = registry
@@ -85,34 +92,145 @@ class UnifiedCapabilityBroker:
         parsed = request if isinstance(request, CapabilityRequest) else CapabilityRequest.from_dict(request)
         if not parsed.allow_live:
             raise PermissionError("capability execution requires allow_live=true")
-        route = await self.plan(parsed, record_attempt=False)
+        route, contract = await self.plan_execution(parsed)
         if not route.allowed or route.mode not in {"live", "delegate"}:
             blockers = "; ".join(route.blockers) or f"route mode is {route.mode}"
-            await self.record_attempt(parsed, route, status="blocked", error=blockers)
             raise PermissionError(blockers)
+        if contract.expires_at and utc_now() >= contract.expires_at:
+            contract.status = "expired"
+            contract.completed_at = utc_now()
+            contract.error = "execution contract expired before execution"
+            await self.repository.save_route_execution_contract(contract)
+            raise PermissionError(contract.error)
+        contract.status = "executing"
+        contract.started_at = utc_now()
+        await self.repository.save_route_execution_contract(contract)
         started = time.monotonic()
         try:
             result = executor(route, parsed)
             if inspect.isawaitable(result):
                 result = await result
         except Exception as exc:
+            contract.status = "failed"
+            contract.error = str(exc)[:4000]
+            contract.completed_at = utc_now()
+            await self.repository.save_route_execution_contract(contract)
             await self.record_attempt(
                 parsed,
                 route,
                 status="failed",
                 latency_ms=(time.monotonic() - started) * 1000,
                 error=str(exc),
+                metadata={"contract_id": contract.contract_id},
             )
             raise
+        actual = _actual_route_identity(result, route)
+        identity_error = _validate_actual_route(route, actual)
         cost = _result_cost(result)
+        usage = _usage_event(parsed, contract, actual, result, cost_usd=cost)
+        await self.repository.save_provider_usage_event(usage)
+        contract.actual_provider = actual["provider"]
+        contract.actual_candidate_id = actual["candidate_id"]
+        contract.actual_model = actual["model"]
+        contract.actual_cost_usd = cost
+        contract.usage_event_id = usage.usage_event_id
+        contract.completed_at = utc_now()
+        contract.result_metadata = _result_metadata(result)
+        if identity_error:
+            contract.status = "contract_violation"
+            contract.error = identity_error
+            await self.repository.save_route_execution_contract(contract)
+            await self.record_attempt(
+                parsed,
+                route,
+                status="contract_violation",
+                latency_ms=(time.monotonic() - started) * 1000,
+                cost_usd=cost,
+                error=identity_error,
+                metadata={
+                    "contract_id": contract.contract_id,
+                    "usage_event_id": usage.usage_event_id,
+                },
+            )
+            raise CapabilityBrokerError(identity_error)
+        if parsed.max_cost_usd is not None and cost is not None and cost > parsed.max_cost_usd:
+            contract.status = "budget_exceeded"
+            contract.error = (
+                f"actual cost {cost:.6f} exceeds contract ceiling {parsed.max_cost_usd:.6f}"
+            )
+        else:
+            contract.status = "completed"
+        await self.repository.save_route_execution_contract(contract)
         await self.record_attempt(
             parsed,
             route,
-            status="completed",
+            status=contract.status,
             latency_ms=(time.monotonic() - started) * 1000,
             cost_usd=cost,
+            error=contract.error,
+            metadata={
+                "contract_id": contract.contract_id,
+                "usage_event_id": usage.usage_event_id,
+                "usage_measured": usage.measured,
+                "usage_source": usage.source,
+            },
         )
+        if contract.status == "budget_exceeded":
+            raise CapabilityBrokerError(contract.error)
         return route, result
+
+    async def plan_execution(
+        self,
+        request: CapabilityRequest | Mapping[str, Any],
+    ) -> tuple[CapabilityRoute, RouteExecutionContract]:
+        """Persist an immutable plan snapshot before any owner executes it."""
+
+        parsed = request if isinstance(request, CapabilityRequest) else CapabilityRequest.from_dict(request)
+        parsed.validate()
+        route = await self.plan(parsed, record_attempt=False)
+        fallback_order = [
+            {
+                "provider": route.provider,
+                "candidate_id": route.candidate_id,
+                "model": route.model,
+            },
+            *[
+                {
+                    "provider": str(item.get("provider", "") or ""),
+                    "candidate_id": str(item.get("candidate_id", "") or ""),
+                    "model": str(item.get("model", "") or ""),
+                }
+                for item in route.alternatives
+            ],
+        ]
+        contract = RouteExecutionContract(
+            request_id=parsed.request_id,
+            route_id=route.route_id,
+            capability_kind=parsed.capability_kind,
+            project_id=parsed.project_id,
+            run_id=parsed.run_id,
+            status="planned" if route.allowed else "blocked",
+            mode=route.mode,
+            planned_provider=route.provider,
+            planned_candidate_id=route.candidate_id,
+            planned_model=route.model,
+            fallback_order=[item for item in fallback_order if any(item.values())],
+            readiness=dict(route.readiness),
+            max_cost_usd=parsed.max_cost_usd,
+            request_snapshot=parsed.to_dict(),
+            route_snapshot=route.to_dict(),
+            error="; ".join(route.blockers) if not route.allowed else "",
+            expires_at=utc_now() + timedelta(seconds=self.execution_contract_ttl_seconds),
+        )
+        await self.repository.save_route_execution_contract(contract)
+        await self.record_attempt(
+            parsed,
+            route,
+            status=contract.status,
+            error=contract.error,
+            metadata={"contract_id": contract.contract_id, "mode": route.mode},
+        )
+        return route, contract
 
     async def record_attempt(
         self,
@@ -466,6 +584,7 @@ class UnifiedCapabilityBroker:
             for item in candidates[1:10]
         ]
         provider_readiness: dict[str, Any] = {}
+        hardware_readiness = _resource_hardware_readiness(selected, request)
         readiness_probe = getattr(self.resource_bridge, "provider_readiness", None)
         if selected and callable(readiness_probe):
             try:
@@ -484,11 +603,19 @@ class UnifiedCapabilityBroker:
             )
         )
         transport_ready = bool(provider_readiness.get("transport_ready", credential_ready))
+        if hardware_readiness["compatible"] is False:
+            transport_ready = False
         if request.allow_live and selected:
             if not credential_ready:
                 blockers.append("selected resource provider has no configured credentials")
             if not transport_ready:
                 blockers.append("selected resource provider is not transport-ready")
+            if hardware_readiness["required"] and hardware_readiness["compatible"] is None:
+                blockers.append(
+                    "live GPU resource requires explicit hardware_profile and gpu_free_vram_mib"
+                )
+            elif hardware_readiness["compatible"] is False:
+                blockers.extend(hardware_readiness["blockers"])
         plan_allowed = not blockers
         return CapabilityRoute(
             request_id=request.request_id,
@@ -511,6 +638,7 @@ class UnifiedCapabilityBroker:
                 "selected": _compact_resource(selected),
                 "dry_run_plan": plan,
                 "provider_readiness": provider_readiness,
+                "hardware_readiness": hardware_readiness,
             },
             readiness={
                 "plan_allowed": plan_allowed,
@@ -583,6 +711,58 @@ def _resource_rank(candidate: Mapping[str, Any], request: CapabilityRequest) -> 
     )
 
 
+def _resource_hardware_readiness(
+    candidate: Mapping[str, Any],
+    request: CapabilityRequest,
+) -> dict[str, Any]:
+    required_arch = str(candidate.get("requires_gpu_arch", "") or "").strip().lower()
+    loaded_vram = candidate.get("approx_loaded_vram_gb")
+    try:
+        required_vram_mib = (
+            int(float(loaded_vram) * 1024) if loaded_vram is not None else 0
+        )
+    except (TypeError, ValueError):
+        required_vram_mib = 0
+    required = bool(required_arch or required_vram_mib)
+    blockers: list[str] = []
+    missing_evidence: list[str] = []
+    if required_arch:
+        if request.hardware_profile:
+            actual_arch = request.hardware_profile.strip().lower()
+            if required_arch not in actual_arch and actual_arch not in required_arch:
+                blockers.append(
+                    f"candidate requires GPU architecture {required_arch}; got {actual_arch}"
+                )
+        else:
+            missing_evidence.append("hardware_profile")
+    if required_vram_mib:
+        if request.gpu_free_vram_mib > 0:
+            if request.gpu_free_vram_mib < required_vram_mib:
+                blockers.append(
+                    f"candidate requires about {required_vram_mib} MiB free VRAM; "
+                    f"got {request.gpu_free_vram_mib} MiB"
+                )
+        else:
+            missing_evidence.append("gpu_free_vram_mib")
+    compatible: bool | None
+    if blockers:
+        compatible = False
+    elif missing_evidence:
+        compatible = None
+    else:
+        compatible = True
+    return {
+        "required": required,
+        "compatible": compatible,
+        "requires_gpu_arch": required_arch,
+        "required_vram_mib": required_vram_mib,
+        "reported_hardware_profile": request.hardware_profile,
+        "reported_free_vram_mib": request.gpu_free_vram_mib,
+        "missing_evidence": missing_evidence,
+        "blockers": blockers,
+    }
+
+
 def _verified_free_resource(candidate: Mapping[str, Any]) -> bool:
     cost = _known_cost(candidate)
     unit = str(candidate.get("cost_unit", "")).strip().lower()
@@ -642,14 +822,160 @@ def _compact_resource(candidate: Mapping[str, Any]) -> dict[str, Any]:
 
 def _result_cost(result: Any) -> float | None:
     if isinstance(result, Mapping):
+        accounting = result.get("usage_accounting")
+        if isinstance(accounting, Mapping):
+            if accounting.get("cost_usd") is None:
+                return None
+            try:
+                value = float(accounting["cost_usd"])
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) and value >= 0 else None
         value = result.get("cost_usd", result.get("cost"))
         unit = str(result.get("cost_unit", "usd") or "usd").lower()
         if value is not None and unit == "usd":
             try:
-                return max(0.0, float(value))
+                parsed = float(value)
             except (TypeError, ValueError):
                 return None
+            return parsed if math.isfinite(parsed) and parsed >= 0 else None
     return None
+
+
+def _actual_route_identity(result: Any, route: CapabilityRoute) -> dict[str, str]:
+    payload = result if isinstance(result, Mapping) else {}
+    provider = str(payload.get("provider", "") or route.provider)
+    planned = [
+        {
+            "provider": route.provider,
+            "candidate_id": route.candidate_id,
+            "model": route.model,
+        },
+        *[dict(item) for item in route.alternatives],
+    ]
+    matching_plan = next(
+        (item for item in planned if str(item.get("provider", "") or "") == provider),
+        {},
+    )
+    return {
+        "provider": provider,
+        "candidate_id": str(
+            payload.get("candidate_id", "") or matching_plan.get("candidate_id", "")
+        ),
+        "model": str(payload.get("model", "") or matching_plan.get("model", "")),
+    }
+
+
+def _validate_actual_route(route: CapabilityRoute, actual: Mapping[str, str]) -> str:
+    allowed = [
+        {
+            "provider": route.provider,
+            "candidate_id": route.candidate_id,
+            "model": route.model,
+        },
+        *[dict(item) for item in route.alternatives],
+    ]
+    provider = str(actual.get("provider", "") or "")
+    provider_matches = [
+        item for item in allowed if str(item.get("provider", "") or "") == provider
+    ]
+    if not provider_matches:
+        return f"actual provider {provider!r} was not present in the planned fallback order"
+    for item in provider_matches:
+        if all(
+            not str(item.get(field, "") or "")
+            or str(actual.get(field, "") or "") == str(item.get(field, "") or "")
+            for field in ("candidate_id", "model")
+        ):
+            return ""
+    identity = {
+        field: str(actual.get(field, "") or "")
+        for field in ("candidate_id", "model")
+    }
+    return f"actual route identity {identity!r} was not planned for provider {provider!r}"
+
+
+def _usage_event(
+    request: CapabilityRequest,
+    contract: RouteExecutionContract,
+    actual: Mapping[str, str],
+    result: Any,
+    *,
+    cost_usd: float | None,
+) -> ProviderUsageEvent:
+    payload = result if isinstance(result, Mapping) else {}
+    accounting = payload.get("usage_accounting")
+    accounting_map = dict(accounting) if isinstance(accounting, Mapping) else {}
+    legacy = payload.get("usage")
+    usage_map = dict(legacy) if isinstance(legacy, Mapping) else {}
+
+    input_tokens = _optional_nonnegative_int(
+        accounting_map.get("input_tokens", usage_map.get("prompt_tokens"))
+    )
+    output_tokens = _optional_nonnegative_int(
+        accounting_map.get("output_tokens", usage_map.get("completion_tokens"))
+    )
+    total_tokens = _optional_nonnegative_int(accounting_map.get("total_tokens"))
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+    quota = accounting_map.get("subscription_quota")
+    quota_map = dict(quota) if isinstance(quota, Mapping) else {}
+    claimed_measured = (
+        bool(accounting_map.get("measured")) if accounting_map else bool(usage_map)
+    )
+    has_concrete_measurement = any(
+        value is not None
+        for value in (input_tokens, output_tokens, total_tokens, cost_usd)
+    ) or any(value is not None for value in quota_map.values())
+    measured = bool(claimed_measured and has_concrete_measurement)
+    source = str(
+        accounting_map.get("source")
+        if measured and accounting_map.get("source")
+        else "provider_reported"
+        if measured
+        else "unknown"
+    )
+    return ProviderUsageEvent(
+        contract_id=contract.contract_id,
+        request_id=request.request_id,
+        route_id=contract.route_id,
+        capability_kind=request.capability_kind,
+        project_id=request.project_id,
+        run_id=request.run_id,
+        provider=str(actual.get("provider", "") or ""),
+        model=str(actual.get("model", "") or ""),
+        measured=measured,
+        source=source,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cost_usd=cost_usd,
+        subscription_quota=quota_map,
+        metadata={
+            "finish_reason": str(payload.get("finish_reason", "") or ""),
+            "cost_known": cost_usd is not None,
+        },
+    )
+
+
+def _result_metadata(result: Any) -> dict[str, Any]:
+    if not isinstance(result, Mapping):
+        return {"result_type": type(result).__name__}
+    return {
+        key: result[key]
+        for key in ("status", "finish_reason", "artifact_path", "quality_score")
+        if key in result and isinstance(result[key], (str, int, float, bool, type(None)))
+    }
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _dedupe(values: Sequence[str]) -> list[str]:

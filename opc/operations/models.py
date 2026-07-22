@@ -524,6 +524,33 @@ class OutboxMessage(ContractMixin):
 
 
 @dataclass
+class OutboxDeliveryReceipt(ContractMixin):
+    """Durable idempotency receipt owned by an independent outbox consumer."""
+
+    message_id: str
+    consumer_id: str
+    event_id: str
+    status: str = "delivered"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+    completed_at: datetime = field(default_factory=utc_now)
+    schema_version: int = 1
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OutboxDeliveryReceipt":
+        return cls(
+            message_id=str(data.get("message_id", "")),
+            consumer_id=str(data.get("consumer_id", "")),
+            event_id=str(data.get("event_id", "")),
+            status=str(data.get("status", "delivered") or "delivered"),
+            metadata=dict(data.get("metadata", {}) or {}),
+            created_at=parse_datetime(data.get("created_at"), default=utc_now()) or utc_now(),
+            completed_at=parse_datetime(data.get("completed_at"), default=utc_now()) or utc_now(),
+            schema_version=int(data.get("schema_version", 1) or 1),
+        )
+
+
+@dataclass
 class RunLease(ContractMixin):
     run_id: str
     owner: str
@@ -778,6 +805,208 @@ class CapabilityAttempt(ContractMixin):
 
 
 @dataclass
+class RouteExecutionContract(ContractMixin):
+    """Durable binding between one capability plan and its actual execution."""
+
+    request_id: str
+    route_id: str
+    capability_kind: CapabilityKind
+    project_id: str = "default"
+    run_id: str = ""
+    contract_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    status: str = "planned"
+    mode: str = "dry_run"
+    planned_provider: str = ""
+    planned_candidate_id: str = ""
+    planned_model: str = ""
+    fallback_order: list[dict[str, Any]] = field(default_factory=list)
+    readiness: dict[str, bool] = field(default_factory=dict)
+    max_cost_usd: float | None = None
+    request_snapshot: dict[str, Any] = field(default_factory=dict)
+    route_snapshot: dict[str, Any] = field(default_factory=dict)
+    actual_provider: str = ""
+    actual_candidate_id: str = ""
+    actual_model: str = ""
+    actual_cost_usd: float | None = None
+    usage_event_id: str = ""
+    error: str = ""
+    result_metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    expires_at: datetime | None = None
+    schema_version: int = 1
+
+    def validate(self) -> None:
+        if not self.contract_id.strip() or not self.request_id.strip() or not self.route_id.strip():
+            raise ValueError("contract_id, request_id, and route_id are required")
+        if not self.project_id.strip():
+            raise ValueError("route execution contract project_id is required")
+        if self.max_cost_usd is not None and self.max_cost_usd < 0:
+            raise ValueError("max_cost_usd must be non-negative or null")
+        if self.actual_cost_usd is not None and self.actual_cost_usd < 0:
+            raise ValueError("actual_cost_usd must be non-negative or null")
+        if self.started_at and self.started_at < self.created_at:
+            raise ValueError("started_at cannot be earlier than created_at")
+        if self.completed_at and self.started_at and self.completed_at < self.started_at:
+            raise ValueError("completed_at cannot be earlier than started_at")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "RouteExecutionContract":
+        return cls(
+            contract_id=str(data.get("contract_id", "") or str(uuid.uuid4())),
+            request_id=str(data.get("request_id", "")),
+            route_id=str(data.get("route_id", "")),
+            capability_kind=CapabilityKind(str(data.get("capability_kind", CapabilityKind.LLM.value))),
+            project_id=str(data.get("project_id", "default") or "default"),
+            run_id=str(data.get("run_id", "") or ""),
+            status=str(data.get("status", "planned") or "planned"),
+            mode=str(data.get("mode", "dry_run") or "dry_run"),
+            planned_provider=str(data.get("planned_provider", "") or ""),
+            planned_candidate_id=str(data.get("planned_candidate_id", "") or ""),
+            planned_model=str(data.get("planned_model", "") or ""),
+            fallback_order=[
+                dict(item) for item in data.get("fallback_order", []) or [] if isinstance(item, Mapping)
+            ],
+            readiness={str(k): bool(v) for k, v in dict(data.get("readiness", {}) or {}).items()},
+            max_cost_usd=_optional_float(data.get("max_cost_usd")),
+            request_snapshot=dict(data.get("request_snapshot", {}) or {}),
+            route_snapshot=dict(data.get("route_snapshot", {}) or {}),
+            actual_provider=str(data.get("actual_provider", "") or ""),
+            actual_candidate_id=str(data.get("actual_candidate_id", "") or ""),
+            actual_model=str(data.get("actual_model", "") or ""),
+            actual_cost_usd=_optional_float(data.get("actual_cost_usd")),
+            usage_event_id=str(data.get("usage_event_id", "") or ""),
+            error=str(data.get("error", "") or ""),
+            result_metadata=dict(data.get("result_metadata", {}) or {}),
+            created_at=parse_datetime(data.get("created_at"), default=utc_now()) or utc_now(),
+            started_at=parse_datetime(data.get("started_at")),
+            completed_at=parse_datetime(data.get("completed_at")),
+            expires_at=parse_datetime(data.get("expires_at")),
+            schema_version=int(data.get("schema_version", 1) or 1),
+        )
+
+
+@dataclass
+class ProviderUsageEvent(ContractMixin):
+    """Explicit usage evidence; unknown values stay null instead of becoming zero."""
+
+    contract_id: str
+    request_id: str
+    route_id: str
+    capability_kind: CapabilityKind
+    project_id: str = "default"
+    run_id: str = ""
+    provider: str = ""
+    model: str = ""
+    usage_event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    measured: bool = False
+    source: str = "unknown"
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+    subscription_quota: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+    schema_version: int = 1
+
+    def validate(self) -> None:
+        if not self.usage_event_id.strip() or not self.contract_id.strip():
+            raise ValueError("usage_event_id and contract_id are required")
+        for name, value in (
+            ("input_tokens", self.input_tokens),
+            ("output_tokens", self.output_tokens),
+            ("total_tokens", self.total_tokens),
+        ):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be non-negative or null")
+        if self.cost_usd is not None and self.cost_usd < 0:
+            raise ValueError("cost_usd must be non-negative or null")
+        if self.measured and all(
+            value is None
+            for value in (
+                self.input_tokens,
+                self.output_tokens,
+                self.total_tokens,
+                self.cost_usd,
+            )
+        ) and not any(value is not None for value in self.subscription_quota.values()):
+            raise ValueError("measured usage requires at least one concrete measurement")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ProviderUsageEvent":
+        return cls(
+            usage_event_id=str(data.get("usage_event_id", "") or str(uuid.uuid4())),
+            contract_id=str(data.get("contract_id", "")),
+            request_id=str(data.get("request_id", "")),
+            route_id=str(data.get("route_id", "")),
+            capability_kind=CapabilityKind(str(data.get("capability_kind", CapabilityKind.LLM.value))),
+            project_id=str(data.get("project_id", "default") or "default"),
+            run_id=str(data.get("run_id", "") or ""),
+            provider=str(data.get("provider", "") or ""),
+            model=str(data.get("model", "") or ""),
+            measured=bool(data.get("measured", False)),
+            source=str(data.get("source", "unknown") or "unknown"),
+            input_tokens=_optional_int(data.get("input_tokens")),
+            output_tokens=_optional_int(data.get("output_tokens")),
+            total_tokens=_optional_int(data.get("total_tokens")),
+            cost_usd=_optional_float(data.get("cost_usd")),
+            subscription_quota=dict(data.get("subscription_quota", {}) or {}),
+            metadata=dict(data.get("metadata", {}) or {}),
+            created_at=parse_datetime(data.get("created_at"), default=utc_now()) or utc_now(),
+            schema_version=int(data.get("schema_version", 1) or 1),
+        )
+
+
+@dataclass
+class ProviderCanaryResult(ContractMixin):
+    project_id: str
+    capability_kind: CapabilityKind
+    provider: str
+    canary_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    candidate_id: str = ""
+    model: str = ""
+    mode: str = "status"
+    success: bool = False
+    available: bool = False
+    credential_ready: bool = False
+    transport_ready: bool = False
+    latency_ms: float = 0.0
+    expected_model: str = ""
+    model_drift: bool = False
+    error_category: str = ""
+    error: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    checked_at: datetime = field(default_factory=utc_now)
+    schema_version: int = 1
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ProviderCanaryResult":
+        return cls(
+            canary_id=str(data.get("canary_id", "") or str(uuid.uuid4())),
+            project_id=str(data.get("project_id", "default") or "default"),
+            capability_kind=CapabilityKind(str(data.get("capability_kind", CapabilityKind.LLM.value))),
+            provider=str(data.get("provider", "") or ""),
+            candidate_id=str(data.get("candidate_id", "") or ""),
+            model=str(data.get("model", "") or ""),
+            mode=str(data.get("mode", "status") or "status"),
+            success=bool(data.get("success", False)),
+            available=bool(data.get("available", False)),
+            credential_ready=bool(data.get("credential_ready", False)),
+            transport_ready=bool(data.get("transport_ready", False)),
+            latency_ms=max(0.0, float(data.get("latency_ms", 0.0) or 0.0)),
+            expected_model=str(data.get("expected_model", "") or ""),
+            model_drift=bool(data.get("model_drift", False)),
+            error_category=str(data.get("error_category", "") or ""),
+            error=str(data.get("error", "") or ""),
+            metadata=dict(data.get("metadata", {}) or {}),
+            checked_at=parse_datetime(data.get("checked_at"), default=utc_now()) or utc_now(),
+            schema_version=int(data.get("schema_version", 1) or 1),
+        )
+
+
+@dataclass
 class StaffingCandidate(ContractMixin):
     employee_id: str
     role_ids: list[str] = field(default_factory=list)
@@ -873,6 +1102,8 @@ class MissionControlSnapshot(ContractMixin):
     promoted_assets: int
     average_score: float
     total_cost_usd: float
+    unmeasured_usage_events: int = 0
+    provider_slo: dict[str, Any] = field(default_factory=dict)
     alerts: list[MissionAlert] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
     generated_at: datetime = field(default_factory=utc_now)

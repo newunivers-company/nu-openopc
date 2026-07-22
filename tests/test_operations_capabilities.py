@@ -7,8 +7,12 @@ import unittest
 from opc.core.config import NUResourceGenConfig
 from opc.database.store import OPCStore
 from opc.integrations.nu_resource_gen import NUResourceGenBridge
-from opc.operations.capabilities import UnifiedCapabilityBroker
-from opc.operations.models import CapabilityKind, CapabilityRequest
+from opc.operations.capabilities import (
+    UnifiedCapabilityBroker,
+    _result_cost,
+    _validate_actual_route,
+)
+from opc.operations.models import CapabilityKind, CapabilityRequest, CapabilityRoute
 from opc.operations.repository import OperationsRepository
 
 
@@ -102,6 +106,19 @@ class _FakeResourceBridge:
                 "deprecated": False,
                 "simulation_only": False,
             },
+            {
+                "candidate_id": "gpu-vlm",
+                "provider": "local_vlm",
+                "model": "gemma-nvfp4",
+                "category": "vision_analysis",
+                "cost": 0.0,
+                "cost_unit": "local",
+                "credentials_configured": True,
+                "requires_gpu_arch": "blackwell_sm_120",
+                "approx_loaded_vram_gb": 13,
+                "deprecated": False,
+                "simulation_only": False,
+            },
         ]
 
     def list_candidates(self, *, candidate_id=None, category=None, limit=None):
@@ -121,11 +138,11 @@ class _FakeResourceBridge:
     def status(self):
         return {
             "allow_live": True,
-            "allowed_live_candidates": ["local-image"],
+            "allowed_live_candidates": ["local-image", "gpu-vlm"],
         }
 
     def provider_readiness(self, provider):
-        ready = provider in {"cloud", "comfyui"}
+        ready = provider in {"cloud", "comfyui", "local_vlm"}
         return {
             "credential_ready": ready,
             "transport_ready": ready,
@@ -332,6 +349,51 @@ class UnifiedCapabilityBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(route.allowed)
         self.assertTrue(any("cost is unknown" in item for item in route.blockers))
 
+    async def test_gpu_resource_readiness_rejects_architecture_and_vram_mismatch(self) -> None:
+        route = await self.broker.plan(
+            CapabilityRequest(
+                capability_kind=CapabilityKind.RESOURCE,
+                task_type="vision_analysis",
+                candidate_id="gpu-vlm",
+                prompt="Grounded review",
+                require_free=True,
+                max_cost_usd=0.0,
+                hardware_profile="ampere_sm_86",
+                gpu_free_vram_mib=11887,
+            )
+        )
+
+        self.assertTrue(route.allowed)
+        self.assertFalse(route.readiness["transport_ready"])
+        hardware = route.diagnostics["hardware_readiness"]
+        self.assertFalse(hardware["compatible"])
+        self.assertTrue(any("blackwell_sm_120" in item for item in hardware["blockers"]))
+        self.assertTrue(any("13312 MiB" in item for item in hardware["blockers"]))
+
+    async def test_live_gpu_resource_rejects_partial_hardware_evidence(self) -> None:
+        route = await self.broker.plan(
+            CapabilityRequest(
+                capability_kind=CapabilityKind.RESOURCE,
+                task_type="vision_analysis",
+                candidate_id="gpu-vlm",
+                prompt="Grounded review",
+                require_free=True,
+                max_cost_usd=0.0,
+                allow_live=True,
+                hardware_profile="blackwell_sm_120",
+                gpu_free_vram_mib=0,
+                metadata={"confirm_live": True},
+            )
+        )
+
+        self.assertFalse(route.allowed)
+        self.assertIsNone(route.diagnostics["hardware_readiness"]["compatible"])
+        self.assertEqual(
+            route.diagnostics["hardware_readiness"]["missing_evidence"],
+            ["gpu_free_vram_mib"],
+        )
+        self.assertTrue(any("explicit hardware_profile" in item for item in route.blockers))
+
     async def test_live_resource_requires_allowlist_and_explicit_confirmation(self) -> None:
         unconfirmed = await self.broker.plan(
             CapabilityRequest(
@@ -397,6 +459,157 @@ class UnifiedCapabilityBrokerTests(unittest.IsolatedAsyncioTestCase):
         attempts = await self.repository.list_capability_attempts(project_id="default")
         self.assertEqual(attempts[0].status, "completed")
         self.assertEqual(attempts[0].cost_usd, 0.0)
+        contracts = await self.repository.list_route_execution_contracts(project_id="default")
+        self.assertEqual(len(contracts), 1)
+        self.assertEqual(contracts[0].status, "completed")
+        self.assertEqual(contracts[0].planned_provider, "codex")
+        self.assertEqual(contracts[0].actual_provider, "codex")
+        usage = await self.repository.list_provider_usage_events(project_id="default")
+        self.assertEqual(len(usage), 1)
+        self.assertFalse(usage[0].measured)
+        self.assertEqual(usage[0].source, "unknown")
+        self.assertEqual(usage[0].cost_usd, 0.0)
+
+    async def test_execution_contract_records_measured_usage_and_fallback_identity(self) -> None:
+        request = CapabilityRequest(
+            capability_kind=CapabilityKind.EXTERNAL_AGENT,
+            task_type="coding",
+            required_capabilities=["testing"],
+            preferred_providers=["codex"],
+            allow_live=True,
+        )
+
+        _route, _result = await self.broker.execute(
+            request,
+            lambda _selected, _request: {
+                "provider": "codex",
+                "status": "done",
+                "usage_accounting": {
+                    "measured": True,
+                    "source": "provider_reported",
+                    "input_tokens": 11,
+                    "output_tokens": 7,
+                    "total_tokens": 18,
+                    "cost_usd": 0.25,
+                    "subscription_quota": {"plan": "subscription", "remaining": None},
+                },
+            },
+        )
+
+        usage = (await self.repository.list_provider_usage_events(project_id="default"))[0]
+        self.assertTrue(usage.measured)
+        self.assertEqual(usage.total_tokens, 18)
+        self.assertEqual(usage.cost_usd, 0.25)
+        self.assertEqual(usage.subscription_quota["plan"], "subscription")
+
+    async def test_claimed_measurement_without_evidence_stays_unmeasured(self) -> None:
+        request = CapabilityRequest(
+            capability_kind=CapabilityKind.EXTERNAL_AGENT,
+            task_type="coding",
+            required_capabilities=["testing"],
+            preferred_providers=["codex"],
+            allow_live=True,
+        )
+
+        await self.broker.execute(
+            request,
+            lambda _selected, _request: {
+                "provider": "codex",
+                "usage_accounting": {
+                    "measured": True,
+                    "source": "provider_reported",
+                },
+            },
+        )
+
+        usage = (await self.repository.list_provider_usage_events(project_id="default"))[0]
+        self.assertFalse(usage.measured)
+        self.assertEqual(usage.source, "unknown")
+
+    async def test_execution_contract_rejects_unplanned_actual_provider(self) -> None:
+        request = CapabilityRequest(
+            capability_kind=CapabilityKind.EXTERNAL_AGENT,
+            task_type="coding",
+            required_capabilities=["testing"],
+            preferred_providers=["codex"],
+            allow_live=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "was not present"):
+            await self.broker.execute(
+                request,
+                lambda _selected, _request: {"provider": "unplanned", "status": "done"},
+            )
+
+        contract = (await self.repository.list_route_execution_contracts(project_id="default"))[0]
+        self.assertEqual(contract.status, "contract_violation")
+
+    def test_execution_contract_rejects_cross_product_of_planned_route_fields(self) -> None:
+        route = CapabilityRoute(
+            request_id="strict-combination",
+            capability_kind=CapabilityKind.RESOURCE,
+            provider="shared-provider",
+            candidate_id="candidate-a",
+            model="model-a",
+            mode="dry_run",
+            allowed=True,
+            alternatives=[
+                {
+                    "provider": "shared-provider",
+                    "candidate_id": "candidate-b",
+                    "model": "model-b",
+                }
+            ],
+        )
+
+        error = _validate_actual_route(
+            route,
+            {
+                "provider": "shared-provider",
+                "candidate_id": "candidate-a",
+                "model": "model-b",
+            },
+        )
+
+        self.assertIn("was not planned", error)
+
+    def test_invalid_reported_cost_is_unknown_not_zero(self) -> None:
+        self.assertIsNone(_result_cost({"cost": -1, "cost_unit": "usd"}))
+        self.assertIsNone(
+            _result_cost(
+                {
+                    "usage_accounting": {
+                        "measured": True,
+                        "cost_usd": float("nan"),
+                    }
+                }
+            )
+        )
+
+    async def test_execution_contract_records_actual_budget_exceedance(self) -> None:
+        request = CapabilityRequest(
+            capability_kind=CapabilityKind.EXTERNAL_AGENT,
+            task_type="coding",
+            required_capabilities=["testing"],
+            preferred_providers=["codex"],
+            allow_live=True,
+            max_cost_usd=0.0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds contract ceiling"):
+            await self.broker.execute(
+                request,
+                lambda _selected, _request: {
+                    "provider": "codex",
+                    "cost": 0.01,
+                    "cost_unit": "usd",
+                },
+            )
+
+        contract = (await self.repository.list_route_execution_contracts(project_id="default"))[0]
+        attempts = await self.repository.list_capability_attempts(project_id="default")
+        self.assertEqual(contract.status, "budget_exceeded")
+        self.assertEqual(attempts[0].status, "budget_exceeded")
 
     async def test_installed_resource_library_can_plan_real_candidate_without_live_call(self) -> None:
         bridge = NUResourceGenBridge(

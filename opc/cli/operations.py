@@ -28,6 +28,8 @@ from opc.operations.models import (
     utc_now,
 )
 from opc.operations.service import OperationsService
+from opc.operations.outbox import IndependentOutboxWorker, audit_outbox_handler
+from opc.operations.resource_pipeline import ResourcePipelineRequest
 
 
 T = TypeVar("T")
@@ -43,6 +45,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     staffing_app = typer.Typer(help="Recommend staff and record staffing regret")
     outbox_app = typer.Typer(help="Inspect and recover durable deliveries")
     mission_app = typer.Typer(help="Inspect the secretary Mission Control view")
+    resource_app = typer.Typer(help="Run approval-gated NU resource pipelines")
 
     app.add_typer(ops_app, name="ops")
     ops_app.add_typer(goal_app, name="goal")
@@ -53,6 +56,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     ops_app.add_typer(staffing_app, name="staffing")
     ops_app.add_typer(outbox_app, name="outbox")
     ops_app.add_typer(mission_app, name="mission")
+    ops_app.add_typer(resource_app, name="resource")
 
     @goal_app.command("create")
     def goal_create(
@@ -391,6 +395,28 @@ def register_operations_cli(app: typer.Typer) -> None:
 
         _emit(_run(project, action))
 
+    @learning_app.command("propose-routing")
+    def learning_propose_routing(
+        name: str = typer.Option("outcome-routing-policy", "--name"),
+        min_samples: int = typer.Option(3, "--min-samples", min=1),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Create a shadow-only routing candidate from passing measured outcomes."""
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            asset, summary = await service.routing_outcomes.propose_learning_candidate(
+                project_id=project,
+                name=name,
+                min_samples=min_samples,
+            )
+            return {
+                "created": asset is not None,
+                "asset": asset.to_dict() if asset else None,
+                "summary": summary,
+            }
+
+        _emit(_run(project, action))
+
     @capability_app.command("plan")
     def capability_plan(
         request_json: Path = typer.Option(..., "--request"),
@@ -407,6 +433,43 @@ def register_operations_cli(app: typer.Typer) -> None:
             return (await service.capabilities.plan(request)).to_dict()
 
         _emit(_run(project, action, integrations=True))
+
+    @capability_app.command("canary")
+    def capability_canary(
+        request_json: Path = typer.Option(..., "--request"),
+        expected_model: str = typer.Option("", "--expected-model"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Run a no-generation readiness canary and persist its SLO evidence."""
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            request = CapabilityRequest.from_dict(_load_mapping(request_json))
+            request.project_id = project
+            request.allow_live = False
+            return (
+                await service.canaries.status_canary(request, expected_model=expected_model)
+            ).to_dict()
+
+        _emit(_run(project, action, integrations=True))
+
+    @capability_app.command("slo")
+    def capability_slo(
+        provider: Optional[str] = typer.Option(None, "--provider"),
+        limit: int = typer.Option(100, "--limit", min=1, max=5000),
+        availability_target: float = typer.Option(0.95, "--availability-target", min=0, max=1),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        _emit(
+            _run(
+                project,
+                lambda service: service.canaries.slo_summary(
+                    project_id=project,
+                    provider=provider,
+                    limit=limit,
+                    availability_target=availability_target,
+                ),
+            )
+        )
 
     @staffing_app.command("recommend")
     def staffing_recommend(
@@ -435,6 +498,52 @@ def register_operations_cli(app: typer.Typer) -> None:
             return decision.to_dict()
 
         _emit(_run(project, action))
+
+    @resource_app.command("run")
+    def resource_pipeline_run(
+        request_json: Path = typer.Option(..., "--request"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        async def action(service: OperationsService) -> dict[str, Any]:
+            if service.resource_pipeline is None:
+                raise RuntimeError("NU resource pipeline is unavailable")
+            request = ResourcePipelineRequest.from_dict(_load_mapping(request_json))
+            request.project_id = project
+            return (await service.resource_pipeline.run(request)).to_dict()
+
+        _emit(_run(project, action, integrations=True))
+
+    @resource_app.command("approve")
+    def resource_pipeline_approve(
+        request_json: Path = typer.Option(..., "--request"),
+        expires_in_seconds: float = typer.Option(300.0, "--expires-in-seconds", min=1, max=3600),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Issue a short-lived approval bound to the exact prompt and cost ceiling."""
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            if service.resource_pipeline is None or service.resource_pipeline.approval_issuer is None:
+                raise RuntimeError(
+                    "set OPENOPC_RESOURCE_APPROVAL_SECRET (at least 16 bytes) before issuing approvals"
+                )
+            request = ResourcePipelineRequest.from_dict(_load_mapping(request_json))
+            request.project_id = project
+            request.validate()
+            token = service.resource_pipeline.approval_issuer.issue(
+                project_id=project,
+                candidate_id=request.candidate_id,
+                prompt=request.prompt,
+                max_cost_usd=request.max_cost_usd,
+                expires_in_seconds=expires_in_seconds,
+            )
+            return {
+                "approval_token": token,
+                "project_id": project,
+                "candidate_id": request.candidate_id,
+                "expires_in_seconds": expires_in_seconds,
+            }
+
+        _emit(_run(project, action, integrations=True))
 
     @staffing_app.command("observe")
     def staffing_observe(
@@ -493,6 +602,25 @@ def register_operations_cli(app: typer.Typer) -> None:
                 reason=reason,
             )
             return {"message": message.to_dict(), "audit_event": event.to_dict()}
+
+        _emit(_run(project, action))
+
+    @outbox_app.command("work")
+    def outbox_work(
+        consumer_id: str = typer.Option("openopc-audit", "--consumer-id"),
+        batch_size: int = typer.Option(50, "--batch-size", min=1, max=500),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Run one independently deployable, idempotent audit-consumer cycle."""
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            worker = IndependentOutboxWorker(
+                service.durable,
+                audit_outbox_handler,
+                consumer_id=consumer_id,
+                batch_size=batch_size,
+            )
+            return (await worker.dispatch_once()).to_dict()
 
         _emit(_run(project, action))
 
