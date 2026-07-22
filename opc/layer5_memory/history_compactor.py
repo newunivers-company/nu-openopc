@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
 from loguru import logger
@@ -40,8 +39,23 @@ class HistoryCompactor:
         self.compression_threshold = compression_threshold
 
     async def maybe_compact_after_message(self, message: SessionMessageRecord) -> None:
-        _ = message
-        return
+        metadata = dict(getattr(message, "metadata", {}) or {})
+        if bool(getattr(message, "summary_flag", False)) or bool(metadata.get("skip_compaction")):
+            return
+        session_id = str(getattr(message, "session_id", "") or "").strip()
+        if not session_id:
+            return
+        project_id = str(metadata.get("project_id") or self.memory_manager.project_id or "default").strip()
+        await self.maybe_compact_session(project_id=project_id, session_id=session_id)
+
+        employee_id = str(metadata.get("employee_id", "") or "").strip()
+        if employee_id:
+            await self.maybe_compact_agent(
+                project_id=project_id,
+                session_id=session_id,
+                employee_id=employee_id,
+                role_id=str(metadata.get("role_id", "") or "").strip(),
+            )
 
     async def maybe_compact_session(
         self,
@@ -284,11 +298,19 @@ class HistoryCompactor:
         force: bool = False,
         reserve_tokens: int = 0,
     ) -> bool:
-        _ = messages
-        _ = tools
-        _ = force
-        _ = reserve_tokens
-        return False
+        if force:
+            return True
+        if not messages or not self.llm:
+            return False
+        threshold = self._get_token_threshold(reserve_tokens=max(0, int(reserve_tokens or 0)))
+        if threshold is None:
+            return False
+        counted = self.llm.count_input_tokens(
+            messages,
+            tools=tools,
+            task_type=self.task_type,
+        )
+        return counted is not None and counted >= threshold
 
     def _is_context_overflow_error(self, error: Exception) -> bool:
         detector = getattr(self.llm, "is_context_overflow_error", None)

@@ -23,6 +23,15 @@ class WorkspaceTemporaryDirectory:
         stem = f"{prefix or 'tmp'}{uuid.uuid4().hex}{suffix or ''}"
         self._path = workspace_tmp_root() / stem
         self.name = str(self._path)
+        # Match tempfile.TemporaryDirectory: the directory exists as soon as the
+        # object is constructed, not only once it is used as a context manager.
+        # Several modules install this class as a process-global replacement for
+        # tempfile.TemporaryDirectory, so any test that constructs one without a
+        # `with` block (and there are such tests) would otherwise be handed a
+        # path that does not exist yet — surfacing much later, and only when
+        # those modules happen to be imported first, as
+        # `sqlite3.OperationalError: unable to open database file`.
+        self._path.mkdir(parents=True, exist_ok=True)
 
     def __enter__(self) -> str:
         self._path.mkdir(parents=True, exist_ok=True)

@@ -39,7 +39,6 @@ benchmarks/
 __pycache__/
 *.py[cod]
 *$py.class
-uv.lock
 *.egg-info/
 *.egg
 dist/

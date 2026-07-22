@@ -21,7 +21,10 @@ from opc.core.models import OPCEvent
 from opc.core.worker_envelope import classify_worker_message
 from opc.llm.provider import LLMProvider
 from opc.layer1_perception.context_assembler import ContextAssembler
-from opc.layer3_agent.company_runtime_contract import build_company_work_item_contract
+from opc.layer3_agent.company_runtime_contract import (
+    _COMPANY_REVIEW_WORK_ITEM_GUIDELINES,
+    build_company_work_item_contract,
+)
 from opc.layer3_agent.runtime_v2 import NativeRuntimeV2
 from opc.layer3_agent.prompt_harness import PromptHarnessBuilder
 from opc.layer3_agent.prompt_harness.builder import _final_decider_role_id, _memory_skill_user_facing

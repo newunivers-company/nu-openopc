@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -111,7 +111,7 @@ def persist_tool_result(
     root = _tool_results_root(task) / bucket
     root.mkdir(parents=True, exist_ok=True)
 
-    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     digest = sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
     suffix = extension.lstrip(".") or "txt"
     path = root / f"{_safe_segment(tool_name, 'tool')}-{stamp}-{digest}.{suffix}"

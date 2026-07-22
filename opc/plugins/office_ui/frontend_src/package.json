@@ -7,19 +7,23 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "tsc -b",
+    "test": "npm run test:unit && npm run test:vitest",
+    "test:unit": "node ./tests/run-unit-tests.mjs",
+    "test:vitest": "vitest run ./lib/phaseHelpers.test.ts",
     "test:scroll": "node --import tsx ./tests/message-list-scroll.spec.ts",
+    "test:e2e": "node --import tsx ./tests/message-list-scroll.spec.ts && node --import tsx ./tests/exec-panel-scroll.spec.ts",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^1.1.4",
     "@hello-pangea/dnd": "^18.0.1",
+    "@tanstack/react-table": "^8.21.0",
     "@tanstack/react-virtual": "^3.13.23",
+    "@xyflow/react": "^12.3.5",
     "easystarjs": "^0.4.4",
     "mdast-util-to-markdown": "^2.1.2",
     "phaser": "^3.90.0",
     "react": "^19.2.4",
-    "@xyflow/react": "^12.3.5",
-    "@dagrejs/dagre": "^1.1.4",
-    "@tanstack/react-table": "^8.21.0",
     "react-dom": "^19.2.4",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"
@@ -33,6 +37,10 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vite": "^7.2.4",
+    "vitest": "^3.2.7",
     "ws": "^8.20.0"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
   }
 }

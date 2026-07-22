@@ -24,12 +24,15 @@ class OfficeServiceFactory:
         self,
         *,
         config: OPCConfig | None = None,
+        engine: OPCEngine | None = None,
         project_id: str | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         on_runtime_event: Callable[[Any], Awaitable[None]] | None = None,
         on_escalation: Callable[..., Awaitable[str | None]] | None = None,
     ) -> None:
         self.config = config
+        self._provided_engine = engine
+        self._owns_engine = engine is None
         self.project_id = project_id
         self.on_progress = on_progress
         self.on_runtime_event = on_runtime_event
@@ -42,14 +45,15 @@ class OfficeServiceFactory:
         if self.config is None:
             config_dir = get_opc_home() / "config"
             self.config = OPCConfig.load(config_dir) if config_dir.exists() else OPCConfig()
-        self.engine = OPCEngine(
+        self.engine = self._provided_engine or OPCEngine(
             config=self.config,
             project_id=self.project_id,
             on_progress=self.on_progress,
             on_runtime_event=self.on_runtime_event,
             on_escalation=self.on_escalation,
         )
-        self.db = await aiosqlite.connect(str(self.engine.opc_home / "ui_state.db"))
+        opc_home = getattr(self.engine, "opc_home", get_opc_home())
+        self.db = await aiosqlite.connect(str(opc_home / "ui_state.db"))
         # Wait for a concurrent writer (e.g. a running office-UI server)
         # instead of failing after sqlite's 5s default with 'database is locked'.
         await self.db.execute("PRAGMA busy_timeout=30000")
@@ -58,7 +62,8 @@ class OfficeServiceFactory:
         chat_store = ChatStore(self.db)
         await chat_store.initialize()
         event_adapter = EventAdapter()
-        await self.engine.initialize()
+        if self._owns_engine:
+            await self.engine.initialize()
         mode_state = ModeState(
             exec_mode=await agent_store.get_server_state("exec_mode", "task"),
             company_profile=await agent_store.get_server_state("company_profile", "corporate"),
@@ -71,6 +76,11 @@ class OfficeServiceFactory:
             event_adapter=event_adapter,
             mode_state=mode_state,
         )
+        if self._provided_engine is not None:
+            # Embedded callers (notably the CLI board) already own the exact
+            # project engine and its in-memory/test store.  Re-resolving it
+            # would either create a duplicate engine or lose that store.
+            context.project_engine_resolver = lambda _project_id: self.engine
         self.services = OfficeServices(context)
         return self.services
 
@@ -80,7 +90,7 @@ class OfficeServiceFactory:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if self.engine is not None:
+        if self._owns_engine and self.engine is not None:
             await self.engine.shutdown()
         if self.db is not None:
             await self.db.close()

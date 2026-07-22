@@ -830,7 +830,10 @@ class OrgService:
         return ServiceResult({"role_ids": added, "count": len(added)})
 
     async def update_role(self, role_id: str, updates: dict[str, Any]) -> ServiceResult:
-        self._ensure_custom_org_editable()
+        # Structural/identity edits are only allowed on a saved custom org;
+        # runtime fields (tools, refs, capabilities, ...) may be tuned on any org.
+        if {"name", "responsibility", "reports_to", "icon"} & set(updates or {}):
+            self._ensure_custom_org_editable()
         role_id = str(role_id or "").strip()
         if not role_id:
             raise ServiceError("missing_role_id", "role_id required")

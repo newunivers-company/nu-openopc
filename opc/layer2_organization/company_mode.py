@@ -13,7 +13,7 @@ from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from loguru import logger
 
@@ -4032,7 +4032,7 @@ class CompanyWorkItemExecutor:
                                 "seat_id": work_item.seat_id,
                                 "fingerprint": fingerprint,
                                 "work_kind": work_kind,
-                                "previous_status": status,
+                                "previous_status": str(getattr(phase, "value", phase)),
                                 "needs_manager_attention": True,
                             },
                         )
@@ -13411,7 +13411,24 @@ class CompanyWorkItemExecutor:
         )
 
     def _is_authoritative_delivery_work_item(self, task: Task) -> bool:
-        return self._is_final_human_acceptance_task(task)
+        """An authoritative delivery card owns the run's delivery package.
+
+        Broader than final human acceptance: it does not require the card to
+        be user-visible or feedback_scope=final, only that it is the deliver
+        turn marked as the authoritative output.
+        """
+        metadata = dict(getattr(task, "metadata", {}) or {})
+        if str(metadata.get("execution_mode", "") or "").strip() != "company_mode":
+            return False
+        if self._metadata_flag_true(metadata.get("attention_work_item", False)):
+            return False
+        if not self._metadata_flag_true(metadata.get("authoritative_output", False)):
+            return False
+        return (
+            work_item_turn_type_from_metadata(metadata, fallback="") == "deliver"
+            or is_delivery_turn(metadata)
+            or self._is_final_human_acceptance_task(task)
+        )
 
     def _build_ceo_rework_record(
         self,

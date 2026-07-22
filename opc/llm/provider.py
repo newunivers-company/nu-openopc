@@ -21,6 +21,7 @@ from opc.core.attachment_content import attachment_suffix
 from opc.core.attachment_store import AttachmentRef
 from opc.core.config import LLMConfig
 from opc.core.models import ModelCapabilitySet, RuntimeLLMEvent
+from opc.integrations.nu_llm_routing import NULlmRoutingBridge, RoutedLLMTarget
 
 litellm.suppress_debug_info = True
 litellm.drop_params = True
@@ -238,6 +239,8 @@ class LLMProvider:
             os.environ.get(config.api_key_env) if config.api_key_env else None
         ) or None
         self._api_base = config.api_base or None
+        self.nu_router = NULlmRoutingBridge(config.nu_routing, opc_home=opc_home)
+        self._last_route_target: RoutedLLMTarget | None = None
 
     def has_credentials(self) -> bool:
         """Whether an LLM call can plausibly authenticate.
@@ -251,20 +254,76 @@ class LLMProvider:
         """
         if self._api_key:
             return True
-        return any(os.environ.get(var) for var in self._CREDENTIAL_ENV_VARS)
+        if any(os.environ.get(var) for var in self._CREDENTIAL_ENV_VARS):
+            return True
+        return self.nu_router.has_usable_target()
 
     @property
     def stats(self) -> dict[str, Any]:
-        return {
+        stats: dict[str, Any] = {
             "tokens_in": self._total_tokens_in,
             "tokens_out": self._total_tokens_out,
             "estimated_cost": self._total_cost,
         }
+        if self._last_route_target is not None:
+            stats["nu_route_target"] = self._last_route_target.safe_dict()
+        return stats
+
+    def _configured_target(self, model: str) -> RoutedLLMTarget:
+        return RoutedLLMTarget(
+            provider="openopc_config",
+            model=model,
+            api_base=self._api_base or "",
+            api_key=self._api_key,
+        )
+
+    def _select_target(
+        self,
+        task_type: str | None = None,
+        *,
+        has_tools: bool = False,
+    ) -> RoutedLLMTarget:
+        if task_type and task_type in self.config.routing:
+            target = self._configured_target(self.config.routing[task_type])
+            self._last_route_target = target
+            return target
+        routed = self.nu_router.targets(task_type=task_type, has_tools=has_tools)
+        if routed:
+            self._last_route_target = routed[0]
+            return routed[0]
+        target = self._configured_target(self.config.default_model)
+        self._last_route_target = target
+        return target
 
     def _select_model(self, task_type: str | None = None) -> str:
-        if task_type and task_type in self.config.routing:
-            return self.config.routing[task_type]
-        return self.config.default_model
+        return self._select_target(task_type).model
+
+    def _apply_target_transport(
+        self,
+        call_kwargs: dict[str, Any],
+        target: RoutedLLMTarget,
+    ) -> None:
+        api_base = target.api_base or self._api_base
+        if api_base:
+            call_kwargs["api_base"] = api_base
+        if target.provider == "openopc_config":
+            if target.api_key:
+                call_kwargs["api_key"] = target.api_key
+        else:
+            # A routed endpoint owns its authentication boundary.  In
+            # particular, never forward OpenOPC's default provider key to a
+            # keyless localhost target selected by the shared router.
+            call_kwargs.pop("api_key", None)
+            if target.api_key:
+                call_kwargs["api_key"] = target.api_key
+        if target.extra_body:
+            merged_extra_body = dict(target.extra_body)
+            existing = call_kwargs.get("extra_body")
+            if isinstance(existing, dict):
+                merged_extra_body.update(existing)
+            call_kwargs["extra_body"] = merged_extra_body
+        for parameter in target.unsupported_params:
+            call_kwargs.pop(parameter, None)
 
     def _config_context_window_override(self, model: str) -> int | None:
         """User-configured context window for models litellm cannot map.
@@ -291,14 +350,16 @@ class LLMProvider:
         return scalar if scalar > 0 else None
 
     def get_context_window(self, task_type: str | None = None, model: str | None = None) -> int | None:
-        resolved_model = model or self._select_model(task_type)
+        target = self._select_target(task_type)
+        resolved_model = model or target.model
+        selected_api_base = target.api_base or self._api_base
         config_override = self._config_context_window_override(resolved_model)
         if config_override is not None:
             return config_override
-        poe_override = _poe_context_window_override(resolved_model) if _is_poe_base(self._api_base) else None
+        poe_override = _poe_context_window_override(resolved_model) if _is_poe_base(selected_api_base) else None
         if poe_override is not None:
             return poe_override
-        override = _context_window_override(resolved_model) if _is_official_openai_base(self._api_base) else None
+        override = _context_window_override(resolved_model) if _is_official_openai_base(selected_api_base) else None
         if override is not None:
             return override
         try:
@@ -331,7 +392,7 @@ class LLMProvider:
         task_type: str | None = None,
         model: str | None = None,
     ) -> int | None:
-        resolved_model = model or self._select_model(task_type)
+        resolved_model = model or self._select_target(task_type, has_tools=bool(tools)).model
         try:
             return int(litellm.token_counter(
                 model=resolved_model,
@@ -510,7 +571,8 @@ class LLMProvider:
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        model = self._select_model(task_type)
+        target = self._select_target(task_type, has_tools=bool(tools))
+        model = target.model
         temp = temperature if temperature is not None else self.config.temperature
         max_tok = _clamp_max_tokens(model, max_tokens if max_tokens is not None else self.config.max_tokens)
 
@@ -521,15 +583,19 @@ class LLMProvider:
             "max_tokens": max_tok,
             **kwargs,
         }
-        if self._api_base:
-            call_kwargs["api_base"] = self._api_base
-        if self._api_key:
-            call_kwargs["api_key"] = self._api_key
+        self._apply_target_transport(call_kwargs, target)
         if tools:
             call_kwargs["tools"] = tools
             call_kwargs["tool_choice"] = "auto"
 
-        logger.debug(f"LLM call: model={model}, base={self._api_base or 'default'}, msgs={len(messages)}, tools={len(tools or [])}")
+        logger.debug(
+            "LLM call: model={}, provider={}, base={}, msgs={}, tools={}",
+            model,
+            target.provider,
+            target.api_base or self._api_base or "default",
+            len(messages),
+            len(tools or []),
+        )
 
         try:
             response = await litellm.acompletion(**call_kwargs)
@@ -655,7 +721,8 @@ class LLMProvider:
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[RuntimeLLMEvent]:
-        model = self._select_model(task_type)
+        target = self._select_target(task_type, has_tools=bool(tools))
+        model = target.model
         temp = temperature if temperature is not None else self.config.temperature
         max_tok = _clamp_max_tokens(model, max_tokens if max_tokens is not None else self.config.max_tokens)
 
@@ -667,16 +734,18 @@ class LLMProvider:
             "stream": True,
             **kwargs,
         }
-        if self._api_base:
-            call_kwargs["api_base"] = self._api_base
-        if self._api_key:
-            call_kwargs["api_key"] = self._api_key
+        self._apply_target_transport(call_kwargs, target)
         if tools:
             call_kwargs["tools"] = tools
             call_kwargs["tool_choice"] = "auto"
 
         logger.debug(
-            f"LLM stream call: model={model}, base={self._api_base or 'default'}, msgs={len(messages)}, tools={len(tools or [])}"
+            "LLM stream call: model={}, provider={}, base={}, msgs={}, tools={}",
+            model,
+            target.provider,
+            target.api_base or self._api_base or "default",
+            len(messages),
+            len(tools or []),
         )
 
         last_usage = {"prompt_tokens": 0, "completion_tokens": 0}

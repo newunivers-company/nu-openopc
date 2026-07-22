@@ -25,7 +25,6 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Any
 
 from opc.core.company_tools import COMPANY_ALL_COLLABORATION_TOOL_NAMES
@@ -96,7 +95,11 @@ def _collect_tool_args(opts: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     _reject_unsafe_windows_rpc_args_if_needed(opts)
     if opts.args_json_file:
-        raw = Path(opts.args_json_file).expanduser().read_text(encoding="utf-8-sig")
+        # Built-in open follows the host filesystem.  Constructing pathlib.Path
+        # while ``os.name`` is overridden by a Windows RPC shim can otherwise
+        # reinterpret an already-resolved POSIX path as a Windows path.
+        with open(os.path.expanduser(opts.args_json_file), encoding="utf-8-sig") as args_file:
+            raw = args_file.read()
         if raw.strip():
             payload.update(_parse_args_json(raw))
     if opts.args_stdin:

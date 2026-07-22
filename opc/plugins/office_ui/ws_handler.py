@@ -519,14 +519,20 @@ class WSHandler:
         self.services_context.broadcast_snapshot = self._broadcast_snapshot
         self.services_context.cancel_session_tasks = self._cancel_session_tasks
         self.services_context.cancel_task_tree = self._cancel_task_tree
+        # Resolve at call time so tests and embedders can replace the handler's
+        # project resolver without leaving the service layer on a stale path.
+        self.services_context.project_engine_resolver = lambda project_id: self._engine_for_project(project_id)
         self.services = OfficeServices(self.services_context)
         self._wire_engine_callbacks(engine)
 
     def _on_service_engine_activated(self, engine: Any, project_id: str) -> None:
-        self.engine = engine
-        self.dispatcher = Dispatcher(engine, self.chat_store)
+        # A browser project switch is a per-client view change.  The root
+        # handler stays bound to its owning engine so in-flight work for other
+        # clients cannot be rebound or cancelled.
         self._active_project_id = self._normalize_project_id(project_id)
-        self._refresh_engine_attachment_store()
+        ensure_attachment_store = getattr(engine, "_ensure_attachment_store", None)
+        if callable(ensure_attachment_store):
+            ensure_attachment_store()
 
     def _ensure_office_services(self) -> OfficeServices:
         """Create service wiring for tests that instantiate WSHandler via __new__."""
@@ -575,6 +581,8 @@ class WSHandler:
             context.cancel_session_tasks = self._cancel_session_tasks
         if hasattr(self, "_cancel_task_tree"):
             context.cancel_task_tree = self._cancel_task_tree
+        if hasattr(self, "_engine_for_project"):
+            context.project_engine_resolver = lambda project_id: self._engine_for_project(project_id)
         self.services_context = context
         self.services = OfficeServices(context)
         return self.services

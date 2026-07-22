@@ -3815,7 +3815,6 @@ async def build_collab_sync(
             "message_count": msg_count,
             # Company Mode metadata
             **identity_payload,
-            "company_profile": resolved_company_profile,
             **({} if is_task_mode_runtime else _work_item_role_payload(identity_task)),
             "work_item_gate": None if is_task_mode_runtime else (identity_meta.get("work_item_gate") or t_meta.get("work_item_gate")),
             "employee_assignment": employee_assignment or None,

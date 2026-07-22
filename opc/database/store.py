@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import inspect
+import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import partial
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -127,21 +130,22 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 
 class _SQLiteCursorAdapter:
-    def __init__(self, cursor: sqlite3.Cursor) -> None:
+    def __init__(self, connection: "_SQLiteConnectionAdapter", cursor: sqlite3.Cursor) -> None:
+        self._connection = connection
         self._cursor = cursor
 
     async def __aenter__(self) -> "_SQLiteCursorAdapter":
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
-        self._cursor.close()
+        await self._connection._call(self._cursor.close)
         return False
 
     async def fetchone(self) -> Any:
-        return self._cursor.fetchone()
+        return await self._connection._call(self._cursor.fetchone)
 
     async def fetchall(self) -> list[Any]:
-        return self._cursor.fetchall()
+        return await self._connection._call(self._cursor.fetchall)
 
     @property
     def description(self) -> Any:
@@ -153,52 +157,101 @@ class _SQLiteCursorAdapter:
 
 
 class _SQLiteExecuteResult:
-    def __init__(self, connection: sqlite3.Connection, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> None:
+    def __init__(
+        self,
+        connection: "_SQLiteConnectionAdapter",
+        sql: str,
+        params: tuple[Any, ...] | list[Any] = (),
+    ) -> None:
         self._connection = connection
         self._sql = sql
         self._params = tuple(params)
-        self._cursor: sqlite3.Cursor | None = None
+        self._cursor: _SQLiteCursorAdapter | None = None
+
+    async def _run(self) -> _SQLiteCursorAdapter:
+        connection = await self._connection._ensure_connected()
+        cursor = await self._connection._call(connection.cursor)
+        try:
+            await self._connection._call(cursor.execute, self._sql, self._params)
+        except Exception:
+            await self._connection._call(cursor.close)
+            raise
+        return _SQLiteCursorAdapter(self._connection, cursor)
 
     def __await__(self):
-        async def _run() -> _SQLiteCursorAdapter:
-            cursor = self._connection.cursor()
-            cursor.execute(self._sql, self._params)
-            return _SQLiteCursorAdapter(cursor)
-
-        return _run().__await__()
+        return self._run().__await__()
 
     async def __aenter__(self) -> _SQLiteCursorAdapter:
-        cursor = self._connection.cursor()
-        cursor.execute(self._sql, self._params)
-        self._cursor = cursor
-        return _SQLiteCursorAdapter(cursor)
+        self._cursor = await self._run()
+        return self._cursor
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         if self._cursor is not None:
-            self._cursor.close()
+            await self._cursor.__aexit__(exc_type, exc, tb)
         return False
 
 
 class _SQLiteConnectionAdapter:
     def __init__(self, db_path: str) -> None:
-        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=30000")
+        self._db_path = str(db_path)
+        self._conn: sqlite3.Connection | None = None
+        self._connect_lock = asyncio.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="opc-sqlite")
+
+    async def _call(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, partial(fn, *args))
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self._db_path,
+            check_same_thread=False,
+            timeout=30.0,
+        )
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    async def _ensure_connected(self) -> sqlite3.Connection:
+        if self._conn is not None:
+            return self._conn
+        async with self._connect_lock:
+            if self._conn is None:
+                self._conn = await self._call(self._connect)
+        assert self._conn is not None
+        return self._conn
 
     def execute(self, sql: str, parameters: tuple[Any, ...] | list[Any] = ()) -> _SQLiteExecuteResult:
-        return _SQLiteExecuteResult(self._conn, sql, parameters)
+        return _SQLiteExecuteResult(self, sql, parameters)
 
     async def executescript(self, script: str) -> None:
-        self._conn.executescript(script)
+        connection = await self._ensure_connected()
+        await self._call(connection.executescript, script)
 
     async def commit(self) -> None:
-        self._conn.commit()
+        connection = await self._ensure_connected()
+        await self._call(connection.commit)
 
     async def rollback(self) -> None:
-        self._conn.rollback()
+        connection = await self._ensure_connected()
+        await self._call(connection.rollback)
 
     async def close(self) -> None:
-        self._conn.close()
+        if self._conn is not None:
+            await self._call(self._conn.close)
+            self._conn = None
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def __del__(self) -> None:
+        # Test doubles historically did not need to close the synchronous
+        # adapter.  Keep that compatibility without leaking a worker thread.
+        try:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
 
 class OPCStore:
@@ -248,7 +301,7 @@ class OPCStore:
         """Whether the SQLite connection has been initialized."""
         return self._db is not None
 
-    def _require_db(self) -> aiosqlite.Connection:
+    def _require_db(self) -> _SQLiteConnectionAdapter:
         """Return the active DB connection or raise a descriptive error."""
         if self._db is None:
             raise RuntimeError(
@@ -2031,6 +2084,13 @@ class OPCStore:
                     full_run_ids,
                 )
             )
+
+        # A WorkItem is the business source of truth and its runtime Task is a
+        # replaceable projection.  Deleting a standalone projected Task must
+        # therefore remove the link, but keep the WorkItem available for
+        # rematerialization.  Session deletion still removes its full run.
+        if not clean_session_id and not full_run_ids:
+            work_item_ids.clear()
 
         if work_item_ids:
             role_runtime_session_ids.update(

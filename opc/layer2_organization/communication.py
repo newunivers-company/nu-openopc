@@ -1578,7 +1578,6 @@ class CommunicationManager:
                 return meeting, True
         await self.store.save_meeting(meeting)
         return meeting, changed
-        await self.store.save_task(task)
 
     def _mark_peer_wait(self, task: Task, message: AgentMessage, timeout_seconds: int = 300) -> dict[str, Any]:
         task.status = TaskStatus.AWAITING_PEER

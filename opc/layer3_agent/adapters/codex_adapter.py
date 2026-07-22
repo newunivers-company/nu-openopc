@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import uuid
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -73,8 +74,6 @@ class CodexAdapter(ExternalAgentAdapter):
         # provider settings as the CLI the user runs directly. Prefer
         # symlinks so rotations are tracked; fall back to copying on
         # Windows/filesystems where symlink creation is blocked.
-        from pathlib import Path
-
         user_home = Path.home() / ".codex"
         target_home = Path(home)
         target_home.mkdir(parents=True, exist_ok=True)
@@ -642,6 +641,7 @@ class CodexAdapter(ExternalAgentAdapter):
                 return proc
             if isinstance(launch_metadata, dict):
                 self._record_stdin_policy_metadata(launch_metadata, stdin_policy)
+                launch_metadata["interactive_input_channel"] = "inherit"
                 launch_metadata["interactive_input_limitation"] = (
                     "stdin is inherited for argv prompt delivery on PTY-less platforms; "
                     "live approval replies require a PTY-capable platform"
@@ -903,7 +903,7 @@ class CodexAdapter(ExternalAgentAdapter):
             return []
         if mode == "full-auto":
             return ["--dangerously-bypass-approvals-and-sandbox"]
-        return ["--sandbox", "danger-full-access"]
+        return ["--sandbox", "workspace-write"]
 
     def _build_resume_approval_args(self) -> list[str]:
         common_args = self.build_common_args()
@@ -918,7 +918,7 @@ class CodexAdapter(ExternalAgentAdapter):
 
         # `codex exec resume` does not accept the `--sandbox` flag that plain
         # `codex exec` supports, but it does accept config overrides.
-        return ["-c", 'sandbox_mode="danger-full-access"']
+        return ["-c", 'sandbox_mode="workspace-write"']
 
     def _review_decision_payload(
         self,

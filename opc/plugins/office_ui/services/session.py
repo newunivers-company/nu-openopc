@@ -428,6 +428,7 @@ class SessionService:
             "company_profile": identity.company_profile,
             "preferred_agent": identity.preferred_agent,
             "interface": interface,
+            "source": interface,
         }
         if identity.is_custom_org and identity.org_id:
             metadata.update({"org_id": identity.org_id, "organization_id": identity.org_id})

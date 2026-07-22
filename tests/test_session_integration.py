@@ -6008,7 +6008,7 @@ class TestWSHandlerProgressRouting(unittest.IsolatedAsyncioTestCase):
         self.adapter.update_role_map({"executor": "agent-executor"})
 
         await self.handler.on_progress(
-            "[External status] codex started pid=42",
+            "[External:codex:stdout] applying patch",
             task_id="work-item-1",
             agent_role_id="executor",
         )

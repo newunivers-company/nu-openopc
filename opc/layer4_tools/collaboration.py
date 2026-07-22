@@ -42,6 +42,7 @@ from opc.layer2_organization.work_item_links import linked_work_item_id_for_task
 from opc.layer2_organization.work_item_runtime import mark_work_item_runtime
 from opc.layer2_organization.work_item_identity import mark_work_item_projection
 from opc.layer2_organization.work_item_transition import (
+    apply_task_status_transition,
     is_prunable_dependency_work_item,
     normalize_dependency_work_item_ids,
     refresh_dependents_for_run,
@@ -2705,7 +2706,6 @@ def create_collaboration_tools(
                             TaskStatus.FAILED,
                             TaskStatus.CANCELLED,
                         }:
-                            runtime_task.status = TaskStatus.CANCELLED
                             runtime_task.execution_lock = False
                             runtime_task.execution_locked_at = None
                             runtime_task.metadata = {
@@ -2714,6 +2714,15 @@ def create_collaboration_tools(
                                 "deleted_by_manager_tool": True,
                                 "cascade_deleted_by_work_item_id": item.work_item_id,
                             }
+                            await apply_task_status_transition(
+                                store,
+                                runtime_task,
+                                target_status_or_phase=TaskStatus.CANCELLED,
+                                reason="manager_deleted_ancestor_work_item",
+                                release_claim=True,
+                                save_plain_task=False,
+                                raise_on_missing_work_item=False,
+                            )
                             if hasattr(store, "save_task"):
                                 await store.save_task(runtime_task)
                 except Exception:

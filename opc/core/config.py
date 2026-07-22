@@ -264,6 +264,24 @@ def allocate_organization_id(config_dir: Path, organization_name: Any, *, prefer
 # Config Models
 # ---------------------------------------------------------------------------
 
+class NULlmRoutingConfig(BaseModel):
+    """Optional bridge to the private NU provider-routing library."""
+
+    enabled: bool = False
+    config_path: str = ""
+    fail_open: bool = True
+    apply_to_tool_calls: bool = False
+    sandboxed_tools: bool = False
+    hardware_profile: str = ""
+    gpu_free_vram_mib: int = Field(default=0, ge=0)
+    max_candidates: int = Field(default=4, ge=1, le=20)
+    allowed_providers: list[str] = Field(default_factory=list)
+    workload_map: dict[str, str] = Field(default_factory=lambda: {
+        "coding": "coding",
+        "quick_tasks": "structured_output",
+    })
+
+
 class LLMConfig(BaseModel):
     default_model: str = "anthropic/claude-sonnet-4-20250514"
     api_base: str = ""
@@ -281,13 +299,14 @@ class LLMConfig(BaseModel):
     # take precedence over the scalar value.
     context_window: int = 0
     context_window_overrides: dict[str, int] = Field(default_factory=dict)
+    nu_routing: NULlmRoutingConfig = Field(default_factory=NULlmRoutingConfig)
 
 
 ExternalAgentApprovalMode = Literal["user-settings", "auto", "full-auto"]
 _EXTERNAL_AGENT_APPROVAL_MODES = {"user-settings", "auto", "full-auto"}
 _LEGACY_EXTERNAL_AGENT_APPROVAL_MODE_MIGRATIONS = {
-    "delegate": "auto",
-    "bypass": "auto",
+    "delegate": "user-settings",
+    "bypass": "user-settings",
 }
 _LEGACY_OPENCODE_DEFAULT_MODEL = "opencode/minimax-m2.5-free"
 
@@ -357,21 +376,20 @@ class ExternalAgentConfig(BaseModel):
     idle_timeout_seconds: int = 900
     startup_timeout_seconds: int = DEFAULT_EXTERNAL_AGENT_STARTUP_TIMEOUT_SECONDS
     status_heartbeat_seconds: int = 30
-    approval_mode: ExternalAgentApprovalMode = "auto"
+    approval_mode: ExternalAgentApprovalMode = "user-settings"
     show_thinking: bool = False
 
 
 class AgentsConfig(BaseModel):
     preferred_order: list[str] = Field(default_factory=lambda: ["claude_code", "cursor", "codex", "opencode"])
     agents: dict[str, ExternalAgentConfig] = Field(default_factory=lambda: {
-        "claude_code": ExternalAgentConfig(command="claude", run_mode="interactive", approval_mode="full-auto"),
-        "cursor": ExternalAgentConfig(command="cursor-agent", run_mode="interactive", approval_mode="full-auto"),
+        "claude_code": ExternalAgentConfig(command="claude", run_mode="interactive"),
+        "cursor": ExternalAgentConfig(command="cursor-agent", run_mode="interactive"),
         "codex": ExternalAgentConfig(command="codex", run_mode="interactive"),
         "opencode": ExternalAgentConfig(
             command="opencode",
             model_flag="--model",
             run_mode="interactive",
-            approval_mode="full-auto",
             show_thinking=True,
         ),
     })
@@ -618,11 +636,11 @@ class SandboxPlatformConfig(BaseModel):
 class SandboxExecutionConfig(BaseModel):
     enabled: bool = False
     default_mode: Literal["off", "workspace-write", "elevated"] = "off"
-    fail_if_unavailable: bool = False
-    allow_direct_fallback: bool = True
+    fail_if_unavailable: bool = True
+    allow_direct_fallback: bool = False
     allow_network: bool = True
     windows: SandboxPlatformConfig = Field(
-        default_factory=lambda: SandboxPlatformConfig(mode="elevated", wrapper="none")
+        default_factory=lambda: SandboxPlatformConfig(mode="off", wrapper="none")
     )
     linux: SandboxPlatformConfig = Field(
         default_factory=lambda: SandboxPlatformConfig(mode="workspace-write", wrapper="auto")
@@ -896,6 +914,21 @@ class MCPServerConfig(BaseModel):
     startup_timeout: float = 30.0
 
 
+class NUResourceGenConfig(BaseModel):
+    """Safe-by-default access to the private NU resource-generation catalog."""
+
+    enabled: bool = False
+    allow_live: bool = False
+    allowed_live_candidates: list[str] = Field(default_factory=list)
+    record_ledger: bool = True
+    record_dry_runs: bool = True
+    ledger_root: str = ""
+    artifact_archive_root: str = ""
+    archive_live_artifacts: bool = True
+    max_timeout_seconds: int = Field(default=900, ge=1, le=86_400)
+    max_catalog_results: int = Field(default=50, ge=1, le=200)
+
+
 class SystemConfig(BaseModel):
     opc_home: str = ""
     default_channel: str = "cli"
@@ -910,6 +943,7 @@ class SystemConfig(BaseModel):
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    nu_resource_gen: NUResourceGenConfig = Field(default_factory=NUResourceGenConfig)
     native_runtime: NativeRuntimeConfig = Field(default_factory=NativeRuntimeConfig)
     task_mode: TaskModeConfig = Field(
         default_factory=TaskModeConfig,

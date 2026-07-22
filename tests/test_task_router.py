@@ -20,7 +20,8 @@ class _StubLLM:
 class TaskRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_route_returns_default_task_mode_without_llm_call(self) -> None:
         llm = _StubLLM()
-        router = TaskRouter(llm)
+        with self.assertWarns(DeprecationWarning):
+            router = TaskRouter(llm)
 
         decision = await router.route("build a local product", LoadedContext())
 
@@ -30,7 +31,8 @@ class TaskRouterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_route_ignores_context_and_preferences(self) -> None:
         llm = _StubLLM()
-        router = TaskRouter(llm)
+        with self.assertWarns(DeprecationWarning):
+            router = TaskRouter(llm)
         context = LoadedContext()
         context.session_execution_defaults = {
             "mode": "company_mode",

@@ -9,6 +9,26 @@ llm:
   max_tokens: 32768
   routing: {}
   fallback: {}
+  nu_routing:
+    enabled: true
+    # Uses NU_LLM_ROUTER_CONFIG when set. In a sibling source checkout OpenOPC
+    # auto-discovers ../nu-llm-routing-lib/configs/byteplus.production.json.
+    config_path: ""
+    fail_open: true
+    # nu-llm-routing-lib does not carry tool-call response envelopes itself.
+    # Keep tool turns on OpenOPC's explicitly configured LiteLLM model until a
+    # target endpoint has been verified for the OpenAI tool-call protocol.
+    apply_to_tool_calls: false
+    sandboxed_tools: false
+    hardware_profile: ""
+    # Always provide a deterministic value so route planning never probes
+    # nvidia-smi implicitly. Raise this only for an audited local GPU runtime.
+    gpu_free_vram_mib: 0
+    max_candidates: 4
+    allowed_providers: []
+    workload_map:
+      coding: coding
+      quick_tasks: structured_output
 
   # Optional: total input context window, used as the denominator for the
   # context-usage ring and to trigger auto-summarization. Auto-detected via

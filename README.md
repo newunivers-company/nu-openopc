@@ -262,6 +262,40 @@ uv run opc ui
 
 Open `http://localhost:8765` by default.
 
+### NewUnivers routing and resource generation (optional)
+
+OpenOPC can use `nu-llm-routing-lib` for credential-aware model routing and
+`nu-resource-gen-lib` for policy-guarded image, video, audio, and VLM resource
+plans. Keep all three repositories next to each other and install the `nu`
+extra with Python 3.11 or newer:
+
+```text
+newunivers-company/
+├── nu-openopc/
+├── nu-llm-routing-lib/
+└── nu-resource-gen-lib/
+```
+
+```bash
+cd nu-openopc
+uv sync --extra dev --extra nu
+
+# Read-only diagnostics: no provider call and no billable generation
+uv run opc chat -p demo --mode task \
+  "Run nu_llm_route_diagnostics and list the available NU resource candidates"
+```
+
+NU model routing is fail-open: explicit `llm.routing` entries remain
+authoritative, tool-calling turns stay on the configured OpenOPC model by
+default, and candidates without usable credentials are skipped. Resource
+generation is fail-closed: live calls require an enabled candidate allowlist
+and an explicit human confirmation; dry-run planning and the execution ledger
+remain available without enabling billing.
+
+The CI workflow checks out both sibling repositories. If they are private,
+configure a read-only `NU_REPOS_READ_TOKEN` Actions secret with access to them;
+public repositories work with the normal workflow token.
+
 ```bash
 # Interactive CLI
 uv run opc chat -p demo
@@ -297,7 +331,8 @@ python -m pip install -e .
 python -m pytest
 
 cd opc/plugins/office_ui/frontend_src
-npm install
+npm ci
+npm test
 npm run typecheck
 npm run build
 ```
@@ -317,6 +352,18 @@ opc ui
 opc ui --port 9000 --project demo
 opc ui --rebuild
 ```
+
+The server binds to `127.0.0.1` by default. A non-loopback bind is refused
+unless an authentication token is configured:
+
+```bash
+OPC_UI_AUTH_TOKEN="replace-with-a-long-random-token" \
+  opc ui --host 0.0.0.0 --allow-origin https://office.example.com
+```
+
+Send the token as `Authorization: Bearer ...`, `X-OPC-Auth-Token`, or open
+`/auth?token=...` once to exchange it for an HttpOnly session cookie. Add each
+trusted browser origin explicitly with a repeated `--allow-origin` option.
 
 ### Visual Tour
 

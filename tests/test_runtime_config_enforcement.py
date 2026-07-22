@@ -78,10 +78,10 @@ class RuntimeConfigEnforcementTests(unittest.IsolatedAsyncioTestCase):
 
     def test_external_agent_defaults_use_install_ready_modes(self) -> None:
         config = AgentsConfig()
-        self.assertEqual(config.agents["codex"].approval_mode, "auto")
-        self.assertEqual(config.agents["claude_code"].approval_mode, "full-auto")
-        self.assertEqual(config.agents["cursor"].approval_mode, "full-auto")
-        self.assertEqual(config.agents["opencode"].approval_mode, "full-auto")
+        self.assertEqual(config.agents["codex"].approval_mode, "user-settings")
+        self.assertEqual(config.agents["claude_code"].approval_mode, "user-settings")
+        self.assertEqual(config.agents["cursor"].approval_mode, "user-settings")
+        self.assertEqual(config.agents["opencode"].approval_mode, "user-settings")
         self.assertEqual(config.agents["opencode"].model, "")
 
     def test_load_migrates_legacy_external_agent_approval_modes_once(self) -> None:
@@ -107,15 +107,15 @@ class RuntimeConfigEnforcementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 {name: agent.approval_mode for name, agent in config.agents.agents.items()},
                 {
-                    "claude_code": "auto",
-                    "codex": "auto",
-                    "cursor": "auto",
-                    "opencode": "auto",
+                    "claude_code": "user-settings",
+                    "codex": "user-settings",
+                    "cursor": "user-settings",
+                    "opencode": "user-settings",
                 },
             )
             reloaded = yaml.safe_load(agent_config_path.read_text(encoding="utf-8"))
-            self.assertEqual(reloaded["external_agents"]["claude_code"]["approval_mode"], "auto")
-            self.assertEqual(reloaded["external_agents"]["codex"]["approval_mode"], "auto")
+            self.assertEqual(reloaded["external_agents"]["claude_code"]["approval_mode"], "user-settings")
+            self.assertEqual(reloaded["external_agents"]["codex"]["approval_mode"], "user-settings")
 
     def test_load_migrates_legacy_opencode_default_model(self) -> None:
         with _workspace_tempdir() as config_dir:

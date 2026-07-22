@@ -51,13 +51,13 @@ class _MemoryStoreStub:
 
 
 class MemoryManagerCompactionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_append_session_message_does_not_trigger_history_compaction(self) -> None:
+    async def test_append_session_message_triggers_history_compaction(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             memory = MemoryManager(Path(tmpdir), project_id="proj", store=_MemoryStoreStub())
             compactor = SimpleNamespace(maybe_compact_after_message=AsyncMock())
             memory.set_history_compactor(compactor)
 
-            await memory.append_session_message(
+            message = await memory.append_session_message(
                 "sess-1",
                 "assistant",
                 text="hello",
@@ -65,7 +65,7 @@ class MemoryManagerCompactionTests(unittest.IsolatedAsyncioTestCase):
                 metadata={"role_id": "cmo"},
             )
 
-            compactor.maybe_compact_after_message.assert_not_awaited()
+            compactor.maybe_compact_after_message.assert_awaited_once_with(message)
 
     async def test_parent_child_result_preserves_structured_source_lineage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

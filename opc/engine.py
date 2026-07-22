@@ -73,10 +73,10 @@ from opc.layer0_interaction.message_bus import MessageBus
 from opc.channels import ChannelManager
 from opc.layer1_perception.context_assembler import ContextAssembler, ExternalContextLayers
 from opc.layer1_perception.context_loader import ContextLoader
-from opc.layer1_perception.task_router import TaskRouter
 from opc.layer2_organization.org_engine import (
     OrgEngine,
     TASK_MODE_COMPANY_ONLY_TOOLS,
+    is_same_default_employee_identity,
 )
 from opc.layer2_organization.task_graph import TaskGraphScheduler
 from opc.layer2_organization.approval import ApprovalEngine
@@ -197,6 +197,9 @@ from opc.layer4_tools.collaboration import (
 )
 from opc.layer4_tools.todo import create_todo_tools
 from opc.layer4_tools.agent_runtime import create_agent_runtime_tools
+from opc.layer4_tools.nu_llm import create_nu_llm_tools
+from opc.layer4_tools.nu_resource_gen import create_nu_resource_gen_tools
+from opc.integrations.nu_resource_gen import NUResourceGenBridge
 from opc.layer2_organization.heartbeat import HeartbeatScheduler
 from opc.mcp_client import MCPManager
 from opc.layer5_memory.memory_manager import MemoryManager
@@ -406,6 +409,7 @@ class OPCEngine:
             else bool(owns_active_task_run_registry)
         )
         self.llm: LLMProvider | None = None
+        self.nu_resource_gen: NUResourceGenBridge | None = None
         self.attachment_store: AttachmentStore | None = None
 
         # Layers
@@ -439,7 +443,6 @@ class OPCEngine:
         # Perception layer
         self.context_loader: ContextLoader | None = None
         self.context_assembler: ContextAssembler | None = None
-        self.task_router: TaskRouter | None = None
 
         self._initialized = False
         self._shutting_down = False
@@ -599,6 +602,11 @@ class OPCEngine:
 
         # LLM
         self.llm = LLMProvider(self.config.llm, opc_home=self.opc_home)
+        self.nu_resource_gen = NUResourceGenBridge(
+            self.config.system.nu_resource_gen,
+            opc_home=self.opc_home,
+            project_id=self.project_id,
+        )
 
         # Layer 4: Tools
         self._register_tools()
@@ -722,8 +730,6 @@ class OPCEngine:
             self.org_engine,
             self.store,
         )
-        self.task_router = TaskRouter(self.llm)
-
         self.org_engine.configure_task_mode_tools(self._task_mode_tool_names())
 
         # Heartbeat scheduler for company-mode agent autonomy
@@ -806,6 +812,11 @@ class OPCEngine:
             self.tool_registry.register(tool)
         for tool in create_agent_runtime_tools():
             self.tool_registry.register(tool)
+        for tool in create_nu_llm_tools(self.llm):
+            self.tool_registry.register(tool)
+        if self.nu_resource_gen is not None:
+            for tool in create_nu_resource_gen_tools(self.nu_resource_gen):
+                self.tool_registry.register(tool)
         logger.debug(f"Registered {len(self.tool_registry.list_tools())} tools")
 
     async def _register_mcp_tools(self) -> None:
@@ -2953,10 +2964,14 @@ class OPCEngine:
                 (role_agent_overrides or {}).get(role_id)
             )
             preferred_external_agent = explicit_external_agent
-            if selected_role_agent:
+            # A request-level external agent is authoritative.  ``native`` is
+            # also the company-mode fallback value, however, so a concrete
+            # role choice made during manual recruitment is more specific and
+            # must win over that fallback.
+            if explicit_external_agent:
+                selected_role_agent = ""
+            elif selected_role_agent:
                 preferred_external_agent = None if selected_role_agent == "native" else selected_role_agent
-            elif explicit_agent_choice:
-                pass
             elif not preferred_external_agent:
                 preferred_external_agent = str(
                     getattr(self.org_engine.get_agent(role_id), "preferred_external_agent", "") or ""
@@ -6186,6 +6201,11 @@ class OPCEngine:
             if not expected:
                 continue
             for current in values:
+                if (
+                    field_name == "employee_id"
+                    and is_same_default_employee_identity(current, expected)
+                ):
+                    continue
                 if current and current != expected:
                     raise RuntimeError(
                         "company runtime resume identity mismatch for "
@@ -6210,6 +6230,11 @@ class OPCEngine:
             }
             for field_name, current in role_session_values.items():
                 expected = str(identity.get(field_name, "") or "").strip()
+                if (
+                    field_name == "employee_id"
+                    and is_same_default_employee_identity(current, expected)
+                ):
+                    continue
                 if expected and current and current != expected:
                     raise RuntimeError(
                         "company runtime resume identity mismatch for "
@@ -6253,12 +6278,22 @@ class OPCEngine:
         ).strip()
 
         metadata["work_item_role_id"] = identity["role_id"] or task_role_id
+        # Seat/session projection comes from the authoritative WorkItem owner
+        # envelope; the checkpoint identity only fills gaps (it was already
+        # validated against the WorkItem above, so values can't disagree).
+        owner_execution_copy = build_work_item_owner_execution_copy(work_item)
         if identity["seat_id"]:
-            metadata["delegation_seat_id"] = identity["seat_id"]
+            owner_execution_copy.setdefault(
+                "delegation_seat_id", identity["seat_id"]
+            )
         if identity["role_runtime_session_id"]:
-            metadata["delegation_role_session_id"] = identity[
-                "role_runtime_session_id"
-            ]
+            owner_execution_copy.setdefault(
+                "delegation_role_session_id", identity["role_runtime_session_id"]
+            )
+        for key in ("delegation_seat_id", "delegation_role_session_id"):
+            value = owner_execution_copy.get(key)
+            if value:
+                metadata[key] = value
         if identity.get("explicit") or identity["employee_assignment"]:
             metadata["employee_assignment"] = copy.deepcopy(
                 identity["employee_assignment"]

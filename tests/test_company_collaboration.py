@@ -1384,7 +1384,7 @@ class CompanyCollaborationTests(unittest.IsolatedAsyncioTestCase):
                     task_id="task-1",
                     workspace_path="/tmp/work",
                     run_mode="interactive",
-                    status="failed",
+                    status="working",
                     metadata={"resume_session_id": "resume-token-1"},
                     updated_at=datetime.now(),
                 )
@@ -1419,7 +1419,7 @@ class CompanyCollaborationTests(unittest.IsolatedAsyncioTestCase):
                     task_id="task-2",
                     workspace_path="/tmp/work",
                     run_mode="interactive",
-                    status="failed",
+                    status="working",
                     metadata={},
                     updated_at=datetime.now(),
                 )

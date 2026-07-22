@@ -13,6 +13,20 @@ system:
     chrome_executable_path: ''
     user_data_dir: ''
     args: []
+  nu_resource_gen:
+    enabled: true
+    # Live provider calls require all of: allow_live=true, a candidate in this
+    # allowlist, confirm_live=true, OpenOPC human approval, and the library's
+    # billing/identity/publication policy checks. Empty means no live candidates.
+    allow_live: false
+    allowed_live_candidates: []
+    record_ledger: true
+    record_dry_runs: true
+    ledger_root: ''
+    artifact_archive_root: ''
+    archive_live_artifacts: true
+    max_timeout_seconds: 900
+    max_catalog_results: 50
   native_runtime:
     enabled: true
     stream_llm: true
@@ -114,11 +128,11 @@ system:
       sandbox:
         enabled: true
         default_mode: workspace-write
-        fail_if_unavailable: false
-        allow_direct_fallback: true
+        fail_if_unavailable: true
+        allow_direct_fallback: false
         allow_network: true
         windows:
-          mode: elevated
+          mode: off
           wrapper: none
         linux:
           mode: workspace-write
@@ -141,7 +155,7 @@ autonomy:
   learned_policy_threshold: 0.8
   max_auto_approve_risk: medium
   allow_native_tool_auto_approval: true
-  allow_external_agent_auto_approval: true
+  allow_external_agent_auto_approval: false
   learn_from_feedback: true
   save_external_sessions: true
   tool_first_use_approval: true

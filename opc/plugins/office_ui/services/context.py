@@ -26,6 +26,7 @@ AsyncNoArgHook = Callable[[], Awaitable[Any]]
 CancelSessionTasksHook = Callable[[str], None]
 CancelTaskTreeHook = Callable[..., Awaitable[list[str]]]
 RuntimeControlHook = Callable[..., Awaitable[Any]]
+ProjectEngineResolver = Callable[[str], Awaitable[Any] | Any]
 
 
 @dataclass
@@ -77,6 +78,7 @@ class OfficeServiceContext:
         self.cancel_task_tree: CancelTaskTreeHook | None = None
         self.runtime_stop_hook: RuntimeControlHook | None = None
         self.runtime_continue_hook: RuntimeControlHook | None = None
+        self.project_engine_resolver: ProjectEngineResolver | None = None
 
     @property
     def engine(self) -> Any:
@@ -159,6 +161,9 @@ class OfficeServiceContext:
 
     async def engine_for_project(self, project_id: str) -> Any:
         normalized = self.normalize_project_id(project_id)
+        if self.project_engine_resolver is not None:
+            maybe_engine = self.project_engine_resolver(normalized)
+            return await maybe_engine if inspect.isawaitable(maybe_engine) else maybe_engine
         root = self.root_engine
         current_root_project = self.normalize_project_id(getattr(root, "project_id", None))
         if normalized == current_root_project:
