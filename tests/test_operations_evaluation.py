@@ -12,6 +12,7 @@ from opc.operations.models import (
     AcceptanceCriterion,
     GateStatus,
     GoalContract,
+    GoalContractStatus,
     ResourceBudget,
     RunManifest,
     RunMetrics,
@@ -124,6 +125,33 @@ class OperationsEvaluationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("has no evidence" in item for item in scorecard.violations))
         self.assertTrue(any("cost_usd exceeded" in item for item in scorecard.violations))
         self.assertTrue(any("failed_attempts exceeded" in item for item in scorecard.violations))
+
+    async def test_declared_final_run_auto_completes_latest_goal_version(self) -> None:
+        await self._create_run(run_id="run-final")
+        manifest = await self.repository.get_manifest("run-final")
+        assert manifest is not None
+        manifest.metadata["complete_goal_on_pass"] = True
+        await self.repository.save_manifest(manifest)
+
+        scorecard = await self.evaluator.evaluate_run(
+            "run-final",
+            criterion_scores={"tests": 1.0, "docs": 1.0},
+            evidence={
+                "tests": ["artifact://pytest.xml"],
+                "docs": ["artifact://operations.md"],
+                "test_report": ["artifact://pytest.xml"],
+            },
+            metrics=RunMetrics(total_attempts=1),
+        )
+        latest = await self.repository.get_goal("goal-1")
+        pinned = await self.repository.get_goal_version("goal-1", 1)
+
+        assert latest is not None and pinned is not None
+        self.assertEqual(scorecard.gate_status, GateStatus.PASS)
+        self.assertTrue(scorecard.metadata["goal_auto_completed"])
+        self.assertEqual(latest.status, GoalContractStatus.COMPLETED)
+        self.assertEqual(latest.version, 2)
+        self.assertEqual(pinned.status, GoalContractStatus.ACTIVE)
 
     async def test_non_terminal_run_is_review_not_acceptance(self) -> None:
         await self._create_run(run_id="run-live", status=RunStatus.RUNNING)

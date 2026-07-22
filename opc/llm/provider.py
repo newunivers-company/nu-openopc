@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -208,26 +209,6 @@ def _parse_tool_arguments(tool_name: str, arguments: Any) -> tuple[Any, str | No
 class LLMProvider:
     """Unified LLM interface via LiteLLM supporting tool calls."""
 
-    # Well-known provider API-key env vars that litellm reads directly when no
-    # explicit api_key is passed. Used only by ``has_credentials()`` to avoid a
-    # false "no credentials" verdict for env-based setups. Missing a provider
-    # here just preserves the old behavior (a real LLM attempt), never a wrong
-    # skip of a working key.
-    _CREDENTIAL_ENV_VARS = (
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENROUTER_API_KEY",
-        "AZURE_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "MISTRAL_API_KEY",
-        "GROQ_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "TOGETHERAI_API_KEY",
-        "ARK_API_KEY",
-    )
-
     def __init__(self, config: LLMConfig, opc_home: Path | None = None) -> None:
         self.config = config
         self.opc_home = opc_home
@@ -245,18 +226,19 @@ class LLMProvider:
     def has_credentials(self) -> bool:
         """Whether an LLM call can plausibly authenticate.
 
-        True when a key is configured (``api_key`` / ``api_key_env``) or a
-        well-known provider env var is present. False only when no credential
-        is found anywhere — callers use that to skip LLM work that would
-        certainly fail (e.g. native agent selection when an external agent can
-        run the task instead). A False at worst degrades to rule-based behavior,
-        which stays functional; it never blocks execution.
+        True when an explicit key, an endpoint/model-matching provider env var,
+        a keyless local endpoint, or an authenticated NU subscription target is
+        available. Callers use False to skip work that would certainly fail;
+        the runtime can still degrade to rule-based behavior.
         """
-        if self._api_key:
-            return True
-        if any(os.environ.get(var) for var in self._CREDENTIAL_ENV_VARS):
-            return True
-        return self.nu_router.has_usable_target()
+        return bool(
+            self.config.transport_readiness()["credential_ready"]
+            or self.nu_router.has_usable_target()
+        )
+
+    def default_transport_readiness(self) -> dict[str, bool]:
+        """Describe the configured LiteLLM fallback without making a model call."""
+        return self.config.transport_readiness()
 
     @property
     def stats(self) -> dict[str, Any]:
@@ -270,12 +252,28 @@ class LLMProvider:
         return stats
 
     def _configured_target(self, model: str) -> RoutedLLMTarget:
+        readiness = self.default_transport_readiness()
         return RoutedLLMTarget(
             provider="openopc_config",
             model=model,
             api_base=self._api_base or "",
             api_key=self._api_key,
+            credential_configured=readiness["credential_ready"],
+            transport_ready=readiness["transport_ready"],
         )
+
+    def _candidate_targets(
+        self,
+        task_type: str | None = None,
+        *,
+        has_tools: bool = False,
+    ) -> list[RoutedLLMTarget]:
+        if task_type and task_type in self.config.routing:
+            return [self._configured_target(self.config.routing[task_type])]
+        routed = list(self.nu_router.targets(task_type=task_type, has_tools=has_tools))
+        if routed:
+            return routed
+        return [self._configured_target(self.config.default_model)]
 
     def _select_target(
         self,
@@ -283,15 +281,7 @@ class LLMProvider:
         *,
         has_tools: bool = False,
     ) -> RoutedLLMTarget:
-        if task_type and task_type in self.config.routing:
-            target = self._configured_target(self.config.routing[task_type])
-            self._last_route_target = target
-            return target
-        routed = self.nu_router.targets(task_type=task_type, has_tools=has_tools)
-        if routed:
-            self._last_route_target = routed[0]
-            return routed[0]
-        target = self._configured_target(self.config.default_model)
+        target = self._candidate_targets(task_type, has_tools=has_tools)[0]
         self._last_route_target = target
         return target
 
@@ -303,6 +293,8 @@ class LLMProvider:
         call_kwargs: dict[str, Any],
         target: RoutedLLMTarget,
     ) -> None:
+        if target.transport_kind in {"subscription_cli", "nu_native"}:
+            raise ValueError("native NU targets must execute through the NU router bridge")
         api_base = target.api_base or self._api_base
         if api_base:
             call_kwargs["api_base"] = api_base
@@ -350,7 +342,14 @@ class LLMProvider:
         return scalar if scalar > 0 else None
 
     def get_context_window(self, task_type: str | None = None, model: str | None = None) -> int | None:
-        target = self._select_target(task_type)
+        # Stream fallbacks pass the model resolved by the successful candidate.
+        # Preserve that candidate's transport metadata instead of selecting the
+        # first route again (which would also corrupt the reported last target).
+        target = (
+            self._last_route_target
+            if model is not None and task_type is None and self._last_route_target is not None
+            else self._select_target(task_type)
+        )
         resolved_model = model or target.model
         selected_api_base = target.api_base or self._api_base
         config_override = self._config_context_window_override(resolved_model)
@@ -424,22 +423,25 @@ class LLMProvider:
         task_type: str | None = None,
         model: str | None = None,
     ) -> ModelCapabilitySet:
-        resolved_model = model or self._select_model(task_type)
+        target = self._select_target(task_type)
+        resolved_model = model or target.model
         normalized = _normalized_model_name(resolved_model)
         provider_family = resolved_model.split("/", 1)[0].strip().lower() if "/" in resolved_model else ""
         supports_thinking = any(hint in normalized for hint in ("o1", "o3", "o4", "gpt-5", "claude", "reason"))
         return ModelCapabilitySet(
             model=resolved_model,
-            supports_streaming=True,
-            supports_tool_calling=True,
-            supports_streaming_tool_calls=True,
+            supports_streaming=target.supports_streaming,
+            supports_tool_calling=target.supports_tools,
+            supports_streaming_tool_calls=target.supports_streaming and target.supports_tools,
             supports_thinking=supports_thinking,
             supports_multimodal=_looks_like_multimodal_model(resolved_model),
             supports_documents=_looks_like_document_capable_model(resolved_model),
             supports_video=_looks_like_video_capable_model(resolved_model),
             provider_family=provider_family,
             metadata={
-                "api_base": self._api_base or "",
+                "api_base": target.api_base or self._api_base or "",
+                "transport_kind": target.transport_kind,
+                "provider": target.provider,
             },
         )
 
@@ -571,37 +573,82 @@ class LLMProvider:
         max_tokens: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        target = self._select_target(task_type, has_tools=bool(tools))
-        model = target.model
+        targets = self._candidate_targets(task_type, has_tools=bool(tools))
         temp = temperature if temperature is not None else self.config.temperature
-        max_tok = _clamp_max_tokens(model, max_tokens if max_tokens is not None else self.config.max_tokens)
+        requested_max = max_tokens if max_tokens is not None else self.config.max_tokens
+        timeout_seconds = float(kwargs.pop("timeout", kwargs.pop("timeout_seconds", 120.0)) or 120.0)
+        errors: list[tuple[str, Exception]] = []
+        for index, target in enumerate(targets):
+            self._last_route_target = target
+            model = target.model
+            max_tok = _clamp_max_tokens(model, requested_max)
+            logger.debug(
+                "LLM call: model={}, provider={}, transport={}, base={}, msgs={}, tools={}",
+                model,
+                target.provider,
+                target.transport_kind,
+                target.api_base or self._api_base or "default",
+                len(messages),
+                len(tools or []),
+            )
+            try:
+                if target.transport_kind in {"subscription_cli", "nu_native"}:
+                    if tools:
+                        raise ValueError("native NU LLM routes do not support tool calls")
+                    metadata = {
+                        key: value
+                        for key, value in kwargs.items()
+                        if key
+                        in {
+                            "reasoning_effort",
+                            "codex_reasoning_effort",
+                            "grok_reasoning_effort",
+                            "web_search",
+                        }
+                    }
+                    response = await asyncio.to_thread(
+                        self.nu_router.execute_text_target,
+                        target,
+                        messages=messages,
+                        temperature=temp,
+                        max_tokens=max_tok,
+                        timeout_seconds=timeout_seconds,
+                        metadata=metadata,
+                    )
+                    return self._normalize_subscription_response(response, target)
 
-        call_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temp,
-            "max_tokens": max_tok,
-            **kwargs,
-        }
-        self._apply_target_transport(call_kwargs, target)
-        if tools:
-            call_kwargs["tools"] = tools
-            call_kwargs["tool_choice"] = "auto"
-
-        logger.debug(
-            "LLM call: model={}, provider={}, base={}, msgs={}, tools={}",
-            model,
-            target.provider,
-            target.api_base or self._api_base or "default",
-            len(messages),
-            len(tools or []),
-        )
-
-        try:
-            response = await litellm.acompletion(**call_kwargs)
-        except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            raise
+                call_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temp,
+                    "max_tokens": max_tok,
+                    "timeout": timeout_seconds,
+                    **kwargs,
+                }
+                self._apply_target_transport(call_kwargs, target)
+                if tools:
+                    call_kwargs["tools"] = tools
+                    call_kwargs["tool_choice"] = "auto"
+                response = await litellm.acompletion(**call_kwargs)
+                break
+            except Exception as exc:
+                errors.append((target.provider, exc))
+                if index + 1 < len(targets):
+                    logger.warning(
+                        "LLM route {} failed ({}); trying {}",
+                        target.provider,
+                        type(exc).__name__,
+                        targets[index + 1].provider,
+                    )
+                    continue
+                detail = "; ".join(
+                    f"{provider}: {type(error).__name__}: {error}"
+                    for provider, error in errors
+                )
+                logger.error("LLM call failed across {} route(s): {}", len(errors), detail)
+                raise exc
+        else:  # pragma: no cover - targets always contains at least the configured fallback
+            raise RuntimeError("no LLM targets available")
 
         usage = getattr(response, "usage", None)
         cost = 0.0
@@ -644,6 +691,31 @@ class LLMProvider:
                 result["tool_calls"].append(tool_call)
 
         return result
+
+    def _normalize_subscription_response(
+        self,
+        response: Any,
+        target: RoutedLLMTarget,
+    ) -> dict[str, Any]:
+        usage = dict(getattr(response, "usage", {}) or {})
+        prompt_tokens = int(usage.get("input_tokens", 0) or 0)
+        completion_tokens = int(usage.get("output_tokens", 0) or 0)
+        cost = float(usage.get("total_cost_usd", 0.0) or 0.0)
+        self._total_tokens_in += prompt_tokens
+        self._total_tokens_out += completion_tokens
+        self._total_cost += cost
+        return {
+            "content": str(getattr(response, "content", "") or ""),
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "model": str(getattr(response, "model", "") or target.model),
+            "provider": str(getattr(response, "provider", "") or target.provider),
+            "cost": cost,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        }
 
     def normalize_stream_event(
         self,
@@ -722,6 +794,55 @@ class LLMProvider:
         **kwargs: Any,
     ) -> AsyncIterator[RuntimeLLMEvent]:
         target = self._select_target(task_type, has_tools=bool(tools))
+        if target.transport_kind in {"subscription_cli", "nu_native"}:
+            try:
+                result = await self.chat(
+                    messages,
+                    tools=tools,
+                    task_type=task_type,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+            except Exception as exc:
+                yield RuntimeLLMEvent(
+                    event_type="error",
+                    model=target.model,
+                    payload={"message": str(exc)},
+                )
+                raise
+            resolved_model = str(result.get("model") or target.model)
+            yield RuntimeLLMEvent(
+                event_type="message_start",
+                model=resolved_model,
+                payload={"model": resolved_model},
+            )
+            content = str(result.get("content") or "")
+            if content:
+                yield RuntimeLLMEvent(
+                    event_type="assistant_delta",
+                    model=resolved_model,
+                    payload={"text": content},
+                )
+            usage = dict(result.get("usage", {}) or {})
+            yield RuntimeLLMEvent(
+                event_type="usage",
+                model=resolved_model,
+                payload={
+                    "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                    "estimated_cost_delta": float(result.get("cost", 0.0) or 0.0),
+                    "estimated_cost_total": self._total_cost,
+                    "context_window": self.get_context_window(model=resolved_model),
+                    "model": resolved_model,
+                },
+            )
+            yield RuntimeLLMEvent(
+                event_type="message_stop",
+                model=resolved_model,
+                payload={"finish_reason": str(result.get("finish_reason") or "stop")},
+            )
+            return
         model = target.model
         temp = temperature if temperature is not None else self.config.temperature
         max_tok = _clamp_max_tokens(model, max_tokens if max_tokens is not None else self.config.max_tokens)

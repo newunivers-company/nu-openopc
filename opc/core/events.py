@@ -33,6 +33,13 @@ class EventBus:
         self._global_listeners.append(listener)
 
     async def publish(self, event: OPCEvent) -> None:
+        await self._publish(event, raise_on_error=False)
+
+    async def publish_checked(self, event: OPCEvent) -> None:
+        """Publish and propagate a listener failure to durable callers."""
+        await self._publish(event, raise_on_error=True)
+
+    async def _publish(self, event: OPCEvent, *, raise_on_error: bool) -> None:
         async with self._get_lock():
             self._history.append(event)
             # Snapshot listener lists under lock to avoid mutation during iteration
@@ -41,7 +48,14 @@ class EventBus:
         # Execute listeners outside lock to avoid holding it during async work
         tasks = [fn(event) for fn in typed + globl]
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            if raise_on_error:
+                failure = next(
+                    (result for result in results if isinstance(result, BaseException)),
+                    None,
+                )
+                if failure is not None:
+                    raise failure
 
     def get_history(self, event_type: str | None = None, limit: int = 50) -> list[OPCEvent]:
         events = self._history

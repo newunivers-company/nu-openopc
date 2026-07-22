@@ -30,6 +30,16 @@ class TestLLMProviderHasCredentials(unittest.TestCase):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env"}, clear=True):
             self.assertTrue(provider.has_credentials())
 
+    def test_unrelated_provider_key_does_not_mark_proxy_ready(self) -> None:
+        provider = LLMProvider(LLMConfig(
+            default_model="openai/gpt-5.4",
+            api_base="https://openrouter.ai/api/v1",
+        ))
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "wrong-provider"}, clear=True):
+            self.assertFalse(provider.default_transport_readiness()["transport_ready"])
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "correct-provider"}, clear=True):
+            self.assertTrue(provider.default_transport_readiness()["transport_ready"])
+
 
 class TestLLMProviderContextWindow(unittest.TestCase):
     def test_gpt_5_4_override_applies_on_official_openai_base(self) -> None:

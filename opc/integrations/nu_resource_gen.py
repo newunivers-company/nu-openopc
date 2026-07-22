@@ -105,6 +105,39 @@ class NUResourceGenBridge:
         values = generator.health_detail() if detail else generator.health()
         return {"status": self.status(), "providers": values}
 
+    def provider_readiness(self, provider: str) -> dict[str, Any]:
+        """Return a normalized, secret-free readiness view for one provider."""
+        normalized = str(provider or "").strip().lower()
+        try:
+            providers = self.health(detail=True).get("providers", {})
+            raw = dict(providers.get(normalized, {}) or {}) if isinstance(providers, Mapping) else {}
+        except Exception as exc:
+            return {
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": f"health probe failed: {type(exc).__name__}: {exc}"[:500],
+            }
+        if not raw:
+            return {
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": f"provider health unavailable: {normalized}"[:500],
+            }
+        credential_keys = ("has_credentials", "credentials_configured", "authenticated")
+        has_explicit_signal = any(key in raw for key in credential_keys)
+        credential_ready = bool(
+            any(bool(raw.get(key)) for key in credential_keys)
+            if has_explicit_signal
+            else raw.get("available") or raw.get("healthy")
+        )
+        explicitly_unavailable = raw.get("available") is False or raw.get("healthy") is False
+        transport_ready = bool(credential_ready and not explicitly_unavailable)
+        return {
+            "credential_ready": credential_ready,
+            "transport_ready": transport_ready,
+            "detail": str(raw.get("detail") or raw.get("status") or "")[:500],
+        }
+
     def list_candidates(
         self,
         *,

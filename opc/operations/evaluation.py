@@ -11,6 +11,7 @@ from opc.operations.models import (
     CriterionResult,
     GateStatus,
     GoalContract,
+    GoalContractStatus,
     RoleOutcome,
     RunManifest,
     RunMetrics,
@@ -93,7 +94,55 @@ class OutcomeEvaluator:
         )
         if persist:
             await self.repository.save_scorecard(scorecard)
+            if self.config.auto_complete_goal_on_pass and scorecard.gate_status == GateStatus.PASS:
+                completed = await self._complete_goal_if_settled(goal, manifest, scorecard)
+                if completed:
+                    scorecard.metadata["goal_auto_completed"] = True
+                    await self.repository.save_scorecard(scorecard)
         return scorecard
+
+    async def _complete_goal_if_settled(
+        self,
+        evaluated_goal: GoalContract,
+        manifest: RunManifest,
+        scorecard: RunScorecard,
+    ) -> bool:
+        completion_requested = bool(
+            evaluated_goal.metadata.get("auto_complete_on_pass", False)
+            or manifest.metadata.get("complete_goal_on_pass", False)
+        )
+        if not completion_requested:
+            return False
+        latest = await self.repository.get_goal(evaluated_goal.goal_id)
+        if latest is None or latest.status != GoalContractStatus.ACTIVE:
+            return False
+        if latest.version != manifest.goal_version:
+            return False
+        active_runs = await self.repository.list_manifests(
+            goal_id=latest.goal_id,
+            statuses=[
+                RunStatus.PENDING.value,
+                RunStatus.RUNNING.value,
+                RunStatus.BLOCKED.value,
+            ],
+            limit=1000,
+        )
+        if active_runs:
+            return False
+        completed = GoalContract.from_dict(latest.to_dict())
+        completed.version = latest.version + 1
+        completed.status = GoalContractStatus.COMPLETED
+        completed.metadata = {
+            **dict(latest.metadata),
+            "completion": {
+                "source": "passing_run_scorecard",
+                "run_id": manifest.run_id,
+                "scorecard_id": scorecard.scorecard_id,
+                "score": scorecard.total_score,
+            },
+        }
+        await self.repository.save_goal(completed)
+        return True
 
     def evaluate(
         self,

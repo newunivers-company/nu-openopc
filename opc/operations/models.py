@@ -711,6 +711,7 @@ class CapabilityRoute(ContractMixin):
     blockers: list[str] = field(default_factory=list)
     alternatives: list[dict[str, Any]] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    readiness: dict[str, bool] = field(default_factory=dict)
     estimated_cost_usd: float | None = None
     created_at: datetime = field(default_factory=utc_now)
     schema_version: int = 1
@@ -730,6 +731,7 @@ class CapabilityRoute(ContractMixin):
             blockers=[str(item) for item in data.get("blockers", []) or []],
             alternatives=[dict(item) for item in data.get("alternatives", []) or [] if isinstance(item, Mapping)],
             diagnostics=dict(data.get("diagnostics", {}) or {}),
+            readiness={str(k): bool(v) for k, v in dict(data.get("readiness", {}) or {}).items()},
             estimated_cost_usd=_optional_float(data.get("estimated_cost_usd")),
             created_at=parse_datetime(data.get("created_at"), default=utc_now()) or utc_now(),
             schema_version=int(data.get("schema_version", 1) or 1),

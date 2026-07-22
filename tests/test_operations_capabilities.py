@@ -24,6 +24,7 @@ class _FakeTarget:
             "model": self.model,
             "api_base": self.api_base,
             "credential_configured": True,
+            "transport_ready": True,
         }
 
 
@@ -123,6 +124,14 @@ class _FakeResourceBridge:
             "allowed_live_candidates": ["local-image"],
         }
 
+    def provider_readiness(self, provider):
+        ready = provider in {"cloud", "comfyui"}
+        return {
+            "credential_ready": ready,
+            "transport_ready": ready,
+            "detail": "test provider ready" if ready else "test provider unavailable",
+        }
+
 
 class _FakeAdapterRegistry:
     def list_available(self):
@@ -192,6 +201,15 @@ class UnifiedCapabilityBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(blocked.allowed)
         self.assertIn("sandboxed_tools=true", blocked.blockers[0])
         self.assertTrue(allowed.allowed)
+        self.assertEqual(
+            allowed.readiness,
+            {
+                "plan_allowed": True,
+                "credential_ready": True,
+                "transport_ready": True,
+                "live_allowed": False,
+            },
+        )
         self.assertEqual(allowed.provider, "ollama-local")
         self.assertEqual(allowed.estimated_cost_usd, 0.0)
         self.assertEqual(self.llm_router.calls[-1]["gpu_free_vram_mib"], 0)
@@ -275,6 +293,30 @@ class UnifiedCapabilityBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("cost is unknown" in item for item in llm.blockers))
         self.assertFalse(agent.allowed)
         self.assertTrue(any("cost is unknown" in item for item in agent.blockers))
+
+    async def test_default_llm_dry_run_distinguishes_plan_from_execution_readiness(self) -> None:
+        broker = UnifiedCapabilityBroker(
+            self.repository,
+            default_llm_model="openai/fallback",
+            default_llm_api_base="https://openrouter.ai/api/v1",
+        )
+        dry_run = await broker.plan(
+            CapabilityRequest(capability_kind=CapabilityKind.LLM, task_type="dialogue")
+        )
+        live = await broker.plan(
+            CapabilityRequest(
+                capability_kind=CapabilityKind.LLM,
+                task_type="dialogue",
+                allow_live=True,
+            )
+        )
+
+        self.assertTrue(dry_run.allowed)
+        self.assertTrue(dry_run.readiness["plan_allowed"])
+        self.assertFalse(dry_run.readiness["credential_ready"])
+        self.assertFalse(dry_run.readiness["transport_ready"])
+        self.assertFalse(live.allowed)
+        self.assertTrue(any("transport-ready" in item for item in live.blockers))
 
     async def test_unknown_resource_cost_fails_closed_under_ceiling(self) -> None:
         route = await self.broker.plan(

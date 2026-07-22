@@ -50,7 +50,8 @@ Then run the loop:
 
 ```bash
 uv run opc ops goal create --contract goal.json --project demo
-uv run opc ops run start release-1 --run-id release-1-attempt-1 --project demo
+uv run opc ops run start release-1 --run-id release-1-attempt-1 \
+  --complete-goal-on-pass --project demo
 
 # Execute work through task or company mode, then close the manifest.
 uv run opc ops run finish release-1-attempt-1 --status completed --project demo
@@ -62,6 +63,13 @@ uv run opc ops mission brief --project demo
 ```
 
 `ops evaluate gate` exits non-zero if the current scorecard is not accepted or any component drops more than `maximum_regression` from its baseline.
+
+`--complete-goal-on-pass` declares that this run is allowed to close the goal. A passing scorecard creates a new immutable `completed` goal version only when the run is pinned to the latest goal version and no sibling run remains active. Without that explicit declaration, evaluation never closes a goal implicitly. Operators can also create an audited terminal version directly:
+
+```bash
+uv run opc ops goal close release-1 --status completed \
+  --reason "release evidence accepted" --project demo
+```
 
 To revise a goal, submit the same `goal_id` with exactly the next `version`. In-place rewrites and skipped versions are rejected. Runs already created continue to use their pinned archived version.
 
@@ -137,6 +145,8 @@ uv run opc ops outbox replay <message-id> --reason "consumer repaired" --project
 
 A stale worker cannot write with a fencing token after another owner takes over its expired lease. Dead-letter replay is intentionally not automatic: repair the consumer and replay with an explicit reason. Replay resets the delivery attempt budget and appends an `outbox.replayed` audit event in the same transaction.
 
+When the OpenOPC engine is running, the configured outbox dispatcher claims pending deliveries in bounded batches, publishes them to the internal event bus, and acknowledges them with the claim's fencing token. Handler failures are retried with the durable backoff policy and move to `dead_letter` after the configured attempt limit. Shutdown stops the dispatcher before closing the store. Set `system.operations.durable.outbox_dispatcher_enabled: false` only when a separate process owns delivery.
+
 ## Governed Self-Grown assets
 
 Learned memory, skill, and policy assets follow this state machine:
@@ -170,7 +180,11 @@ The broker plans three capability kinds through one audit contract:
 - `external_agent`: adapters currently reported available by OpenOPC;
 - `resource`: installed `nu-resource-gen-lib` candidate IDs and policy dry-runs.
 
-It never invents a provider or candidate. Tool-use LLM routes require `sandboxed_tools=true` and always carry a deterministic `gpu_free_vram_mib` value. Resource ranking is local/free-first. Unknown cost does not become zero; it is blocked under an explicit ceiling. Live NU generation still requires the existing live switch, candidate allowlist, `confirm_live=true`, OpenOPC approval, and provider policy checks.
+It never invents a provider or candidate. Every route reports `plan_allowed`, `credential_ready`, `transport_ready`, and `live_allowed` separately, so an installed adapter cannot be mistaken for a callable transport. External-agent readiness uses a sanitized deep auth probe. Resource readiness comes from the selected provider rather than package installation alone.
+
+For text-only turns, NU routing can execute authenticated Codex, Claude, and Grok subscription CLIs plus healthy native Ollama/Gemini providers, and falls through the ordered candidates on a provider error. These transports deliberately report no tool-call or native-streaming support through this bridge. Tool turns remain on OpenOPC's configured OpenAI-compatible transport while `llm.nu_routing.apply_to_tool_calls` is false. Grok router calls run in an isolated temporary working directory so repository instructions do not leak into a model-only request.
+
+Tool-use LLM routes require `sandboxed_tools=true` and always carry a deterministic `gpu_free_vram_mib` value. Resource ranking is local/free-first. Unknown cost does not become zero; it is blocked under an explicit ceiling. Live NU generation still requires the existing live switch, candidate allowlist, `confirm_live=true`, OpenOPC approval, and provider policy checks.
 
 The agent tool `operations_capability_plan` is permanently dry-run. CLI requests may describe live intent, but planning does not itself call a provider:
 

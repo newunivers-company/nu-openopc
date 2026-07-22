@@ -37,12 +37,16 @@ system:
       budget_weight: 0.15
       reliability_weight: 0.10
       autonomy_weight: 0.10
+      auto_complete_goal_on_pass: true
     durable:
       lease_seconds: 30
       outbox_max_attempts: 5
       retry_base_seconds: 5
       retry_max_seconds: 900
       deadlock_after_seconds: 900
+      outbox_dispatcher_enabled: true
+      outbox_dispatch_batch_size: 50
+      outbox_dispatch_poll_seconds: 1.0
     learning:
       minimum_offline_score: 0.75
       minimum_shadow_score: 0.78

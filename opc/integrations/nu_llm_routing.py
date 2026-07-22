@@ -24,17 +24,28 @@ _ROUTER_CONFIG_ENV = "NU_LLM_ROUTER_CONFIG"
 class RoutedLLMTarget:
     provider: str
     model: str
-    api_base: str
+    api_base: str = ""
     api_key: str | None = field(default=None, repr=False)
     extra_body: Mapping[str, Any] = field(default_factory=dict)
     unsupported_params: frozenset[str] = frozenset()
+    transport_kind: str = "openai_compatible"
+    credential_configured: bool = False
+    transport_ready: bool = False
+    supports_tools: bool = True
+    supports_streaming: bool = True
+    status_detail: str = ""
 
     def safe_dict(self) -> dict[str, Any]:
         return {
             "provider": self.provider,
             "model": self.model,
             "api_base": self.api_base,
-            "credential_configured": bool(self.api_key),
+            "transport_kind": self.transport_kind,
+            "credential_configured": self.credential_configured,
+            "transport_ready": self.transport_ready,
+            "supports_tools": self.supports_tools,
+            "supports_streaming": self.supports_streaming,
+            "status_detail": self.status_detail,
             "unsupported_params": sorted(self.unsupported_params),
         }
 
@@ -278,6 +289,44 @@ class NULlmRoutingBridge:
         if provider is None:
             return None
         module_name = str(type(provider).__module__ or "")
+        if module_name.endswith((".codex_cli", ".claude_cli", ".grok_cli")):
+            try:
+                status = provider.status()
+            except Exception as exc:
+                logger.warning("NU subscription provider health failed for {}: {}", provider_name, exc)
+                return None
+            if not bool(getattr(status, "available", False)):
+                return None
+            model = str(getattr(provider, "model", "") or provider_name).strip()
+            return RoutedLLMTarget(
+                provider=provider_name,
+                model=model,
+                transport_kind="subscription_cli",
+                credential_configured=True,
+                transport_ready=True,
+                supports_tools=False,
+                supports_streaming=False,
+                status_detail=str(getattr(status, "detail", "") or "")[:500],
+            )
+        if module_name.endswith((".ollama", ".gemini")):
+            try:
+                status = provider.status()
+            except Exception as exc:
+                logger.warning("NU native provider health failed for {}: {}", provider_name, exc)
+                return None
+            if not bool(getattr(status, "available", False)):
+                return None
+            model = str(getattr(provider, "model", "") or provider_name).strip()
+            return RoutedLLMTarget(
+                provider=provider_name,
+                model=model,
+                transport_kind="nu_native",
+                credential_configured=True,
+                transport_ready=True,
+                supports_tools=False,
+                supports_streaming=False,
+                status_detail=str(getattr(status, "detail", "") or "")[:500],
+            )
         if not module_name.endswith(".openai_compatible"):
             return None
         api_base = str(getattr(provider, "base_url", "") or "").strip().rstrip("/")
@@ -302,7 +351,64 @@ class NULlmRoutingBridge:
             unsupported_params=frozenset(
                 str(item) for item in (getattr(provider, "unsupported_params", ()) or ())
             ),
+            transport_kind="openai_compatible",
+            credential_configured=bool(api_key) or is_local,
+            transport_ready=bool(api_key) or is_local,
         )
+
+    def execute_text_target(
+        self,
+        target: RoutedLLMTarget,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        timeout_seconds: float,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Any:
+        """Execute one routed text-only target through its native NU provider."""
+        if target.transport_kind not in {"subscription_cli", "nu_native"}:
+            raise ValueError(f"target {target.provider!r} is not a native NU transport")
+        router = self._load_router()
+        if router is None:
+            raise RuntimeError(self._load_error or "NU LLM router unavailable")
+        provider = getattr(router, "providers", {}).get(target.provider)
+        if provider is None:
+            raise KeyError(f"NU LLM provider not found: {target.provider}")
+
+        from nu_llm_routing_lib.api import ChatMessage, ChatRequest
+
+        turns: list[Any] = []
+        for item in messages:
+            content = item.get("content", "")
+            if not isinstance(content, str):
+                raise ValueError(
+                    "native NU routes currently require text-only message content"
+                )
+            turns.append(
+                ChatMessage(
+                    role=str(item.get("role", "user") or "user"),
+                    content=content,
+                )
+            )
+        request = ChatRequest(
+            messages=turns,
+            temperature=float(temperature),
+            max_tokens=max(1, int(max_tokens)),
+            timeout_seconds=max(1.0, float(timeout_seconds)),
+            metadata=dict(metadata or {}),
+        )
+        return provider.chat(request)
+
+    def execute_subscription(
+        self,
+        target: RoutedLLMTarget,
+        **kwargs: Any,
+    ) -> Any:
+        """Backward-compatible subscription-only execution entry point."""
+        if target.transport_kind != "subscription_cli":
+            raise ValueError(f"target {target.provider!r} is not a subscription CLI transport")
+        return self.execute_text_target(target, **kwargs)
 
     @staticmethod
     def _compact_diagnostics(raw: Mapping[str, Any], *, metadata: Mapping[str, Any]) -> dict[str, Any]:

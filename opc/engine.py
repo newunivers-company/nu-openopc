@@ -613,6 +613,7 @@ class OPCEngine:
             project_id=self.project_id,
         )
         if self.config.system.operations.enabled:
+            default_llm_readiness = self.llm.default_transport_readiness()
             self.operations = OperationsService(
                 self.store,
                 self.config.system.operations,
@@ -620,6 +621,8 @@ class OPCEngine:
                 resource_bridge=self.nu_resource_gen,
                 default_llm_model=self.config.llm.default_model,
                 default_llm_api_base=self.config.llm.api_base,
+                default_llm_credential_ready=default_llm_readiness["credential_ready"],
+                default_llm_transport_ready=default_llm_readiness["transport_ready"],
             )
 
         # Layer 4: Tools
@@ -804,6 +807,8 @@ class OPCEngine:
                 raise
         if self.comms_reactivation_sweeper is not None:
             await self.comms_reactivation_sweeper.start()
+        if self.operations is not None:
+            await self.operations.start_outbox_dispatcher(self.event_bus)
         self._initialized = True
         logger.info("OPC Engine initialized successfully")
         if reconciled:
@@ -13970,6 +13975,8 @@ class OPCEngine:
             await self.comms_reactivation_sweeper.stop()
         if self.heartbeat_scheduler:
             await self.heartbeat_scheduler.stop()
+        if self.operations:
+            await self.operations.stop_outbox_dispatcher()
         self.message_bus.stop()
         if self.channel_manager:
             await self.channel_manager.stop_all()

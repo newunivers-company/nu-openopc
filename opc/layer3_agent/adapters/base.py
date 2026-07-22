@@ -562,6 +562,16 @@ class ExternalAgentAdapter(abc.ABC):
         """Check whether this agent is installed and configured."""
         ...
 
+    async def probe_health(self) -> dict[str, Any]:
+        """Return a normalized launch-readiness probe without running a task."""
+        available = await self.is_available()
+        return {
+            "available": available,
+            "credential_ready": available,
+            "transport_ready": available,
+            "detail": "executable resolved" if available else "executable unavailable",
+        }
+
     @abc.abstractmethod
     async def execute(self, task: Task, workspace_path: str) -> TaskResult:
         """Execute task in the specified workspace."""

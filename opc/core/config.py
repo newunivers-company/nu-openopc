@@ -301,6 +301,37 @@ class LLMConfig(BaseModel):
     context_window_overrides: dict[str, int] = Field(default_factory=dict)
     nu_routing: NULlmRoutingConfig = Field(default_factory=NULlmRoutingConfig)
 
+    def transport_readiness(self) -> dict[str, bool]:
+        """Resolve credentials for the configured endpoint, not any provider."""
+        if self.api_key or (self.api_key_env and os.environ.get(self.api_key_env)):
+            return {"credential_ready": True, "transport_ready": True}
+
+        base = str(self.api_base or "").strip().lower()
+        model = str(self.default_model or "").strip().lower()
+        if base.startswith("http://127.0.0.1") or base.startswith("http://localhost"):
+            return {"credential_ready": True, "transport_ready": True}
+
+        source = base or model
+        provider_envs: tuple[str, ...] = ()
+        mappings = (
+            (("openrouter",), ("OPENROUTER_API_KEY",)),
+            (("anthropic", "claude"), ("ANTHROPIC_API_KEY",)),
+            (("generativelanguage", "gemini", "google"), ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+            (("azure",), ("AZURE_API_KEY", "AZURE_OPENAI_API_KEY")),
+            (("mistral",), ("MISTRAL_API_KEY",)),
+            (("groq",), ("GROQ_API_KEY",)),
+            (("deepseek",), ("DEEPSEEK_API_KEY",)),
+            (("together",), ("TOGETHERAI_API_KEY",)),
+            (("volcengine", "byteplus", "ark"), ("ARK_API_KEY",)),
+            (("openai", "gpt-", "o1", "o3", "o4"), ("OPENAI_API_KEY",)),
+        )
+        for hints, env_names in mappings:
+            if any(hint in source for hint in hints):
+                provider_envs = env_names
+                break
+        ready = any(bool(os.environ.get(name)) for name in provider_envs)
+        return {"credential_ready": ready, "transport_ready": ready}
+
 
 ExternalAgentApprovalMode = Literal["user-settings", "auto", "full-auto"]
 _EXTERNAL_AGENT_APPROVAL_MODES = {"user-settings", "auto", "full-auto"}
@@ -939,6 +970,7 @@ class OutcomeEvaluationConfig(BaseModel):
     budget_weight: float = Field(default=0.15, ge=0.0)
     reliability_weight: float = Field(default=0.10, ge=0.0)
     autonomy_weight: float = Field(default=0.10, ge=0.0)
+    auto_complete_goal_on_pass: bool = True
 
     def normalized_weights(self) -> dict[str, float]:
         values = {
@@ -962,6 +994,9 @@ class DurableOperationsConfig(BaseModel):
     retry_base_seconds: int = Field(default=5, ge=1, le=3600)
     retry_max_seconds: int = Field(default=900, ge=1, le=86_400)
     deadlock_after_seconds: int = Field(default=900, ge=1, le=604_800)
+    outbox_dispatcher_enabled: bool = True
+    outbox_dispatch_batch_size: int = Field(default=50, ge=1, le=500)
+    outbox_dispatch_poll_seconds: float = Field(default=1.0, ge=0.05, le=60.0)
 
 
 class LearningOperationsConfig(BaseModel):

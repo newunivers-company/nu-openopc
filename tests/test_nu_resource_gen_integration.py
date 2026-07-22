@@ -53,6 +53,24 @@ class NUResourceGenBridgeTests(unittest.TestCase):
                     confirm_live=True,
                 )
 
+    def test_local_provider_health_signal_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            bridge = self._bridge(Path(raw_root))
+            bridge.health = lambda **_kwargs: {  # type: ignore[method-assign]
+                "providers": {
+                    "local_audio": {"has_credentials": False},
+                    "comfyui": {"has_credentials": True},
+                }
+            }
+
+            audio = bridge.provider_readiness("local_audio")
+            comfy = bridge.provider_readiness("comfyui")
+
+        self.assertFalse(audio["credential_ready"])
+        self.assertFalse(audio["transport_ready"])
+        self.assertTrue(comfy["credential_ready"])
+        self.assertTrue(comfy["transport_ready"])
+
     def test_explicit_live_allowlist_and_confirmation_reach_generator(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             bridge = self._bridge(

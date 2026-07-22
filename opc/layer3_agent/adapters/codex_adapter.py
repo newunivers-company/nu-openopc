@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,52 @@ class CodexAdapter(ExternalAgentAdapter):
 
     async def is_available(self) -> bool:
         return self.resolve_binary() is not None
+
+    async def probe_health(self) -> dict[str, Any]:
+        binary = self.resolve_binary()
+        if not binary:
+            return {
+                "available": False,
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": "codex executable unavailable",
+            }
+
+        def _probe() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [binary, "login", "status"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+
+        try:
+            completed = await asyncio.to_thread(_probe)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {
+                "available": False,
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": f"codex login probe failed: {type(exc).__name__}: {exc}"[:500],
+            }
+        raw = "\n".join(
+            part for part in (completed.stdout, completed.stderr) if part
+        ).strip()
+        ready = completed.returncode == 0 and "logged in" in raw.lower()
+        return {
+            "available": ready,
+            "credential_ready": ready,
+            "transport_ready": ready,
+            # Login status output is not retained because future CLI versions
+            # may add account identifiers to it.
+            "detail": (
+                "codex subscription login ready"
+                if ready
+                else f"codex login unavailable (exit={completed.returncode})"
+            ),
+        }
 
     async def get_status(self) -> AgentStatus:
         if self._process and self._process.returncode is None:

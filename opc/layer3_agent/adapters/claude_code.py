@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +176,74 @@ class ClaudeCodeAdapter(ExternalAgentAdapter):
 
     async def is_available(self) -> bool:
         return self.resolve_binary() is not None
+
+    async def probe_health(self) -> dict[str, Any]:
+        binary = self.resolve_binary()
+        if not binary:
+            return {
+                "available": False,
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": "claude executable unavailable",
+            }
+
+        def _probe() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [binary, "auth", "status"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+
+        try:
+            completed = await asyncio.to_thread(_probe)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {
+                "available": False,
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": f"claude auth probe failed: {type(exc).__name__}: {exc}"[:500],
+            }
+        raw = "\n".join(
+            part for part in (completed.stdout, completed.stderr) if part
+        ).strip()
+        payload: dict[str, Any] = {}
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                payload = parsed
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if 0 <= start < end:
+                try:
+                    parsed = json.loads(raw[start : end + 1])
+                    if isinstance(parsed, dict):
+                        payload = parsed
+                except json.JSONDecodeError:
+                    pass
+        logged_in = (
+            bool(payload.get("loggedIn"))
+            if payload
+            else "loggedin" in raw.lower().replace(" ", "") and "true" in raw.lower()
+        )
+        ready = completed.returncode == 0 and logged_in
+        subscription = str(payload.get("subscriptionType") or "").strip()
+        method = str(payload.get("authMethod") or "").strip()
+        detail_parts = ["claude subscription login ready" if ready else "claude login unavailable"]
+        if subscription:
+            detail_parts.append(f"subscription={subscription}")
+        if method:
+            detail_parts.append(f"auth={method}")
+        return {
+            "available": ready,
+            "credential_ready": ready,
+            "transport_ready": ready,
+            # Never copy raw auth output: it may contain account or organization PII.
+            "detail": ", ".join(detail_parts),
+        }
 
     async def get_status(self) -> AgentStatus:
         if self._process and self._process.returncode is None:

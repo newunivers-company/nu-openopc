@@ -23,6 +23,32 @@ class _FakeOpenAICompatibleProvider:
 _FakeOpenAICompatibleProvider.__module__ = "nu_llm_routing_lib.providers.openai_compatible"
 
 
+class _FakeSubscriptionProvider:
+    model = "sonnet"
+
+    def status(self):
+        return SimpleNamespace(available=True, detail="subscription=max")
+
+    def chat(self, request):
+        return SimpleNamespace(
+            content="subscription-ok",
+            provider="claude_sonnet",
+            model="claude-sonnet-test",
+            usage={"input_tokens": 3, "output_tokens": 2, "total_cost_usd": 0.01},
+            request=request,
+        )
+
+
+_FakeSubscriptionProvider.__module__ = "nu_llm_routing_lib.providers.claude_cli"
+
+
+class _FakeNativeProvider(_FakeSubscriptionProvider):
+    model = "qwen3:test"
+
+
+_FakeNativeProvider.__module__ = "nu_llm_routing_lib.providers.ollama"
+
+
 class _FakeRouter:
     def __init__(self) -> None:
         self.providers = {
@@ -53,6 +79,15 @@ class _FakeRouter:
         }
 
 
+class _FakeSubscriptionRouter(_FakeRouter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.providers = {"claude_sonnet": _FakeSubscriptionProvider()}
+
+    def route_order_for(self, _request: object) -> list[str]:
+        return ["claude_sonnet"]
+
+
 def _bridge(*, apply_to_tool_calls: bool = False) -> NULlmRoutingBridge:
     bridge = NULlmRoutingBridge(
         NULlmRoutingConfig(
@@ -63,6 +98,17 @@ def _bridge(*, apply_to_tool_calls: bool = False) -> NULlmRoutingBridge:
         opc_home=Path("/tmp/openopc-test"),
     )
     bridge._router = _FakeRouter()
+    bridge._load_attempted = True
+    bridge._config_path = Path("/tmp/router.json")
+    return bridge
+
+
+def _subscription_bridge() -> NULlmRoutingBridge:
+    bridge = NULlmRoutingBridge(
+        NULlmRoutingConfig(enabled=True, gpu_free_vram_mib=0),
+        opc_home=Path("/tmp/openopc-test"),
+    )
+    bridge._router = _FakeSubscriptionRouter()
     bridge._load_attempted = True
     bridge._config_path = Path("/tmp/router.json")
     return bridge
@@ -90,6 +136,42 @@ class NULlmRoutingBridgeTests(unittest.TestCase):
         bridge = _bridge(apply_to_tool_calls=False)
         with patch.dict(os.environ, {"NU_TEST_ROUTER_KEY": "secret"}, clear=True):
             self.assertEqual(bridge.targets(task_type=None, has_tools=True), ())
+
+    def test_subscription_cli_target_is_authenticated_and_executable(self) -> None:
+        bridge = _subscription_bridge()
+
+        target = bridge.targets(task_type="quick_tasks", has_tools=False)[0]
+        response = bridge.execute_subscription(
+            target,
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.0,
+            max_tokens=32,
+            timeout_seconds=10,
+        )
+
+        self.assertEqual(target.transport_kind, "subscription_cli")
+        self.assertTrue(target.credential_configured)
+        self.assertTrue(target.transport_ready)
+        self.assertFalse(target.supports_tools)
+        self.assertEqual(response.content, "subscription-ok")
+
+    def test_native_nu_text_provider_is_executable(self) -> None:
+        bridge = _subscription_bridge()
+        bridge._router.providers = {"ollama_test": _FakeNativeProvider()}
+        bridge._router.route_order_for = lambda _request: ["ollama_test"]
+
+        target = bridge.targets(task_type="quick_tasks", has_tools=False)[0]
+        response = bridge.execute_text_target(
+            target,
+            messages=[{"role": "user", "content": "hello"}],
+            temperature=0.0,
+            max_tokens=32,
+            timeout_seconds=10,
+        )
+
+        self.assertEqual(target.transport_kind, "nu_native")
+        self.assertTrue(target.transport_ready)
+        self.assertEqual(response.content, "subscription-ok")
 
     def test_diagnostics_are_compact_and_deterministic(self) -> None:
         bridge = _bridge()
@@ -173,6 +255,78 @@ class NULlmProviderIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(default_kwargs["model"], "openai/default-model")
             self.assertEqual(default_kwargs["api_base"], "https://default.example/v1")
             self.assertEqual(default_kwargs["api_key"], "default-key")
+
+    async def test_subscription_cli_route_normalizes_usage_and_streams_as_one_chunk(self) -> None:
+        provider = LLMProvider(
+            LLMConfig(
+                default_model="openai/default-model",
+                nu_routing=NULlmRoutingConfig(enabled=True),
+            )
+        )
+        provider.nu_router = _subscription_bridge()
+
+        result = await provider.chat(
+            [{"role": "user", "content": "hello"}],
+            task_type="quick_tasks",
+        )
+        events = [
+            event
+            async for event in provider.chat_stream(
+                [{"role": "user", "content": "hello"}],
+                task_type="quick_tasks",
+            )
+        ]
+
+        self.assertEqual(result["content"], "subscription-ok")
+        self.assertEqual(result["model"], "claude-sonnet-test")
+        self.assertEqual(result["usage"], {"prompt_tokens": 3, "completion_tokens": 2})
+        self.assertEqual(
+            [event.event_type for event in events],
+            ["message_start", "assistant_delta", "usage", "message_stop"],
+        )
+        self.assertEqual(events[1].payload["text"], "subscription-ok")
+
+    async def test_subscription_cli_failure_falls_back_to_next_healthy_target(self) -> None:
+        provider = LLMProvider(
+            LLMConfig(default_model="openai/default", nu_routing=NULlmRoutingConfig(enabled=True))
+        )
+        bridge = _subscription_bridge()
+        first = RoutedLLMTarget(
+            provider="grok",
+            model="grok-4.5",
+            transport_kind="subscription_cli",
+            credential_configured=True,
+            transport_ready=True,
+            supports_tools=False,
+            supports_streaming=False,
+        )
+        second = bridge.targets(task_type="quick_tasks", has_tools=False)[0]
+        bridge.targets = lambda **_kwargs: (first, second)  # type: ignore[method-assign]
+        original_execute = bridge.execute_text_target
+
+        def execute(target, **kwargs):
+            if target.provider == "grok":
+                raise RuntimeError("cancelled")
+            return original_execute(target, **kwargs)
+
+        bridge.execute_text_target = execute  # type: ignore[method-assign]
+        provider.nu_router = bridge
+
+        result = await provider.chat(
+            [{"role": "user", "content": "hello"}],
+            task_type="quick_tasks",
+        )
+        events = [
+            event
+            async for event in provider.chat_stream(
+                [{"role": "user", "content": "hello"}],
+                task_type="quick_tasks",
+            )
+        ]
+
+        self.assertEqual(result["provider"], "claude_sonnet")
+        self.assertEqual(events[-1].event_type, "message_stop")
+        self.assertEqual(provider.stats["nu_route_target"]["provider"], "claude_sonnet")
 
 
 if __name__ == "__main__":

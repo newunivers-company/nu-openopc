@@ -225,6 +225,44 @@ class OperationsCliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertFalse((self.root / "escape").exists())
 
+    def test_goal_close_creates_audited_terminal_version(self) -> None:
+        created = self._invoke(
+            [
+                "ops",
+                "goal",
+                "create",
+                "--title",
+                "Closable goal",
+                "--objective",
+                "Close with an operator reason",
+                "--criterion",
+                "done=All work is complete",
+                "--project",
+                "demo",
+            ]
+        )
+        goal_id = json.loads(created.output)["goal_id"]
+
+        closed = self._invoke(
+            [
+                "ops",
+                "goal",
+                "close",
+                goal_id,
+                "--status",
+                "cancelled",
+                "--reason",
+                "superseded",
+                "--project",
+                "demo",
+            ]
+        )
+        payload = json.loads(closed.output)
+
+        self.assertEqual(payload["status"], "cancelled")
+        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["metadata"]["closure"]["reason"], "superseded")
+
     def test_capability_request_cannot_cross_project_boundary(self) -> None:
         request = self._write_json(
             "cross-project.json",

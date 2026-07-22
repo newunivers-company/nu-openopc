@@ -17,6 +17,7 @@ from opc.operations.models import (
     AcceptanceCriterion,
     CapabilityRequest,
     GoalContract,
+    GoalContractStatus,
     LearningAssetStatus,
     ResourceBudget,
     RoleOutcome,
@@ -121,11 +122,52 @@ def register_operations_cli(app: typer.Typer) -> None:
 
         _emit(_run(project, action))
 
+    @goal_app.command("close")
+    def goal_close(
+        goal_id: str = typer.Argument(...),
+        status: str = typer.Option("completed", "--status", help="completed or cancelled"),
+        reason: str = typer.Option(..., "--reason"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        async def action(service: OperationsService) -> dict[str, Any]:
+            goal = await service.repository.get_goal(goal_id)
+            if goal is None or goal.project_id != project:
+                raise KeyError(f"goal not found: {goal_id}")
+            try:
+                terminal = GoalContractStatus(str(status).strip().lower())
+            except ValueError as exc:
+                raise ValueError("goal close status must be completed or cancelled") from exc
+            if terminal not in {GoalContractStatus.COMPLETED, GoalContractStatus.CANCELLED}:
+                raise ValueError("goal close status must be completed or cancelled")
+            if goal.status in {GoalContractStatus.COMPLETED, GoalContractStatus.CANCELLED}:
+                return goal.to_dict()
+            updated = GoalContract.from_dict(goal.to_dict())
+            updated.version = goal.version + 1
+            updated.status = terminal
+            updated.metadata = {
+                **dict(goal.metadata),
+                "closure": {
+                    "source": "operator",
+                    "reason": str(reason).strip(),
+                    "closed_at": utc_now().isoformat(),
+                },
+            }
+            if not updated.metadata["closure"]["reason"]:
+                raise ValueError("goal close reason is required")
+            return (await service.repository.save_goal(updated)).to_dict()
+
+        _emit(_run(project, action))
+
     @run_app.command("start")
     def run_start(
         goal_id: str = typer.Argument(...),
         run_id: str = typer.Option("", "--run-id"),
         manifest_json: Optional[Path] = typer.Option(None, "--manifest", help="RunManifest JSON"),
+        complete_goal_on_pass: bool = typer.Option(
+            False,
+            "--complete-goal-on-pass",
+            help="Close the latest goal version after this run passes with no active sibling run",
+        ),
         project: str = typer.Option("default", "--project", "-p"),
     ) -> None:
         async def action(service: OperationsService) -> dict[str, Any]:
@@ -141,7 +183,10 @@ def register_operations_cli(app: typer.Typer) -> None:
                     project_id=project,
                     status=RunStatus.RUNNING,
                     started_at=utc_now(),
+                    metadata={"complete_goal_on_pass": complete_goal_on_pass},
                 )
+            if complete_goal_on_pass:
+                manifest.metadata["complete_goal_on_pass"] = True
             saved, _ = await service.durable.start_run(manifest)
             return saved.to_dict()
 
@@ -505,6 +550,7 @@ async def _run_async(
                 opc_home=opc_home,
                 project_id=project,
             )
+        default_llm_readiness = config.llm.transport_readiness()
         service = OperationsService(
             store,
             config.system.operations,
@@ -512,6 +558,8 @@ async def _run_async(
             resource_bridge=resource_bridge,
             default_llm_model=config.llm.default_model,
             default_llm_api_base=config.llm.api_base,
+            default_llm_credential_ready=default_llm_readiness["credential_ready"],
+            default_llm_transport_ready=default_llm_readiness["transport_ready"],
         )
         return await action(service)
     finally:

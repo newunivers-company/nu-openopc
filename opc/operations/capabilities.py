@@ -36,6 +36,8 @@ class UnifiedCapabilityBroker:
         adapter_registry: Any | None = None,
         default_llm_model: str = "",
         default_llm_api_base: str = "",
+        default_llm_credential_ready: bool = False,
+        default_llm_transport_ready: bool = False,
     ) -> None:
         self.repository = repository
         self.llm_router = llm_router
@@ -43,6 +45,8 @@ class UnifiedCapabilityBroker:
         self.adapter_registry = adapter_registry
         self.default_llm_model = str(default_llm_model or "")
         self.default_llm_api_base = str(default_llm_api_base or "")
+        self.default_llm_credential_ready = bool(default_llm_credential_ready)
+        self.default_llm_transport_ready = bool(default_llm_transport_ready)
 
     def bind_adapter_registry(self, registry: Any | None) -> None:
         self.adapter_registry = registry
@@ -204,7 +208,8 @@ class UnifiedCapabilityBroker:
                 "provider": selected_provider,
                 "model": self.default_llm_model,
                 "api_base": self.default_llm_api_base,
-                "transport_configured": True,
+                "credential_configured": self.default_llm_credential_ready,
+                "transport_ready": self.default_llm_transport_ready,
             }
             diagnostics.setdefault("fallback", "OpenOPC default LLM transport")
         if not selected_provider:
@@ -223,6 +228,11 @@ class UnifiedCapabilityBroker:
                     f"{request.max_cost_usd:.6f} USD"
                 )
         model = str((selected_target or {}).get("model", ""))
+        credential_ready = bool((selected_target or {}).get("credential_configured", False))
+        transport_ready = bool((selected_target or {}).get("transport_ready", False))
+        if request.allow_live and not transport_ready:
+            blockers.append("selected LLM route is not transport-ready for live execution")
+        plan_allowed = not blockers
         alternatives = [
             {
                 "provider": item,
@@ -238,7 +248,7 @@ class UnifiedCapabilityBroker:
             candidate_id=model or selected_provider,
             model=model,
             mode="live" if request.allow_live else "dry_run",
-            allowed=not blockers,
+            allowed=plan_allowed,
             reason=(
                 "selected from NU route diagnostics"
                 if diagnostics.get("available") and selected_provider != "openopc"
@@ -258,6 +268,12 @@ class UnifiedCapabilityBroker:
                 "sandboxed_tools": request.sandboxed_tools,
                 "gpu_free_vram_mib": request.gpu_free_vram_mib,
             },
+            readiness={
+                "plan_allowed": plan_allowed,
+                "credential_ready": credential_ready,
+                "transport_ready": transport_ready,
+                "live_allowed": bool(request.allow_live and plan_allowed and transport_ready),
+            },
             estimated_cost_usd=estimated_cost,
         )
 
@@ -273,7 +289,13 @@ class UnifiedCapabilityBroker:
             if callable(describe):
                 profiles = [dict(item) for item in describe()]
         profile_by_name = {
-            str(item.get("agent_type") or item.get("name") or item.get("id") or ""): item
+            str(
+                item.get("agent_type")
+                or item.get("agent")
+                or item.get("name")
+                or item.get("id")
+                or ""
+            ): item
             for item in profiles
         }
         required = {item.strip().lower() for item in request.required_capabilities if item.strip()}
@@ -294,6 +316,11 @@ class UnifiedCapabilityBroker:
             if not bool(profile.get("free") or profile.get("local")):
                 blockers.append("selected external agent is not explicitly marked local/free")
         selected_profile = profile_by_name.get(selected, {})
+        health = dict(selected_profile.get("health", {}) or {})
+        credential_ready = bool(health.get("credential_ready", selected in compatible))
+        transport_ready = bool(health.get("transport_ready", selected in compatible))
+        if request.allow_live and selected and not transport_ready:
+            blockers.append("selected external agent is not transport-ready")
         estimated_cost = _known_agent_cost(selected_profile)
         if request.max_cost_usd is not None:
             if estimated_cost is None:
@@ -308,17 +335,24 @@ class UnifiedCapabilityBroker:
             for name in compatible
             if name != selected
         ]
+        plan_allowed = not blockers
         return CapabilityRoute(
             request_id=request.request_id,
             capability_kind=request.capability_kind,
             provider=selected,
             candidate_id=selected,
             mode="delegate" if request.allow_live else "dry_run",
-            allowed=not blockers,
+            allowed=plan_allowed,
             reason="selected from currently available OpenOPC external-agent adapters",
             blockers=_dedupe(blockers),
             alternatives=alternatives,
             diagnostics={"available": available, "compatible": compatible},
+            readiness={
+                "plan_allowed": plan_allowed,
+                "credential_ready": credential_ready,
+                "transport_ready": transport_ready,
+                "live_allowed": bool(request.allow_live and plan_allowed and transport_ready),
+            },
             estimated_cost_usd=estimated_cost,
         )
 
@@ -416,11 +450,6 @@ class UnifiedCapabilityBroker:
                 blockers.append(f"candidate {candidate_id!r} is not live-allowlisted")
             if not bool(request.metadata.get("confirm_live", False)):
                 blockers.append("live resource route requires confirm_live=true")
-            if (
-                not bool(selected.get("credentials_configured", False))
-                and provider.strip().lower() not in {"local", "comfyui"}
-            ):
-                blockers.append("selected resource candidate has no configured credentials")
             policy = dict(plan.get("policy", {}) or {})
             if bool(policy.get("blocked", False)):
                 policy_blockers = [
@@ -436,6 +465,31 @@ class UnifiedCapabilityBroker:
             _compact_resource(item)
             for item in candidates[1:10]
         ]
+        provider_readiness: dict[str, Any] = {}
+        readiness_probe = getattr(self.resource_bridge, "provider_readiness", None)
+        if selected and callable(readiness_probe):
+            try:
+                provider_readiness = await asyncio.to_thread(readiness_probe, provider)
+            except Exception as exc:
+                provider_readiness = {
+                    "credential_ready": False,
+                    "transport_ready": False,
+                    "detail": f"readiness probe failed: {type(exc).__name__}: {exc}"[:500],
+                }
+        credential_ready = bool(
+            provider_readiness.get(
+                "credential_ready",
+                selected.get("credentials_configured", False)
+                or provider.strip().lower() in {"local", "comfyui"},
+            )
+        )
+        transport_ready = bool(provider_readiness.get("transport_ready", credential_ready))
+        if request.allow_live and selected:
+            if not credential_ready:
+                blockers.append("selected resource provider has no configured credentials")
+            if not transport_ready:
+                blockers.append("selected resource provider is not transport-ready")
+        plan_allowed = not blockers
         return CapabilityRoute(
             request_id=request.request_id,
             capability_kind=request.capability_kind,
@@ -443,7 +497,7 @@ class UnifiedCapabilityBroker:
             candidate_id=candidate_id,
             model=str(selected.get("model", "")),
             mode=mode,
-            allowed=not blockers,
+            allowed=plan_allowed,
             reason=(
                 "selected from the installed NU Resource Gen catalog using local/free-first policy"
                 if request.local_first or request.require_free
@@ -456,6 +510,13 @@ class UnifiedCapabilityBroker:
                 "compatible_count": len(candidates),
                 "selected": _compact_resource(selected),
                 "dry_run_plan": plan,
+                "provider_readiness": provider_readiness,
+            },
+            readiness={
+                "plan_allowed": plan_allowed,
+                "credential_ready": credential_ready,
+                "transport_ready": transport_ready,
+                "live_allowed": bool(request.allow_live and plan_allowed and transport_ready),
             },
             estimated_cost_usd=cost,
         )
