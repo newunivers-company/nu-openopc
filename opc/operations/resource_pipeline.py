@@ -38,7 +38,10 @@ class ResourcePipelineRequest:
     max_cost_usd: float | None = 0.0
     approval_token: str = ""
     planner_candidate_id: str = "llm-planner-primary"
-    qa_candidate_id: str = "local_gemma4_12b_nvfp4"
+    qa_candidate_id: str = "local_rfdetr_detection_nano"
+    qa_params: dict[str, Any] = field(default_factory=dict)
+    quality_scope: str = "object_presence"
+    expected_classes: list[str] = field(default_factory=list)
     quality_preset: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     gpu_free_vram_mib: int = 0
@@ -65,7 +68,12 @@ class ResourcePipelineRequest:
                 data.get("planner_candidate_id", "llm-planner-primary")
                 or "llm-planner-primary"
             ),
-            qa_candidate_id=str(data.get("qa_candidate_id", "local_gemma4_12b_nvfp4") or ""),
+            qa_candidate_id=str(
+                data.get("qa_candidate_id", "local_rfdetr_detection_nano") or ""
+            ),
+            qa_params=dict(data.get("qa_params", {}) or {}),
+            quality_scope=str(data.get("quality_scope", "object_presence") or ""),
+            expected_classes=_string_list(data.get("expected_classes")),
             quality_preset=str(data.get("quality_preset", "") or ""),
             metadata=dict(data.get("metadata", {}) or {}),
             gpu_free_vram_mib=max(0, int(data.get("gpu_free_vram_mib", 0) or 0)),
@@ -79,6 +87,8 @@ class ResourcePipelineRequest:
             raise ValueError("resource pipeline candidate_id and task_type are required")
         if self.max_cost_usd is not None and self.max_cost_usd < 0:
             raise ValueError("max_cost_usd must be non-negative or null")
+        if self.qa_candidate_id and not self.quality_scope.strip():
+            raise ValueError("quality_scope is required when qa_candidate_id is set")
 
 
 @dataclass
@@ -100,12 +110,36 @@ class ResourcePipelineResult:
 
 
 class ResourceApprovalTokenIssuer:
-    """Issue short-lived HMAC approvals bound to one prompt and candidate."""
+    """Issue key-identified, rotatable HMAC approvals for one exact request."""
 
-    def __init__(self, secret: str | bytes) -> None:
-        self.secret = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
-        if len(self.secret) < 16:
-            raise ValueError("resource approval secret must contain at least 16 bytes")
+    def __init__(
+        self,
+        secret: str | bytes,
+        *,
+        key_id: str = "primary",
+        verification_keys: Mapping[str, str | bytes] | None = None,
+    ) -> None:
+        active_key_id = str(key_id or "").strip()
+        if not active_key_id:
+            raise ValueError("resource approval key_id is required")
+        keys = dict(verification_keys or {})
+        keys[active_key_id] = secret
+        self._keys: dict[str, bytes] = {}
+        for identifier, raw_secret in keys.items():
+            normalized_id = str(identifier or "").strip()
+            if not normalized_id:
+                raise ValueError("resource approval verification key_id is required")
+            encoded = (
+                raw_secret.encode("utf-8")
+                if isinstance(raw_secret, str)
+                else bytes(raw_secret)
+            )
+            if len(encoded) < 16:
+                raise ValueError(
+                    f"resource approval secret {normalized_id!r} must contain at least 16 bytes"
+                )
+            self._keys[normalized_id] = encoded
+        self.active_key_id = active_key_id
 
     def issue(
         self,
@@ -114,11 +148,22 @@ class ResourceApprovalTokenIssuer:
         candidate_id: str,
         prompt: str,
         max_cost_usd: float | None,
+        operator_id: str,
+        approval_id: str | None = None,
         expires_in_seconds: float = 300.0,
     ) -> str:
+        normalized_operator = str(operator_id or "").strip()
+        if not normalized_operator:
+            raise ValueError("resource approval operator_id is required")
+        normalized_approval = str(approval_id or uuid.uuid4()).strip()
+        if not normalized_approval:
+            raise ValueError("resource approval approval_id is required")
         now = int(time.time())
         claims = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "approval_id": normalized_approval,
+            "operator_id": normalized_operator,
+            "key_id": self.active_key_id,
             "nonce": uuid.uuid4().hex,
             "project_id": str(project_id),
             "candidate_id": str(candidate_id),
@@ -128,8 +173,57 @@ class ResourceApprovalTokenIssuer:
             "expires_at": now + max(1, int(expires_in_seconds)),
         }
         body = _b64encode(_canonical_json(claims))
-        signature = _b64encode(hmac.new(self.secret, body.encode("ascii"), hashlib.sha256).digest())
+        signature = _b64encode(
+            hmac.new(
+                self._keys[self.active_key_id],
+                body.encode("ascii"),
+                hashlib.sha256,
+            ).digest()
+        )
         return f"{body}.{signature}"
+
+    def inspect(self, token: str) -> dict[str, Any]:
+        """Verify signature/expiry and return secret-free audit claims."""
+
+        try:
+            body, supplied_signature = str(token).split(".", 1)
+            claims = json.loads(_b64decode(body).decode("utf-8"))
+            key_id = str(claims.get("key_id", "") or "").strip()
+            if key_id:
+                candidate_keys = [(key_id, self._keys.get(key_id))]
+            else:
+                # Schema-v1 tokens had no key ID. Retained keys verify them
+                # during the rotation window without making one key implicit.
+                candidate_keys = list(self._keys.items())
+            verified_key = next(
+                (
+                    identifier
+                    for identifier, key in candidate_keys
+                    if key is not None
+                    and hmac.compare_digest(
+                        supplied_signature,
+                        _b64encode(
+                            hmac.new(
+                                key,
+                                body.encode("ascii"),
+                                hashlib.sha256,
+                            ).digest()
+                        ),
+                    )
+                ),
+                "",
+            )
+            if not verified_key:
+                raise PermissionError("resource approval signature or key_id is invalid")
+        except PermissionError:
+            raise
+        except Exception as exc:
+            raise PermissionError("resource approval token is malformed") from exc
+        if int(claims.get("expires_at", 0) or 0) <= int(time.time()):
+            raise PermissionError("resource approval token has expired")
+        claims = dict(claims)
+        claims.setdefault("key_id", verified_key)
+        return claims
 
     def verify(
         self,
@@ -140,20 +234,7 @@ class ResourceApprovalTokenIssuer:
         prompt: str,
         max_cost_usd: float | None,
     ) -> dict[str, Any]:
-        try:
-            body, supplied_signature = str(token).split(".", 1)
-            expected_signature = _b64encode(
-                hmac.new(self.secret, body.encode("ascii"), hashlib.sha256).digest()
-            )
-            if not hmac.compare_digest(supplied_signature, expected_signature):
-                raise PermissionError("resource approval signature is invalid")
-            claims = json.loads(_b64decode(body).decode("utf-8"))
-        except PermissionError:
-            raise
-        except Exception as exc:
-            raise PermissionError("resource approval token is malformed") from exc
-        if int(claims.get("expires_at", 0) or 0) <= int(time.time()):
-            raise PermissionError("resource approval token has expired")
+        claims = self.inspect(token)
         expected = {
             "project_id": str(project_id),
             "candidate_id": str(candidate_id),
@@ -294,24 +375,35 @@ class ApprovedResourcePipeline:
         if not target_route.allowed:
             blockers.extend(f"generation: {item}" for item in target_route.blockers)
 
+        qa_request: CapabilityRequest | None = None
         if parsed.qa_candidate_id:
-            qa_route = await self.broker.plan(
-                CapabilityRequest(
-                    request_id=f"{parsed.request_id}:qa-plan",
-                    capability_kind=CapabilityKind.RESOURCE,
-                    task_type="vision_analysis",
-                    project_id=parsed.project_id,
-                    run_id=parsed.run_id,
-                    prompt="Evaluate the generated artifact with grounded findings and a 0-100 score.",
-                    candidate_id=parsed.qa_candidate_id,
-                    allow_live=False,
-                    local_first=True,
-                    require_free=True,
-                    max_cost_usd=0.0,
-                    gpu_free_vram_mib=parsed.gpu_free_vram_mib,
-                    hardware_profile=parsed.hardware_profile,
-                )
+            qa_parameters = dict(parsed.qa_params)
+            if parsed.expected_classes:
+                qa_parameters["expected_classes"] = ",".join(parsed.expected_classes)
+            qa_request = CapabilityRequest(
+                request_id=f"{parsed.request_id}:qa",
+                capability_kind=CapabilityKind.RESOURCE,
+                task_type="grounding_evidence",
+                project_id=parsed.project_id,
+                run_id=parsed.run_id,
+                prompt=(
+                    "Evaluate only the requested artifact quality scope with grounded "
+                    "findings and a 0-100 score."
+                ),
+                candidate_id=parsed.qa_candidate_id,
+                parameters=qa_parameters,
+                allow_live=False,
+                local_first=True,
+                require_free=True,
+                max_cost_usd=0.0,
+                gpu_free_vram_mib=parsed.gpu_free_vram_mib,
+                hardware_profile=parsed.hardware_profile,
+                metadata={
+                    "quality_scope": parsed.quality_scope,
+                    "expected_classes": list(parsed.expected_classes),
+                },
             )
+            qa_route = await self.broker.plan(qa_request)
             stages["quality_plan"] = {
                 "candidate_id": parsed.qa_candidate_id,
                 "allowed": qa_route.allowed,
@@ -324,8 +416,12 @@ class ApprovedResourcePipeline:
                 "hardware_readiness": dict(
                     qa_route.diagnostics.get("hardware_readiness", {}) or {}
                 ),
+                "quality_scope": parsed.quality_scope,
+                "expected_classes": list(parsed.expected_classes),
                 "blockers": list(qa_route.blockers),
             }
+            if not qa_route.allowed:
+                blockers.extend(f"quality: {item}" for item in qa_route.blockers)
 
         if blockers:
             return await self._finish(parsed, "blocked", "regenerate", stages, blockers)
@@ -354,6 +450,13 @@ class ApprovedResourcePipeline:
                 request_id=parsed.request_id,
                 claims=claims,
             )
+            stages["approval"] = {
+                "approval_id": str(claims.get("approval_id", "") or ""),
+                "operator_id": str(claims.get("operator_id", "") or ""),
+                "key_id": str(claims.get("key_id", "") or ""),
+                "issued_at": claims.get("issued_at"),
+                "expires_at": claims.get("expires_at"),
+            }
         except PermissionError as exc:
             blockers.append(str(exc))
             return await self._finish(parsed, "blocked", "blocked", stages, blockers)
@@ -405,8 +508,38 @@ class ApprovedResourcePipeline:
             }
             return await self._finish(parsed, "review", "review", stages, blockers)
 
+        quality_metadata = {
+            **dict(parsed.metadata),
+            "request_id": parsed.request_id,
+            "project_id": parsed.project_id,
+            "run_id": parsed.run_id,
+            "qa_candidate_id": parsed.qa_candidate_id,
+            "qa_params": dict(parsed.qa_params),
+            "quality_scope": parsed.quality_scope,
+            "expected_classes": list(parsed.expected_classes),
+            "source_candidate_id": parsed.candidate_id,
+            "source_task_type": parsed.task_type,
+        }
+
+        async def evaluate_quality(_route: Any, _request: Any) -> Any:
+            return await _maybe_await(
+                self.quality_executor(quality_metadata, generated_map)
+            )
+
         try:
-            quality = await _maybe_await(self.quality_executor(parsed.metadata, generated_map))
+            if qa_request is None:
+                raise RuntimeError("no quality candidate was configured")
+            qa_request.allow_live = True
+            qa_request.metadata.update(
+                {
+                    "confirm_live": True,
+                    "execution_purpose": "artifact_quality",
+                    "media": {"image": str(generated_map.get("asset_uri", "") or "")},
+                }
+            )
+            qa_route, quality = await self.broker.execute(
+                qa_request, evaluate_quality
+            )
         except Exception as exc:
             stages["artifact_quality"] = {
                 "performed": False,
@@ -423,7 +556,8 @@ class ApprovedResourcePipeline:
             score = 0.0
         grounded = bool(quality_map.get("grounded", False))
         evidence = [str(item) for item in quality_map.get("evidence", []) or []]
-        if score >= self.pass_threshold and grounded and evidence:
+        scope_satisfied = bool(quality_map.get("scope_satisfied", False))
+        if score >= self.pass_threshold and grounded and evidence and scope_satisfied:
             decision = "pass"
             status = "completed"
         elif score >= self.review_threshold:
@@ -437,6 +571,8 @@ class ApprovedResourcePipeline:
             "score": score,
             "grounded": grounded,
             "evidence": evidence,
+            "scope_satisfied": scope_satisfied,
+            "route_id": qa_route.route_id,
             "pass_threshold": self.pass_threshold,
             "review_threshold": self.review_threshold,
             "decision": decision,
@@ -479,6 +615,18 @@ async def _maybe_await(value: Any) -> Any:
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = []
+    return list(
+        dict.fromkeys(str(item).strip() for item in items if str(item).strip())
+    )
 
 
 def _b64encode(value: bytes) -> str:

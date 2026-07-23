@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
 import tempfile
 from datetime import timedelta
 from pathlib import Path
@@ -27,6 +28,30 @@ from opc.operations.models import (
     utc_now,
 )
 from opc.operations.repository import OperationsRepository
+
+
+def _append_from_process(db_path: str, event_type: str, start_event, result_queue) -> None:
+    async def run() -> None:
+        store = OPCStore(Path(db_path))
+        await store.initialize()
+        try:
+            start_event.wait(timeout=10)
+            kernel = DurableRunKernel(
+                OperationsRepository(store),
+                DurableOperationsConfig(),
+            )
+            await kernel.record_event(
+                run_id="run-durable",
+                event_type=event_type,
+                expected_version=0,
+            )
+            result_queue.put(("ok", event_type))
+        except Exception as exc:
+            result_queue.put((type(exc).__name__, str(exc)))
+        finally:
+            await store.close()
+
+    asyncio.run(run())
 
 
 class DurableRunKernelTests(unittest.IsolatedAsyncioTestCase):
@@ -368,6 +393,33 @@ class DurableRunKernelTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(sum(not isinstance(item, Exception) for item in results), 1)
         self.assertEqual(sum(isinstance(item, AggregateVersionConflict) for item in results), 1)
+        self.assertEqual(len(await self.repository.list_events("run-durable")), 1)
+
+    async def test_two_processes_serialize_compare_and_append(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        start_event = context.Event()
+        result_queue = context.Queue()
+        processes = [
+            context.Process(
+                target=_append_from_process,
+                args=(str(self.db_path), f"process.{index}", start_event, result_queue),
+            )
+            for index in (1, 2)
+        ]
+        for process in processes:
+            process.start()
+        start_event.set()
+        for process in processes:
+            process.join(timeout=20)
+            self.assertFalse(process.is_alive(), "multiprocess writer did not terminate")
+            self.assertEqual(process.exitcode, 0)
+        results = [result_queue.get(timeout=5) for _ in processes]
+
+        self.assertEqual(sum(status == "ok" for status, _ in results), 1)
+        self.assertEqual(
+            sum(status == "AggregateVersionConflict" for status, _ in results),
+            1,
+        )
         self.assertEqual(len(await self.repository.list_events("run-durable")), 1)
 
 

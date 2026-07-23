@@ -19,7 +19,10 @@ from opc.operations.models import (
     RouteExecutionContract,
     utc_now,
 )
-from opc.operations.repository import OperationsRepository
+from opc.operations.repository import (
+    OperationsRepository,
+    ProviderCallQuotaExceeded,
+)
 
 
 CapabilityExecutor = Callable[[CapabilityRoute, CapabilityRequest], Awaitable[Any] | Any]
@@ -44,6 +47,9 @@ class UnifiedCapabilityBroker:
         default_llm_credential_ready: bool = False,
         default_llm_transport_ready: bool = False,
         execution_contract_ttl_seconds: float = 300.0,
+        subscription_call_limit: int = 200,
+        subscription_window_seconds: int = 86_400,
+        subscription_providers: Sequence[str] = ("codex", "claude", "grok"),
     ) -> None:
         self.repository = repository
         self.llm_router = llm_router
@@ -54,6 +60,13 @@ class UnifiedCapabilityBroker:
         self.default_llm_credential_ready = bool(default_llm_credential_ready)
         self.default_llm_transport_ready = bool(default_llm_transport_ready)
         self.execution_contract_ttl_seconds = max(1.0, float(execution_contract_ttl_seconds))
+        self.subscription_call_limit = max(0, int(subscription_call_limit))
+        self.subscription_window_seconds = max(1, int(subscription_window_seconds))
+        self.subscription_providers = tuple(
+            str(item).strip().lower()
+            for item in subscription_providers
+            if str(item).strip()
+        )
 
     def bind_adapter_registry(self, registry: Any | None) -> None:
         self.adapter_registry = registry
@@ -89,6 +102,22 @@ class UnifiedCapabilityBroker:
         executor: CapabilityExecutor,
     ) -> tuple[CapabilityRoute, Any]:
         """Execute only an explicitly live-authorized route through an injected owner."""
+        parsed, route, contract, started = await self.begin_execution(request)
+        try:
+            result = executor(route, parsed)
+            if inspect.isawaitable(result):
+                result = await result
+        except BaseException as exc:
+            await self.fail_execution(parsed, route, contract, started, exc)
+            raise
+        return await self.complete_execution(parsed, route, contract, started, result)
+
+    async def begin_execution(
+        self,
+        request: CapabilityRequest | Mapping[str, Any],
+    ) -> tuple[CapabilityRequest, CapabilityRoute, RouteExecutionContract, float]:
+        """Persist and start one live execution contract before provider I/O."""
+
         parsed = request if isinstance(request, CapabilityRequest) else CapabilityRequest.from_dict(request)
         if not parsed.allow_live:
             raise PermissionError("capability execution requires allow_live=true")
@@ -102,32 +131,75 @@ class UnifiedCapabilityBroker:
             contract.error = "execution contract expired before execution"
             await self.repository.save_route_execution_contract(contract)
             raise PermissionError(contract.error)
+        if self._subscription_quota_applies(route):
+            try:
+                reservation = await self.repository.reserve_provider_call(
+                    contract_id=contract.contract_id,
+                    request_id=parsed.request_id,
+                    project_id=parsed.project_id,
+                    provider=route.provider,
+                    model=route.model,
+                    limit=self.subscription_call_limit,
+                    window_seconds=self.subscription_window_seconds,
+                )
+            except ProviderCallQuotaExceeded as exc:
+                contract.status = "quota_exceeded"
+                contract.error = str(exc)
+                contract.completed_at = utc_now()
+                await self.repository.save_route_execution_contract(contract)
+                await self.record_attempt(
+                    parsed,
+                    route,
+                    status="quota_exceeded",
+                    error=str(exc),
+                    metadata={"contract_id": contract.contract_id},
+                )
+                raise PermissionError(str(exc)) from exc
+            contract.result_metadata["subscription_call_quota"] = reservation
         contract.status = "executing"
         contract.started_at = utc_now()
         await self.repository.save_route_execution_contract(contract)
-        started = time.monotonic()
-        try:
-            result = executor(route, parsed)
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception as exc:
-            contract.status = "failed"
-            contract.error = str(exc)[:4000]
-            contract.completed_at = utc_now()
-            await self.repository.save_route_execution_contract(contract)
-            await self.record_attempt(
-                parsed,
-                route,
-                status="failed",
-                latency_ms=(time.monotonic() - started) * 1000,
-                error=str(exc),
-                metadata={"contract_id": contract.contract_id},
-            )
-            raise
+        return parsed, route, contract, time.monotonic()
+
+    async def fail_execution(
+        self,
+        request: CapabilityRequest,
+        route: CapabilityRoute,
+        contract: RouteExecutionContract,
+        started: float,
+        exc: BaseException,
+    ) -> None:
+        """Close an executing contract after provider failure or stream cancellation."""
+
+        detail = str(exc).strip() or type(exc).__name__
+        contract.status = "failed"
+        contract.error = detail[:4000]
+        contract.completed_at = utc_now()
+        await self.repository.save_route_execution_contract(contract)
+        await self._finish_subscription_reservation(contract, status="failed")
+        await self.record_attempt(
+            request,
+            route,
+            status="failed",
+            latency_ms=(time.monotonic() - started) * 1000,
+            error=detail,
+            metadata={"contract_id": contract.contract_id},
+        )
+
+    async def complete_execution(
+        self,
+        request: CapabilityRequest,
+        route: CapabilityRoute,
+        contract: RouteExecutionContract,
+        started: float,
+        result: Any,
+    ) -> tuple[CapabilityRoute, Any]:
+        """Persist actual route, usage evidence, and terminal contract state."""
+
         actual = _actual_route_identity(result, route)
         identity_error = _validate_actual_route(route, actual)
         cost = _result_cost(result)
-        usage = _usage_event(parsed, contract, actual, result, cost_usd=cost)
+        usage = _usage_event(request, contract, actual, result, cost_usd=cost)
         await self.repository.save_provider_usage_event(usage)
         contract.actual_provider = actual["provider"]
         contract.actual_candidate_id = actual["candidate_id"]
@@ -135,13 +207,21 @@ class UnifiedCapabilityBroker:
         contract.actual_cost_usd = cost
         contract.usage_event_id = usage.usage_event_id
         contract.completed_at = utc_now()
+        quota_metadata = dict(
+            contract.result_metadata.get("subscription_call_quota", {}) or {}
+        )
         contract.result_metadata = _result_metadata(result)
+        if quota_metadata:
+            contract.result_metadata["subscription_call_quota"] = quota_metadata
         if identity_error:
             contract.status = "contract_violation"
             contract.error = identity_error
             await self.repository.save_route_execution_contract(contract)
+            await self._finish_subscription_reservation(
+                contract, status="contract_violation"
+            )
             await self.record_attempt(
-                parsed,
+                request,
                 route,
                 status="contract_violation",
                 latency_ms=(time.monotonic() - started) * 1000,
@@ -153,16 +233,19 @@ class UnifiedCapabilityBroker:
                 },
             )
             raise CapabilityBrokerError(identity_error)
-        if parsed.max_cost_usd is not None and cost is not None and cost > parsed.max_cost_usd:
+        if request.max_cost_usd is not None and cost is not None and cost > request.max_cost_usd:
             contract.status = "budget_exceeded"
             contract.error = (
-                f"actual cost {cost:.6f} exceeds contract ceiling {parsed.max_cost_usd:.6f}"
+                f"actual cost {cost:.6f} exceeds contract ceiling {request.max_cost_usd:.6f}"
             )
         else:
             contract.status = "completed"
         await self.repository.save_route_execution_contract(contract)
+        await self._finish_subscription_reservation(
+            contract, status=contract.status
+        )
         await self.record_attempt(
-            parsed,
+            request,
             route,
             status=contract.status,
             latency_ms=(time.monotonic() - started) * 1000,
@@ -178,6 +261,40 @@ class UnifiedCapabilityBroker:
         if contract.status == "budget_exceeded":
             raise CapabilityBrokerError(contract.error)
         return route, result
+
+    def _subscription_quota_applies(self, route: CapabilityRoute) -> bool:
+        if self.subscription_call_limit <= 0:
+            return False
+        transport_kind = ""
+        for target in route.diagnostics.get("targets", []) or []:
+            if not isinstance(target, Mapping):
+                continue
+            if str(target.get("provider", "") or "") == route.provider:
+                transport_kind = str(target.get("transport_kind", "") or "")
+                break
+        return bool(
+            transport_kind == "subscription_cli"
+            and _provider_matches(route.provider, self.subscription_providers)
+        )
+
+    async def _finish_subscription_reservation(
+        self,
+        contract: RouteExecutionContract,
+        *,
+        status: str,
+    ) -> None:
+        quota = contract.result_metadata.get("subscription_call_quota", {})
+        reservation_id = (
+            str(quota.get("reservation_id", "") or "")
+            if isinstance(quota, Mapping)
+            else ""
+        )
+        if reservation_id:
+            await self.repository.finish_provider_call_reservation(
+                reservation_id,
+                status=status,
+                completed_at=contract.completed_at,
+            )
 
     async def plan_execution(
         self,
@@ -321,7 +438,7 @@ class UnifiedCapabilityBroker:
         selected_provider = _preferred_value(selection_order, request.preferred_providers)
         selected_target = target_by_provider.get(selected_provider)
         if not selected_provider and self.default_llm_model:
-            selected_provider = "openopc"
+            selected_provider = "openopc_config"
             selected_target = {
                 "provider": selected_provider,
                 "model": self.default_llm_model,
@@ -350,6 +467,24 @@ class UnifiedCapabilityBroker:
         transport_ready = bool((selected_target or {}).get("transport_ready", False))
         if request.allow_live and not transport_ready:
             blockers.append("selected LLM route is not transport-ready for live execution")
+        subscription_call_quota: dict[str, Any] = {}
+        if (
+            str((selected_target or {}).get("transport_kind", ""))
+            == "subscription_cli"
+            and _provider_matches(selected_provider, self.subscription_providers)
+        ):
+            subscription_call_quota = await self.repository.provider_call_quota_status(
+                project_id=request.project_id,
+                provider=selected_provider,
+                limit=self.subscription_call_limit,
+                window_seconds=self.subscription_window_seconds,
+            )
+            if request.allow_live and not subscription_call_quota["allowed"]:
+                blockers.append(
+                    f"subscription call quota exhausted for {selected_provider}: "
+                    f"{subscription_call_quota['used']}/"
+                    f"{subscription_call_quota['limit']} calls"
+                )
         plan_allowed = not blockers
         alternatives = [
             {
@@ -385,6 +520,7 @@ class UnifiedCapabilityBroker:
                 "workload": workload,
                 "sandboxed_tools": request.sandboxed_tools,
                 "gpu_free_vram_mib": request.gpu_free_vram_mib,
+                "subscription_call_quota": subscription_call_quota,
             },
             readiness={
                 "plan_allowed": plan_allowed,
@@ -561,13 +697,38 @@ class UnifiedCapabilityBroker:
         mode = "dry_run"
         if request.allow_live:
             mode = "live"
-            status = self.resource_bridge.status()
-            if not status.get("allow_live"):
-                blockers.append("NU Resource Gen live execution is disabled")
-            if candidate_id not in set(status.get("allowed_live_candidates", []) or []):
-                blockers.append(f"candidate {candidate_id!r} is not live-allowlisted")
-            if not bool(request.metadata.get("confirm_live", False)):
-                blockers.append("live resource route requires confirm_live=true")
+            execution_purpose = str(
+                request.metadata.get("execution_purpose", "") or ""
+            ).strip()
+            if execution_purpose == "artifact_quality":
+                quality_status_probe = getattr(
+                    self.resource_bridge, "quality_execution_status", None
+                )
+                if not callable(quality_status_probe):
+                    blockers.append("resource bridge has no local quality execution policy")
+                else:
+                    try:
+                        quality_status = await asyncio.to_thread(
+                            quality_status_probe, candidate_id
+                        )
+                    except Exception as exc:
+                        blockers.append(
+                            f"local quality policy failed: {type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        if not bool(quality_status.get("allowed", False)):
+                            blockers.extend(
+                                str(item)
+                                for item in quality_status.get("blockers", []) or []
+                            )
+            else:
+                status = self.resource_bridge.status()
+                if not status.get("allow_live"):
+                    blockers.append("NU Resource Gen live execution is disabled")
+                if candidate_id not in set(status.get("allowed_live_candidates", []) or []):
+                    blockers.append(f"candidate {candidate_id!r} is not live-allowlisted")
+                if not bool(request.metadata.get("confirm_live", False)):
+                    blockers.append("live resource route requires confirm_live=true")
             policy = dict(plan.get("policy", {}) or {})
             if bool(policy.get("blocked", False)):
                 policy_blockers = [
@@ -585,10 +746,16 @@ class UnifiedCapabilityBroker:
         ]
         provider_readiness: dict[str, Any] = {}
         hardware_readiness = _resource_hardware_readiness(selected, request)
-        readiness_probe = getattr(self.resource_bridge, "provider_readiness", None)
+        readiness_probe = getattr(self.resource_bridge, "candidate_readiness", None)
+        readiness_argument = candidate_id
+        if not callable(readiness_probe):
+            readiness_probe = getattr(self.resource_bridge, "provider_readiness", None)
+            readiness_argument = provider
         if selected and callable(readiness_probe):
             try:
-                provider_readiness = await asyncio.to_thread(readiness_probe, provider)
+                provider_readiness = await asyncio.to_thread(
+                    readiness_probe, readiness_argument
+                )
             except Exception as exc:
                 provider_readiness = {
                     "credential_ready": False,
@@ -653,6 +820,16 @@ class UnifiedCapabilityBroker:
 def _preferred_value(values: Sequence[str], preferred: Sequence[str]) -> str:
     value_set = set(values)
     return next((item for item in preferred if item in value_set), values[0] if values else "")
+
+
+def _provider_matches(provider: str, configured: Sequence[str]) -> bool:
+    normalized = str(provider or "").strip().lower()
+    return any(
+        normalized == item
+        or normalized.startswith(f"{item}-")
+        or normalized.startswith(f"{item}_")
+        for item in configured
+    )
 
 
 def _is_local_llm(provider: str, target: Mapping[str, Any]) -> bool:

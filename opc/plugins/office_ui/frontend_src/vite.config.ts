@@ -11,9 +11,12 @@ export default defineConfig({
       output: {
         manualChunks: {
           phaser: ['phaser'],
+          graph: ['@dagrejs/dagre', '@xyflow/react'],
+          markdown: ['react-markdown', 'remark-gfm'],
+          dataView: ['@tanstack/react-table', '@tanstack/react-virtual'],
+          dragDrop: ['@hello-pangea/dnd'],
         },
       },
     },
   },
 })
-

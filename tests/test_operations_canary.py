@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 import unittest
 
 from opc.database.store import OPCStore
-from opc.operations.canary import ProviderCanaryService
+from opc.operations.canary import ProviderCanaryScheduler, ProviderCanaryService
 from opc.operations.models import (
     CapabilityKind,
     CapabilityRequest,
@@ -87,6 +88,51 @@ class ProviderCanaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(codex["p95_latency_ms"], 30.0)
         self.assertEqual(codex["consecutive_failures"], 2)
         self.assertFalse(codex["target_met"])
+
+    async def test_slo_fails_when_latency_target_is_missed(self) -> None:
+        await self.repository.save_provider_canary_result(
+            ProviderCanaryResult(
+                project_id="default",
+                capability_kind=CapabilityKind.LLM,
+                provider="codex",
+                success=True,
+                latency_ms=250.0,
+            )
+        )
+
+        summary = await self.service.slo_summary(
+            project_id="default",
+            availability_target=0.95,
+            p95_latency_target_ms=100.0,
+        )
+
+        codex = summary["providers"]["codex"]
+        self.assertTrue(codex["availability_target_met"])
+        self.assertFalse(codex["latency_target_met"])
+        self.assertFalse(codex["target_met"])
+
+    async def test_periodic_scheduler_runs_status_only_canary_and_stops(self) -> None:
+        scheduler = ProviderCanaryScheduler(
+            self.service,
+            lambda: CapabilityRequest(
+                capability_kind=CapabilityKind.LLM,
+                task_type="dialogue",
+            ),
+            interval_seconds=0.01,
+            project_id="default",
+        )
+
+        await scheduler.start()
+        for _ in range(50):
+            if scheduler.run_count:
+                break
+            await asyncio.sleep(0.01)
+        await scheduler.stop()
+
+        self.assertGreaterEqual(scheduler.run_count, 1)
+        self.assertFalse(scheduler.running)
+        self.assertEqual(scheduler.last_result.mode, "status")
+        self.assertTrue(scheduler.last_slo["providers"]["ollama-local"]["target_met"])
 
 
 if __name__ == "__main__":

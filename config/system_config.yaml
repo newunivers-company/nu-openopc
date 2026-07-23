@@ -25,6 +25,12 @@ system:
     ledger_root: ''
     artifact_archive_root: ''
     archive_live_artifacts: true
+    # Free/local artifact QC is separately allowlisted and can run only inside
+    # the approved pipeline. RF-DETR proves object presence/continuity, not
+    # general aesthetics or narrative quality.
+    allow_local_quality_execution: true
+    local_quality_candidates:
+    - local_rfdetr_detection_nano
     max_timeout_seconds: 900
     max_catalog_results: 50
   operations:
@@ -60,6 +66,21 @@ system:
       experience_weight: 0.15
       availability_weight: 0.10
       cost_weight: 0.05
+    providers:
+      # Subscription CLIs often omit token/cost telemetry, so call count is a
+      # separate rolling hard guard and never inferred as zero cost.
+      subscription_call_limit: 200
+      subscription_window_seconds: 86400
+      subscription_providers:
+      - codex
+      - claude
+      - grok
+      status_canary_enabled: true
+      status_canary_interval_seconds: 300
+      slo_min_samples: 3
+      slo_availability_target: 0.95
+      slo_p95_latency_target_ms: 30000
+      canary_expected_model: ''
   native_runtime:
     enabled: true
     stream_llm: true

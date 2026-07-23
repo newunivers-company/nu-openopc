@@ -27,6 +27,7 @@ from opc.operations.models import (
     StaffingCandidate,
     utc_now,
 )
+from opc.operations.backup import OperationsBackupManager
 from opc.operations.service import OperationsService
 from opc.operations.outbox import IndependentOutboxWorker, audit_outbox_handler
 from opc.operations.resource_pipeline import ResourcePipelineRequest
@@ -46,6 +47,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     outbox_app = typer.Typer(help="Inspect and recover durable deliveries")
     mission_app = typer.Typer(help="Inspect the secretary Mission Control view")
     resource_app = typer.Typer(help="Run approval-gated NU resource pipelines")
+    backup_app = typer.Typer(help="Create, inspect, and restore verified SQLite snapshots")
 
     app.add_typer(ops_app, name="ops")
     ops_app.add_typer(goal_app, name="goal")
@@ -57,6 +59,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     ops_app.add_typer(outbox_app, name="outbox")
     ops_app.add_typer(mission_app, name="mission")
     ops_app.add_typer(resource_app, name="resource")
+    ops_app.add_typer(backup_app, name="backup")
 
     @goal_app.command("create")
     def goal_create(
@@ -457,6 +460,9 @@ def register_operations_cli(app: typer.Typer) -> None:
         provider: Optional[str] = typer.Option(None, "--provider"),
         limit: int = typer.Option(100, "--limit", min=1, max=5000),
         availability_target: float = typer.Option(0.95, "--availability-target", min=0, max=1),
+        p95_latency_target_ms: float = typer.Option(
+            30_000.0, "--p95-latency-target-ms", min=1
+        ),
         project: str = typer.Option("default", "--project", "-p"),
     ) -> None:
         _emit(
@@ -467,6 +473,7 @@ def register_operations_cli(app: typer.Typer) -> None:
                     provider=provider,
                     limit=limit,
                     availability_target=availability_target,
+                    p95_latency_target_ms=p95_latency_target_ms,
                 ),
             )
         )
@@ -516,6 +523,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     @resource_app.command("approve")
     def resource_pipeline_approve(
         request_json: Path = typer.Option(..., "--request"),
+        operator_id: str = typer.Option(..., "--operator-id"),
         expires_in_seconds: float = typer.Option(300.0, "--expires-in-seconds", min=1, max=3600),
         project: str = typer.Option("default", "--project", "-p"),
     ) -> None:
@@ -524,7 +532,8 @@ def register_operations_cli(app: typer.Typer) -> None:
         async def action(service: OperationsService) -> dict[str, Any]:
             if service.resource_pipeline is None or service.resource_pipeline.approval_issuer is None:
                 raise RuntimeError(
-                    "set OPENOPC_RESOURCE_APPROVAL_SECRET (at least 16 bytes) before issuing approvals"
+                    "set OPENOPC_RESOURCE_APPROVAL_KEYS and its active key ID, or "
+                    "OPENOPC_RESOURCE_APPROVAL_SECRET (at least 16 bytes), before issuing approvals"
                 )
             request = ResourcePipelineRequest.from_dict(_load_mapping(request_json))
             request.project_id = project
@@ -534,10 +543,15 @@ def register_operations_cli(app: typer.Typer) -> None:
                 candidate_id=request.candidate_id,
                 prompt=request.prompt,
                 max_cost_usd=request.max_cost_usd,
+                operator_id=operator_id,
                 expires_in_seconds=expires_in_seconds,
             )
+            claims = service.resource_pipeline.approval_issuer.inspect(token)
             return {
                 "approval_token": token,
+                "approval_id": claims["approval_id"],
+                "operator_id": claims["operator_id"],
+                "key_id": claims["key_id"],
                 "project_id": project,
                 "candidate_id": request.candidate_id,
                 "expires_in_seconds": expires_in_seconds,
@@ -644,6 +658,40 @@ def register_operations_cli(app: typer.Typer) -> None:
             lambda service: service.mission_control.daily_brief(project_id=project),
         )
         typer.echo(value)
+
+    @backup_app.command("create")
+    def backup_create(
+        destination: Path = typer.Argument(...),
+        overwrite: bool = typer.Option(False, "--overwrite"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        async def action(service: OperationsService) -> dict[str, Any]:
+            manager = OperationsBackupManager(service.repository.store.db_path)
+            return await manager.create_backup(destination, overwrite=overwrite)
+
+        _emit(_run(project, action))
+
+    @backup_app.command("inspect")
+    def backup_inspect(backup_path: Path = typer.Argument(...)) -> None:
+        _emit(asyncio.run(OperationsBackupManager.inspect_backup(backup_path)))
+
+    @backup_app.command("restore")
+    def backup_restore(
+        backup_path: Path = typer.Argument(...),
+        destination: Path = typer.Option(..., "--destination"),
+        overwrite: bool = typer.Option(False, "--overwrite"),
+    ) -> None:
+        """Restore to an offline destination; stop OpenOPC before replacing a live DB."""
+
+        _emit(
+            asyncio.run(
+                OperationsBackupManager.restore_backup(
+                    backup_path,
+                    destination,
+                    overwrite=overwrite,
+                )
+            )
+        )
 
 
 def _run(

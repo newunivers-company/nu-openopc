@@ -58,6 +58,60 @@ interface SocketHandlers {
   onOrgSavedDelete?: (payload: { ok: boolean; name: string; error?: string }) => void
   onCommsState?: (payload: CommsStatePayload) => void
   onCommsMessage?: (payload: CommsMessagePayload) => void
+  onMissionControl?: (payload: MissionControlPayload) => void
+}
+
+export interface MissionControlAlert {
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info' | string
+  kind: string
+  title: string
+  detail: string
+  action?: string
+  run_id?: string
+  goal_id?: string
+}
+
+export interface MissionControlProviderSlo {
+  samples: number
+  successes?: number
+  availability: number
+  p95_latency_ms: number
+  target_met: boolean
+  availability_target?: number
+  p95_latency_target_ms?: number
+}
+
+export interface MissionControlProviderQuota {
+  enabled: boolean
+  allowed: boolean
+  used: number
+  remaining: number
+  limit: number
+  window_seconds: number
+  resets_at?: string | null
+}
+
+export interface MissionControlPayload {
+  available: boolean
+  reason?: string
+  project_id: string
+  active_goals?: number
+  active_runs?: number
+  blocked_runs?: number
+  failed_gates?: number
+  pending_outbox?: number
+  dead_letters?: number
+  pending_approvals?: number
+  learning_candidates?: number
+  promoted_assets?: number
+  average_score?: number
+  total_cost_usd?: number
+  unmeasured_usage_events?: number
+  provider_slo?: Record<string, MissionControlProviderSlo>
+  provider_call_quotas?: Record<string, MissionControlProviderQuota>
+  alerts?: MissionControlAlert[]
+  recommendations?: string[]
+  generated_at?: string
 }
 
 export interface CommsMessageItem {
@@ -169,6 +223,7 @@ const PROJECT_SCOPED_MESSAGE_TYPES = new Set([
   'project_index',
   'comms_state',
   'comms_read_message',
+  'mission_control',
 ])
 
 const SESSION_DETAIL_REQUEST_TIMEOUT_MS = 30_000
@@ -354,6 +409,11 @@ export class VisualSocketClient {
   projectIndex(projectId: string, switchSeq?: string, viewGeneration?: number): void {
     const pid = this.requireProjectId(projectId, 'project_index')
     this.send({ type: 'project_index', project_id: pid, switch_seq: switchSeq, view_generation: viewGeneration })
+  }
+
+  missionControl(projectId: string): void {
+    const pid = this.requireProjectId(projectId, 'mission_control')
+    this.send({ type: 'mission_control', project_id: pid })
   }
 
   // ── Session protocol ───────────────────────────────────────────────────
@@ -796,6 +856,9 @@ export class VisualSocketClient {
         break
       case 'comms_message':
         this.handlers.onCommsMessage?.(parsed.payload as unknown as CommsMessagePayload)
+        break
+      case 'mission_control':
+        this.handlers.onMissionControl?.(parsed.payload as unknown as MissionControlPayload)
         break
       case 'comms_state_dirty':
         // Server pushed a "something changed" hint after a comms message

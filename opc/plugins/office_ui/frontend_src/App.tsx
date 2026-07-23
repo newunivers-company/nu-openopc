@@ -1,22 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { VisualSocketClient } from './lib/wsClient'
+import { VisualSocketClient, type MissionControlPayload } from './lib/wsClient'
 import { PhaserGame } from './game/PhaserGame'
 import { GameBridge } from './game/GameBridge'
-import { CollisionEditor } from './components/CollisionEditor'
 import { registerTestRunner } from './game/test/eventTestRunner'
 import { getOffices, type OfficeConfig } from './game/map/OfficeStore'
 import { getOfficeDeskSeats } from './game/map/InteractionZones'
 import type { AgentInfo, EmployeeDetailPayload, OrgCreateMemberInput, OrgSavedCreatePayload, OrgEmployee, OrgInfoPayload, OrgRole, ReorgProposalInfo, SavedOrgSummary, SocketStatus, TalentTemplate, VisualEvent, VisualSnapshot } from './types/visual'
 import { useBoardStore, type BoardStoreState } from './kanban/BoardStore'
-import { WorkspacePage } from './workspace/WorkspacePage'
 import { useChatStore, type ChatStoreState } from './chat/ChatStore'
 import { useSessionStore, type SessionStoreState } from './stores/SessionStore'
 import { useProjectStore, type ProjectStoreState } from './stores/ProjectStore'
 import { ExecutionPanel } from './kanban/ExecutionPanel'
 import { ProjectSelector } from './components/ProjectSelector'
-import { OrgTab } from './org/OrgTab'
 import { notifyTaskAssigned } from './lib/taskChatBridge'
 import { mapCollabSyncPayload, mapBackendMessage, mapBackendChannel, mapBackendSession, mapBackendBoard, mapBackendColumn, mapBackendTask, mergeSessionDetailHasMore } from './lib/collabSync'
 import { normalizeOrgInfoPayload } from './lib/runtimeOrg'
@@ -27,6 +24,28 @@ import { extractSessionRecruitmentByRole, sessionChannelId } from './lib/session
 import { resolveCanonicalTurnId, terminalAssistantTurnId } from './lib/turnIdentity'
 import { unassignAgent } from './game/map/OfficeStore'
 import type { AgentAnimStatus, EmployeeAssignment, KanbanPhase, KanbanTask, RoleAggregatedStatus, RoleWorkItemSummary, Session, TaskPreferredAgent } from './types/kanban'
+
+const CollisionEditor = lazy(async () => ({
+  default: (await import('./components/CollisionEditor')).CollisionEditor,
+}))
+const WorkspacePage = lazy(async () => ({
+  default: (await import('./workspace/WorkspacePage')).WorkspacePage,
+}))
+const OrgTab = lazy(async () => ({
+  default: (await import('./org/OrgTab')).OrgTab,
+}))
+const MissionControlPage = lazy(async () => ({
+  default: (await import('./operations/MissionControlPage')).MissionControlPage,
+}))
+
+function PageLoading({ label }: { label: string }) {
+  return (
+    <div className="route-loading" role="status" aria-live="polite">
+      <span aria-hidden="true" />
+      Loading {label}…
+    </div>
+  )
+}
 
 function readOutdoorOverrideUi(): 'auto' | 'day' | 'night' {
   try {
@@ -67,7 +86,7 @@ const SESSION_DETAIL_REFRESH_LOW_VALUE_RUNTIME_EVENTS = new Set([
 ])
 
 type ThemeName = 'midnight' | 'neon' | 'paper' | 'retro' | 'terminal' | 'cozy' | 'openopc'
-type AppPage = 'office' | 'workspace' | 'org' | 'mapEditor'
+type AppPage = 'office' | 'workspace' | 'operations' | 'org' | 'mapEditor'
 type AppExecMode = 'task' | 'company' | 'org'
 
 function defaultWsUrl(): string {
@@ -479,6 +498,8 @@ export default function App() {
   const [orgInfoData, setOrgInfoData] = useState<OrgInfoPayload | null>(null)
   const [commsState, setCommsState] = useState<import('./lib/wsClient').CommsStatePayload | null>(null)
   const [commsMessage, setCommsMessage] = useState<import('./lib/wsClient').CommsMessagePayload | null>(null)
+  const [missionControlData, setMissionControlData] = useState<MissionControlPayload | null>(null)
+  const [missionControlLoading, setMissionControlLoading] = useState(false)
   const [talentTemplates, setTalentTemplates] = useState<TalentTemplate[]>([])
   const [defaultTalentDir, setDefaultTalentDir] = useState<string>('')
   const [employeeDetail, setEmployeeDetail] = useState<EmployeeDetailPayload | null>(null)
@@ -710,6 +731,8 @@ export default function App() {
     setExecutionPanelTaskId(null)
     setCommsState(null)
     setCommsMessage(null)
+    setMissionControlData(null)
+    setMissionControlLoading(false)
   }, [boardStore, chatStore, clearPendingSessionCreate, clearPendingSessionDetailRefreshes, normalizeProjectId, sessionStore])
 
   const beginProjectSwitch = useCallback((projectId: string): string => {
@@ -1763,6 +1786,11 @@ export default function App() {
         if (!payloadMatchesActiveProject(payload as unknown as Record<string, unknown>, true)) return
         setCommsMessage(payload)
       },
+      onMissionControl: (payload) => {
+        if (!payloadMatchesActiveProject(payload as unknown as Record<string, unknown>, false)) return
+        setMissionControlData(payload)
+        setMissionControlLoading(false)
+      },
       onTalentList: (payload) => {
         setTalentTemplates(payload.templates ?? [])
         if (payload.talent_dir) setDefaultTalentDir(payload.talent_dir)
@@ -1967,6 +1995,21 @@ export default function App() {
       }
     }
   }, [wsUrl])
+
+  const refreshMissionControl = useCallback(() => {
+    if (status !== 'connected') return
+    setMissionControlLoading(true)
+    clientRef.current?.missionControl(getActiveProjectId())
+  }, [getActiveProjectId, status])
+
+  useEffect(() => {
+    if (activePage !== 'operations' || status !== 'connected') return
+    refreshMissionControl()
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') refreshMissionControl()
+    }, 30_000)
+    return () => window.clearInterval(interval)
+  }, [activePage, projectStore.activeProjectId, refreshMissionControl, status])
 
   useEffect(() => {
     const refreshProjectState = () => {
@@ -2354,6 +2397,7 @@ export default function App() {
               })()}
             </button>
             <button className={`page-nav-btn${activePage === 'office' ? ' active' : ''}`} onClick={() => setActivePage('office')}>Office</button>
+            <button className={`page-nav-btn${activePage === 'operations' ? ' active' : ''}`} onClick={() => setActivePage('operations')}>Mission Control</button>
             <button className={`page-nav-btn${activePage === 'org' ? ' active' : ''}`} onClick={() => setActivePage('org')}>Org</button>
           </div>
           <div className="stat-chips">
@@ -2405,7 +2449,8 @@ export default function App() {
 
       {/* Workspace Page (unified Chat + Kanban) */}
       {activePage === 'workspace' && (
-        <WorkspacePage
+        <Suspense fallback={<PageLoading label="workspace" />}>
+          <WorkspacePage
           boardStore={boardStore}
           chatStore={chatStore}
           sessionStore={sessionStore}
@@ -2481,13 +2526,25 @@ export default function App() {
           }}
           onOpenExecutionPanel={(taskId) => setExecutionPanelTaskId(taskId)}
           onCollabSync={() => clientRef.current?.collabSync(getActiveProjectId(), undefined, projectViewGenerationRef.current)}
-        />
+          />
+        </Suspense>
+      )}
+
+      {activePage === 'operations' && (
+        <Suspense fallback={<PageLoading label="Mission Control" />}>
+          <MissionControlPage
+            data={missionControlData}
+            loading={missionControlLoading}
+            onRefresh={refreshMissionControl}
+          />
+        </Suspense>
       )}
 
       {/* Org Page */}
       {activePage === 'org' && (
         <div className="org-page">
-          <OrgTab
+          <Suspense fallback={<PageLoading label="organization" />}>
+            <OrgTab
             data={orgInfoData}
             sessionRecruitmentByRole={sessionRecruitmentByRole}
             talents={talentTemplates}
@@ -2537,13 +2594,16 @@ export default function App() {
             orgCreatePending={orgCreatePending}
             orgCreateResult={orgCreateResult}
             onSelectCorporate={handleSelectCorporateOrg}
-          />
+            />
+          </Suspense>
         </div>
       )}
 
       {activePage === 'mapEditor' && (
         <div className="editor-page">
-          <CollisionEditor bridge={bridgeRef.current} />
+          <Suspense fallback={<PageLoading label="map editor" />}>
+            <CollisionEditor bridge={bridgeRef.current} />
+          </Suspense>
         </div>
       )}
 

@@ -187,7 +187,7 @@ Execution generates raw experience; Self-Grown turns it into lasting improvement
 
 OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events and an independently deployable fenced outbox worker, leases and bounded recovery, atomic goal settlement, plan-to-execution route contracts, explicit measured/unmeasured usage records, provider canaries and SLOs, an approval-gated NU resource pipeline, shadow-only outcome routing candidates, authenticated Codex/Claude/Grok subscription routing for text-only work, evidence-based staffing regret, and secretary Mission Control.
 
-The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md).
+The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md). The executed local release evidence is in the [2026-07-23 validation report](docs/validation-2026-07-23.md).
 
 ## Quick Start
 
@@ -291,6 +291,8 @@ uv sync --extra dev --extra nu
 uv run opc chat -p demo --mode task \
   "Run nu_llm_route_diagnostics and list the available NU resource candidates"
 ```
+
+The `nu` extra is pinned to the tested stable facades (`nu-llm-routing-lib==0.2.1` and `nu-resource-gen-lib==0.2.1`). OpenOPC consumes `ResourceGenerator.evaluate_prompt()` rather than an internal module path, and CI verifies the same contract from built wheels.
 
 NU model routing is fail-open: explicit `llm.routing` entries remain
 authoritative, tool-calling turns stay on the configured OpenOPC model by
@@ -446,6 +448,8 @@ Company Mode turns one brief into a runtime session plus role-owned work items.
 | `Info` | Status, assignees, role identity, employee assignment, selected execution agent, timing, and developer details. |
 | `Comms` | Role inboxes, unread/read/sent messages, meetings, decisions, and recent communication failures. |
 | `Team` | Runtime cockpit: teams, seats, approvals, unread communication, run state, and stop controls for the current run. |
+
+The top-level `Mission Control` page is project-scoped and model-free. It shows durable run/gate health, approval and delivery queues, provider SLOs, subscription call quotas, ordered alerts, and recommended next actions. It refreshes on entry, every 30 seconds while visible, and on demand.
 
 To inspect the detailed workflow for a role, open a company-mode session and click a role/work item in the `Chat` progress card or `Agents` tab. The Execution Progress panel shows each work item, its status, activity sections, tool progress, handoffs, review targets, and execution turn metadata.
 

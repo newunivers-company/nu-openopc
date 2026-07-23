@@ -186,6 +186,75 @@ class OutboxDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_report.deduplicated, 1)
         self.assertEqual(second_report.delivered, 0)
 
+    async def test_external_side_effect_crash_window_recovers_with_consumer_idempotency(self) -> None:
+        kernel = DurableRunKernel(
+            self.repository,
+            DurableOperationsConfig(
+                lease_seconds=5,
+                outbox_max_attempts=2,
+                retry_base_seconds=1,
+                retry_max_seconds=1,
+            ),
+        )
+        appended = await kernel.record_event(
+            run_id="run-dispatch",
+            event_type="test.crash-window",
+            payload={"key": "crash-window"},
+            idempotency_key="dispatch:crash-window",
+            outbox_topic="operations.test",
+        )
+        assert appended.outbox is not None
+        message = appended.outbox
+        applied_ids: set[str] = set()
+        effects: list[str] = []
+
+        async def crash_after_external_effect(current):
+            if current.message_id not in applied_ids:
+                applied_ids.add(current.message_id)
+                effects.append(current.message_id)
+            raise asyncio.CancelledError("simulated process crash before receipt")
+
+        crashed = IndependentOutboxWorker(
+            kernel,
+            crash_after_external_effect,
+            consumer_id="billing-v1",
+            worker_id="crashed-worker",
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await crashed.dispatch_once()
+        self.assertEqual(effects, [message.message_id])
+        self.assertIsNone(
+            await self.repository.get_outbox_delivery_receipt(message.message_id, "billing-v1")
+        )
+
+        await self.repository.db.execute(
+            "UPDATE outbox_messages SET lease_expires_at = ? WHERE message_id = ?",
+            ("2000-01-01T00:00:00+00:00", message.message_id),
+        )
+        await self.repository.db.commit()
+        self.assertEqual(await kernel.recover_expired_outbox(), 1)
+
+        async def idempotent_retry(current):
+            if current.message_id not in applied_ids:
+                applied_ids.add(current.message_id)
+                effects.append(current.message_id)
+
+        restarted = IndependentOutboxWorker(
+            kernel,
+            idempotent_retry,
+            consumer_id="billing-v1",
+            worker_id="restarted-worker",
+        )
+        report = await restarted.dispatch_once()
+        receipt = await self.repository.get_outbox_delivery_receipt(
+            message.message_id,
+            "billing-v1",
+        )
+
+        self.assertEqual(report.delivered, 1)
+        self.assertEqual(effects, [message.message_id])
+        self.assertIsNotNone(receipt)
+
 
 if __name__ == "__main__":
     unittest.main()

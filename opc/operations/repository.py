@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Mapping, TYPE_CHECKING
+import uuid
 
 from opc.operations.models import (
     CapabilityAttempt,
@@ -30,11 +31,31 @@ if TYPE_CHECKING:
     from opc.database.store import OPCStore, _SQLiteConnectionAdapter
 
 
-OPERATIONS_SCHEMA_VERSION = 2
+OPERATIONS_SCHEMA_VERSION = 3
+
+
+class ProviderCallQuotaExceeded(PermissionError):
+    """Raised when an atomic subscription call reservation cannot be made."""
 
 
 async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
     """Create the additive operations schema on an initialized project DB."""
+    await db.execute(
+        """CREATE TABLE IF NOT EXISTS operations_schema (
+               component TEXT PRIMARY KEY,
+               version INTEGER NOT NULL,
+               updated_at TEXT NOT NULL
+           )"""
+    )
+    async with db.execute(
+        "SELECT version FROM operations_schema WHERE component = 'operating_kernel'"
+    ) as cursor:
+        existing = await cursor.fetchone()
+    if existing is not None and int(existing[0]) > OPERATIONS_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"operations schema {int(existing[0])} is newer than supported "
+            f"schema {OPERATIONS_SCHEMA_VERSION}; upgrade OpenOPC before opening this database"
+        )
     await db.executescript(
         """
         CREATE TABLE IF NOT EXISTS operations_schema (
@@ -239,11 +260,27 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
 
         CREATE TABLE IF NOT EXISTS resource_approval_uses (
             token_digest TEXT PRIMARY KEY,
+            approval_id TEXT DEFAULT '',
+            operator_id TEXT DEFAULT '',
+            key_id TEXT DEFAULT '',
             project_id TEXT NOT NULL,
             candidate_id TEXT NOT NULL,
             request_id TEXT NOT NULL,
             claims TEXT NOT NULL,
             consumed_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_call_reservations (
+            reservation_id TEXT PRIMARY KEY,
+            contract_id TEXT NOT NULL UNIQUE,
+            request_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT DEFAULT '',
+            status TEXT NOT NULL,
+            window_seconds INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS staffing_decisions (
@@ -296,9 +333,20 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
             ON provider_canary_results(provider, checked_at);
         CREATE INDEX IF NOT EXISTS idx_resource_approval_project_consumed
             ON resource_approval_uses(project_id, consumed_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_call_quota_window
+            ON provider_call_reservations(project_id, provider, created_at, status);
         CREATE INDEX IF NOT EXISTS idx_staffing_decisions_run_role
             ON staffing_decisions(run_id, role_id, created_at);
         """
+    )
+    await _ensure_columns(
+        db,
+        "resource_approval_uses",
+        {
+            "approval_id": "TEXT DEFAULT ''",
+            "operator_id": "TEXT DEFAULT ''",
+            "key_id": "TEXT DEFAULT ''",
+        },
     )
     await db.execute(
         """INSERT OR IGNORE INTO goal_contract_versions
@@ -314,6 +362,18 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
                updated_at = excluded.updated_at""",
         (OPERATIONS_SCHEMA_VERSION, utc_now().isoformat()),
     )
+
+
+async def _ensure_columns(
+    db: "_SQLiteConnectionAdapter",
+    table: str,
+    columns: Mapping[str, str],
+) -> None:
+    async with db.execute(f"PRAGMA table_info({table})") as cursor:
+        existing = {str(row[1]) for row in await cursor.fetchall()}
+    for name, ddl in columns.items():
+        if name not in existing:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 class OperationsRepository:
@@ -1178,6 +1238,148 @@ class OperationsRepository:
         params.append(max(1, min(int(limit), 5000)))
         return [ProviderUsageEvent.from_dict(item) for item in await self._payload_all(query, params)]
 
+    async def provider_call_quota_status(
+        self,
+        *,
+        project_id: str,
+        provider: str,
+        limit: int,
+        window_seconds: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Return conservative call-count usage for one rolling subscription window."""
+
+        self._assert_project(project_id)
+        checked_at = now or utc_now()
+        bounded_limit = max(0, int(limit))
+        bounded_window = max(1, int(window_seconds))
+        cutoff = checked_at - timedelta(seconds=bounded_window)
+        async with self.db.execute(
+            """SELECT COUNT(*) FROM provider_call_reservations
+               WHERE project_id = ? AND provider = ? AND created_at >= ?
+                 AND status != 'released'""",
+            (project_id, str(provider), cutoff.isoformat()),
+        ) as cursor:
+            row = await cursor.fetchone()
+        used = int(row[0] if row else 0)
+        return {
+            "project_id": project_id,
+            "provider": str(provider),
+            "limit": bounded_limit,
+            "used": used,
+            "remaining": max(0, bounded_limit - used),
+            "window_seconds": bounded_window,
+            "window_started_at": cutoff.isoformat(),
+            "checked_at": checked_at.isoformat(),
+            "allowed": bounded_limit == 0 or used < bounded_limit,
+            "enabled": bounded_limit > 0,
+        }
+
+    async def list_provider_call_quota_providers(
+        self,
+        *,
+        project_id: str,
+    ) -> list[str]:
+        self._assert_project(project_id)
+        async with self.db.execute(
+            """SELECT DISTINCT provider FROM provider_call_reservations
+               WHERE project_id = ? ORDER BY provider""",
+            (project_id,),
+        ) as cursor:
+            return [str(row[0]) for row in await cursor.fetchall() if str(row[0]).strip()]
+
+    async def reserve_provider_call(
+        self,
+        *,
+        contract_id: str,
+        request_id: str,
+        project_id: str,
+        provider: str,
+        model: str,
+        limit: int,
+        window_seconds: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Atomically reserve one subscription call before provider I/O."""
+
+        self._assert_project(project_id)
+        normalized_provider = str(provider or "").strip()
+        if not contract_id.strip() or not normalized_provider:
+            raise ValueError("contract_id and provider are required for call reservation")
+        checked_at = now or utc_now()
+        bounded_limit = max(0, int(limit))
+        bounded_window = max(1, int(window_seconds))
+        reservation_id = str(uuid.uuid4())
+        cutoff = checked_at - timedelta(seconds=bounded_window)
+        async with self.transaction_lock:
+            async with self.db.execute("BEGIN IMMEDIATE") as cursor:
+                if cursor is None:
+                    raise RuntimeError("could not begin provider quota transaction")
+            try:
+                async with self.db.execute(
+                    """SELECT COUNT(*) FROM provider_call_reservations
+                       WHERE project_id = ? AND provider = ? AND created_at >= ?
+                         AND status != 'released'""",
+                    (project_id, normalized_provider, cutoff.isoformat()),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                used = int(row[0] if row else 0)
+                if bounded_limit > 0 and used >= bounded_limit:
+                    raise ProviderCallQuotaExceeded(
+                        f"subscription call quota exhausted for {normalized_provider}: "
+                        f"{used}/{bounded_limit} calls in {bounded_window}s"
+                    )
+                await self.db.execute(
+                    """INSERT INTO provider_call_reservations
+                       (reservation_id, contract_id, request_id, project_id, provider,
+                        model, status, window_seconds, created_at, completed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, NULL)""",
+                    (
+                        reservation_id,
+                        contract_id,
+                        request_id,
+                        project_id,
+                        normalized_provider,
+                        str(model or ""),
+                        bounded_window,
+                        checked_at.isoformat(),
+                    ),
+                )
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        return {
+            "reservation_id": reservation_id,
+            "provider": normalized_provider,
+            "limit": bounded_limit,
+            "used": used + 1,
+            "remaining": max(0, bounded_limit - used - 1),
+            "window_seconds": bounded_window,
+            "created_at": checked_at.isoformat(),
+        }
+
+    async def finish_provider_call_reservation(
+        self,
+        reservation_id: str,
+        *,
+        status: str,
+        completed_at: datetime | None = None,
+    ) -> None:
+        normalized = str(reservation_id or "").strip()
+        if not normalized:
+            return
+        await self.db.execute(
+            """UPDATE provider_call_reservations
+               SET status = ?, completed_at = ? WHERE reservation_id = ?""",
+            (
+                str(status or "completed")[:80],
+                (completed_at or utc_now()).isoformat(),
+                normalized,
+            ),
+        )
+        await self.db.commit()
+
     async def save_provider_canary_result(
         self,
         result: ProviderCanaryResult,
@@ -1266,10 +1468,14 @@ class OperationsRepository:
                     raise PermissionError("resource approval token has already been consumed")
                 await self.db.execute(
                     """INSERT INTO resource_approval_uses
-                       (token_digest, project_id, candidate_id, request_id, claims, consumed_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                       (token_digest, approval_id, operator_id, key_id, project_id,
+                        candidate_id, request_id, claims, consumed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         normalized,
+                        str(claims.get("approval_id", "") or ""),
+                        str(claims.get("operator_id", "") or ""),
+                        str(claims.get("key_id", "") or ""),
                         project_id,
                         candidate_id,
                         request_id,
@@ -1360,6 +1566,7 @@ class OperationsRepository:
             "provider_usage_events",
             "provider_canary_results",
             "resource_approval_uses",
+            "provider_call_reservations",
             "staffing_decisions",
         }
         if table not in allowed:

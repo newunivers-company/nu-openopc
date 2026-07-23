@@ -29,9 +29,11 @@ class MissionControlService:
         self,
         repository: OperationsRepository,
         durable_kernel: DurableRunKernel,
+        provider_config: Any | None = None,
     ) -> None:
         self.repository = repository
         self.durable_kernel = durable_kernel
+        self.provider_config = provider_config
 
     async def snapshot(
         self,
@@ -83,7 +85,55 @@ class MissionControlService:
         pending_approvals = await self._pending_approval_count(project_id)
         alerts: list[MissionAlert] = []
         unmeasured_usage_events = sum(not item.measured for item in usage_events)
-        provider_slo = _provider_slo_summary(canary_results)
+        availability_target = float(
+            getattr(self.provider_config, "slo_availability_target", 0.95)
+        )
+        latency_target = float(
+            getattr(self.provider_config, "slo_p95_latency_target_ms", 30_000.0)
+        )
+        minimum_slo_samples = int(
+            getattr(self.provider_config, "slo_min_samples", 3)
+        )
+        provider_slo = _provider_slo_summary(
+            canary_results,
+            availability_target=availability_target,
+            p95_latency_target_ms=latency_target,
+        )
+        quota_limit = int(
+            getattr(self.provider_config, "subscription_call_limit", 0)
+        )
+        quota_window = int(
+            getattr(self.provider_config, "subscription_window_seconds", 86_400)
+        )
+        quota_providers = list(
+            getattr(self.provider_config, "subscription_providers", []) or []
+        )
+        observed_quota_providers = (
+            await self.repository.list_provider_call_quota_providers(
+                project_id=project_id
+            )
+        )
+        quota_provider_names = list(observed_quota_providers)
+        quota_provider_names.extend(
+            str(provider)
+            for provider in quota_providers
+            if str(provider).strip()
+            and not any(
+                _provider_family_match(observed, str(provider))
+                for observed in observed_quota_providers
+            )
+        )
+        provider_call_quotas = {
+            str(provider): await self.repository.provider_call_quota_status(
+                project_id=project_id,
+                provider=str(provider),
+                limit=quota_limit,
+                window_seconds=quota_window,
+                now=timestamp,
+            )
+            for provider in quota_provider_names
+            if str(provider).strip()
+        }
 
         for run in active_runs:
             deadlock = await self.durable_kernel.detect_deadlock(run.run_id, now=timestamp)
@@ -225,16 +275,41 @@ class MissionControlService:
                     action="Enable provider usage reporting or keep explicit call-count quota guards.",
                 )
             )
+        for provider, quota in provider_call_quotas.items():
+            if not quota["enabled"] or quota["limit"] <= 0:
+                continue
+            utilization = quota["used"] / quota["limit"]
+            if utilization >= 0.8:
+                exhausted = not quota["allowed"]
+                alerts.append(
+                    MissionAlert(
+                        severity="critical" if exhausted else "high",
+                        kind="subscription_call_quota",
+                        title=(
+                            f"Provider {provider} subscription call quota "
+                            f"{'is exhausted' if exhausted else 'is nearing its limit'}"
+                        ),
+                        detail=(
+                            f"{quota['used']}/{quota['limit']} calls used in the rolling "
+                            f"{quota['window_seconds']}s window."
+                        ),
+                        action=(
+                            f"Route new calls away from {provider} or wait for quota recovery."
+                        ),
+                    )
+                )
         for provider, slo in provider_slo.items():
-            if slo["samples"] >= 3 and slo["availability"] < 0.95:
+            if slo["samples"] >= minimum_slo_samples and not slo["target_met"]:
                 alerts.append(
                     MissionAlert(
                         severity="high",
                         kind="provider_slo",
-                        title=f"Provider {provider} is below the 95% availability target",
+                        title=f"Provider {provider} is outside its SLO",
                         detail=(
-                            f"Availability {slo['availability']:.1%} over {slo['samples']} canaries; "
-                            f"p95 {slo['p95_latency_ms']:.1f}ms."
+                            f"Availability {slo['availability']:.1%} "
+                            f"(target {availability_target:.1%}) over {slo['samples']} canaries; "
+                            f"p95 {slo['p95_latency_ms']:.1f}ms "
+                            f"(target {latency_target:.1f}ms)."
                         ),
                         action=f"Demote {provider} from primary routing until its canary recovers.",
                     )
@@ -280,6 +355,7 @@ class MissionControlService:
             total_cost_usd=sum(item.metrics.cost_usd for item in scorecards),
             unmeasured_usage_events=unmeasured_usage_events,
             provider_slo=provider_slo,
+            provider_call_quotas=provider_call_quotas,
             alerts=alerts,
             recommendations=recommendations,
             generated_at=timestamp,
@@ -317,7 +393,8 @@ class MissionControlService:
             ),
             (
                 f"Provider telemetry {len(snapshot.provider_slo)} tracked / "
-                f"{snapshot.unmeasured_usage_events} unmeasured usage event(s)"
+                f"{snapshot.unmeasured_usage_events} unmeasured usage event(s) / "
+                f"{len(snapshot.provider_call_quotas)} call quota(s)"
             ),
         ]
         if snapshot.alerts:
@@ -359,7 +436,12 @@ def _recommendations(
     return list(dict.fromkeys(recommendations))[:12]
 
 
-def _provider_slo_summary(rows: list[Any]) -> dict[str, dict[str, Any]]:
+def _provider_slo_summary(
+    rows: list[Any],
+    *,
+    availability_target: float = 0.95,
+    p95_latency_target_ms: float = 30_000.0,
+) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[Any]] = {}
     for row in rows:
         grouped.setdefault(row.provider, []).append(row)
@@ -367,10 +449,28 @@ def _provider_slo_summary(rows: list[Any]) -> dict[str, dict[str, Any]]:
     for provider, values in sorted(grouped.items()):
         latencies = sorted(float(item.latency_ms) for item in values)
         percentile_index = max(0, min(len(latencies) - 1, int(len(latencies) * 0.95)))
+        availability = sum(bool(item.success) for item in values) / len(values)
+        p95_latency = latencies[percentile_index]
         result[provider] = {
             "samples": len(values),
-            "availability": sum(bool(item.success) for item in values) / len(values),
-            "p95_latency_ms": latencies[percentile_index],
+            "availability": availability,
+            "availability_target": availability_target,
+            "p95_latency_ms": p95_latency,
+            "p95_latency_target_ms": p95_latency_target_ms,
+            "target_met": (
+                availability >= availability_target
+                and p95_latency <= p95_latency_target_ms
+            ),
             "model_drift_count": sum(bool(item.model_drift) for item in values),
         }
     return result
+
+
+def _provider_family_match(provider: str, family: str) -> bool:
+    normalized = str(provider or "").strip().lower()
+    prefix = str(family or "").strip().lower()
+    return bool(
+        normalized == prefix
+        or normalized.startswith(f"{prefix}-")
+        or normalized.startswith(f"{prefix}_")
+    )

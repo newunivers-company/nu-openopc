@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 import os
 from pathlib import Path
 import re
@@ -19,6 +20,21 @@ _SCOPE_TOKEN_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
 def _scope_token(value: Any, fallback: str) -> str:
     normalized = _SCOPE_TOKEN_PATTERN.sub("-", str(value or "").strip()).strip("-._")
     return normalized[:120] or fallback
+
+
+def _candidate_runtime_path(candidate_id: str, key: str, configured: str) -> Path:
+    """Mirror trusted RF-DETR runtime resolution without mutating its catalog."""
+
+    path = Path(configured).expanduser()
+    if key != "python" or not str(candidate_id).startswith("local_rfdetr_"):
+        return path
+    override = str(os.environ.get("NU_RFDETR_PYTHON", "") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    if path.is_file() or path.parent.parent.name != "rfdetr-py311":
+        return path
+    py312 = path.parent.parent.parent / "rfdetr-py312" / "bin" / path.name
+    return py312 if py312.is_file() else path
 
 
 class NUResourceGenBridge:
@@ -97,6 +113,12 @@ class NUResourceGenBridge:
             "error": self._load_error,
             "allow_live": bool(self.config.allow_live),
             "allowed_live_candidates": sorted(set(self.config.allowed_live_candidates)),
+            "allow_local_quality_execution": bool(
+                self.config.allow_local_quality_execution
+            ),
+            "local_quality_candidates": sorted(
+                set(self.config.local_quality_candidates)
+            ),
             "record_ledger": bool(self.config.record_ledger),
             "record_dry_runs": bool(self.config.record_dry_runs),
         }
@@ -110,7 +132,25 @@ class NUResourceGenBridge:
         normalized = str(provider or "").strip().lower()
         try:
             providers = self.health(detail=True).get("providers", {})
-            raw = dict(providers.get(normalized, {}) or {}) if isinstance(providers, Mapping) else {}
+            raw_value = providers.get(normalized) if isinstance(providers, Mapping) else None
+            if isinstance(raw_value, Mapping):
+                raw = dict(raw_value)
+            elif isinstance(raw_value, bool):
+                raw = {"has_credentials": raw_value}
+            elif isinstance(raw_value, str) and raw_value.strip():
+                detail = raw_value.strip()
+                lowered = detail.lower()
+                ready = any(token in lowered for token in ("ready", "available", "healthy"))
+                blocked = any(
+                    token in lowered
+                    for token in ("unavailable", "missing", "not configured", "error", "failed")
+                )
+                raw = {
+                    "has_credentials": bool(ready and not blocked),
+                    "status": detail,
+                }
+            else:
+                raw = {}
         except Exception as exc:
             return {
                 "credential_ready": False,
@@ -136,6 +176,85 @@ class NUResourceGenBridge:
             "credential_ready": credential_ready,
             "transport_ready": transport_ready,
             "detail": str(raw.get("detail") or raw.get("status") or "")[:500],
+        }
+
+    def candidate_readiness(self, candidate_id: str) -> dict[str, Any]:
+        """Check candidate-local runtime files in addition to provider health."""
+
+        generator = self._require_generator()
+        spec = generator.get_candidate(str(candidate_id or "").strip())
+        provider = str(spec.provider or "").strip().lower()
+        provider_state = self.provider_readiness(provider)
+        extras = dict(spec.extras or {})
+        path_checks: dict[str, dict[str, Any]] = {}
+        for key in ("python", "smoke_script", "script"):
+            raw = str(extras.get(key, "") or "").strip()
+            if not raw:
+                continue
+            path = _candidate_runtime_path(spec.candidate_id, key, raw)
+            path_checks[key] = {"path": str(path), "exists": path.is_file()}
+        missing = [key for key, row in path_checks.items() if not row["exists"]]
+        local_no_secret = provider.startswith("local_")
+        credential_ready = bool(
+            provider_state.get("credential_ready", False) or local_no_secret
+        )
+        transport_ready = bool(
+            credential_ready
+            and (provider_state.get("transport_ready", False) or local_no_secret)
+            and not missing
+            and not bool(extras.get("deprecated", False))
+            and not bool(extras.get("simulation_only", False))
+        )
+        return {
+            "candidate_id": spec.candidate_id,
+            "provider": spec.provider,
+            "credential_ready": credential_ready,
+            "transport_ready": transport_ready,
+            "local_no_secret": local_no_secret,
+            "path_checks": path_checks,
+            "missing_runtime_files": missing,
+            "deprecated": bool(extras.get("deprecated", False)),
+            "simulation_only": bool(extras.get("simulation_only", False)),
+            "detail": (
+                "candidate runtime ready"
+                if transport_ready
+                else "candidate runtime is missing required files or is not executable"
+            ),
+        }
+
+    def quality_execution_status(self, candidate_id: str) -> dict[str, Any]:
+        """Authorize only verified-free, local, non-simulated quality candidates."""
+
+        normalized = str(candidate_id or "").strip()
+        blockers: list[str] = []
+        if not self.config.allow_local_quality_execution:
+            blockers.append("local quality execution is disabled")
+        allowed = {
+            str(value).strip()
+            for value in self.config.local_quality_candidates
+            if str(value).strip()
+        }
+        if normalized not in allowed:
+            blockers.append(f"quality candidate {normalized!r} is not allowlisted")
+        generator = self._require_generator()
+        spec = generator.get_candidate(normalized)
+        extras = dict(spec.extras or {})
+        if not str(spec.provider).startswith("local_"):
+            blockers.append("quality candidate must use a local provider")
+        if spec.cost != 0.0 or str(spec.cost_unit).lower() != "local":
+            blockers.append("quality candidate cost must be verified local/free")
+        if bool(extras.get("deprecated", False)):
+            blockers.append("quality candidate is deprecated")
+        if bool(extras.get("simulation_only", False)):
+            blockers.append("simulation-only output cannot prove artifact quality")
+        readiness = self.candidate_readiness(normalized)
+        if not readiness["transport_ready"]:
+            blockers.append(str(readiness["detail"]))
+        return {
+            "allowed": not blockers,
+            "candidate_id": normalized,
+            "blockers": blockers,
+            "readiness": readiness,
         }
 
     def list_candidates(
@@ -233,7 +352,6 @@ class NUResourceGenBridge:
         """Run the shared, provider-specific prompt gate without generation."""
 
         generator = self._require_generator()
-        spec = generator.get_candidate(str(candidate_id).strip())
         request = self._request(
             prompt=prompt,
             params=params,
@@ -242,19 +360,152 @@ class NUResourceGenBridge:
             quality_preset=None,
             task=None,
         )
-        # ``evaluate_prompt`` is a wheel-exported operational helper in the
-        # exactly pinned 0.2.x package. Keep the import at the package boundary
-        # and verify it in ``scripts/verify_nu_compatibility.py``.
-        from nu_resource_gen_lib import evaluate_prompt
-
         return dict(
-            evaluate_prompt(
-                spec,
+            generator.evaluate_prompt(
+                str(candidate_id).strip(),
                 request,
                 metric_threshold=float(metric_threshold),
                 overall_threshold=float(overall_threshold),
             )
         )
+
+    def evaluate_artifact_quality(
+        self,
+        metadata: Mapping[str, Any],
+        generated: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Run a bounded local grounding gate against one generated artifact."""
+
+        candidate_id = str(metadata.get("qa_candidate_id", "") or "").strip()
+        status = self.quality_execution_status(candidate_id)
+        if not status["allowed"]:
+            raise PermissionError("; ".join(status["blockers"]))
+        scope = str(metadata.get("quality_scope", "object_presence") or "").strip()
+        expected_classes = _string_list(metadata.get("expected_classes"))
+        asset_ref = str(generated.get("asset_uri", "") or "").strip()
+        if asset_ref.startswith("file://"):
+            asset_ref = asset_ref[7:]
+        asset = Path(asset_ref).expanduser()
+        if not asset.is_file():
+            raise ValueError("local quality execution requires an existing artifact file")
+
+        request_id = _scope_token(metadata.get("request_id"), "quality")
+        output_dir = (
+            self.opc_home
+            / "resource_gen"
+            / "quality"
+            / self.project_id
+            / request_id
+            / _scope_token(candidate_id, "candidate")
+        )
+        raw_qa_params = metadata.get("qa_params", {})
+        qa_params = dict(raw_qa_params) if isinstance(raw_qa_params, Mapping) else {}
+        params: dict[str, Any] = {
+            "output_dir": str(output_dir),
+            "skip_sample_downloads": True,
+        }
+        if "threshold" in qa_params:
+            params["threshold"] = qa_params["threshold"]
+        if expected_classes:
+            params["expected_classes"] = ",".join(expected_classes)
+        request = self._request(
+            prompt=(
+                "Verify expected object presence and return grounded bounding-box evidence. "
+                f"Expected classes: {', '.join(expected_classes) or 'not supplied'}."
+            ),
+            params=params,
+            media={"image": str(asset.resolve())},
+            task_type="grounding_evidence",
+            quality_preset=None,
+            task=None,
+            timeout=float(self.config.max_timeout_seconds),
+            max_retries=0,
+        )
+        generator = self._require_generator()
+        result = generator.generate(candidate_id, request)
+        try:
+            payload = json.loads(str(result.output_text or ""))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("quality candidate returned invalid JSON") from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError("quality candidate JSON must be an object")
+        findings = [
+            dict(item)
+            for item in payload.get("findings", []) or []
+            if isinstance(item, Mapping)
+        ]
+        evidence_details: list[dict[str, Any]] = []
+        grounded_classes: set[str] = set()
+        for finding in findings:
+            evidence_type = next(
+                (
+                    key
+                    for key in ("bbox", "mask", "point", "points")
+                    if finding.get(key) not in (None, "", [], {})
+                ),
+                "",
+            )
+            if not evidence_type:
+                continue
+            class_name = str(finding.get("class_name", "") or "").strip()
+            if class_name:
+                grounded_classes.add(class_name)
+            evidence_details.append(
+                {
+                    "type": evidence_type,
+                    "class_name": class_name,
+                    "value": finding[evidence_type],
+                    "confidence": finding.get("confidence"),
+                }
+            )
+        missing = _string_list(payload.get("missing_expected_classes"))
+        supported_scope = scope in {"object_presence", "prop_continuity"}
+        scope_satisfied = bool(
+            supported_scope
+            and expected_classes
+            and not missing
+            and set(expected_classes).issubset(grounded_classes)
+        )
+        evidence = [
+            f"{item['type']}:{item['class_name'] or 'unclassified'}"
+            for item in evidence_details
+        ]
+        return {
+            "candidate_id": result.candidate_id,
+            "provider": result.provider,
+            "model": result.model,
+            "status": result.status,
+            "score": payload.get("score", 0.0),
+            "summary": str(payload.get("summary", "") or ""),
+            "findings": findings,
+            "grounded": bool(evidence_details),
+            "evidence": evidence,
+            "evidence_details": evidence_details,
+            "quality_scope": scope,
+            "scope_satisfied": scope_satisfied,
+            "scope_limit_reason": (
+                ""
+                if scope_satisfied
+                else (
+                    "RF-DETR can auto-pass only object_presence/prop_continuity "
+                    "with explicit expected_classes and grounded evidence"
+                )
+            ),
+            "expected_classes": expected_classes,
+            "missing_expected_classes": missing,
+            "detected_classes": _string_list(payload.get("detected_classes")),
+            "qa_asset_uri": result.asset_uri,
+            "job_id": result.job_id,
+            "latency_ms": result.latency_ms,
+            "cost": result.cost,
+            "cost_unit": result.cost_unit,
+            "usage": dict(result.usage or {}),
+            "usage_accounting": {
+                "measured": True,
+                "source": "local_provider_reported",
+                "cost_usd": 0.0,
+            },
+        }
 
     def generate(
         self,
@@ -385,3 +636,15 @@ class NUResourceGenBridge:
             "approx_loaded_vram_gb": extras.get("approx_loaded_vram_gb"),
             "approx_weights_vram_gb": extras.get("approx_weights_vram_gb"),
         }
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        items = value
+    else:
+        items = []
+    return list(
+        dict.fromkeys(str(item).strip() for item in items if str(item).strip())
+    )

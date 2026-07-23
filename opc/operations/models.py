@@ -1104,6 +1104,7 @@ class MissionControlSnapshot(ContractMixin):
     total_cost_usd: float
     unmeasured_usage_events: int = 0
     provider_slo: dict[str, Any] = field(default_factory=dict)
+    provider_call_quotas: dict[str, Any] = field(default_factory=dict)
     alerts: list[MissionAlert] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
     generated_at: datetime = field(default_factory=utc_now)

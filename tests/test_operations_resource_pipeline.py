@@ -42,16 +42,17 @@ class _ResourceBridge:
                 "deprecated": False,
                 "simulation_only": False,
             },
-            "local_vlm_lab_mock": {
-                "candidate_id": "local_vlm_lab_mock",
+            "local_vlm_grounded": {
+                "candidate_id": "local_vlm_grounded",
                 "provider": "local_vlm",
-                "model": "mock-vlm-v0.1",
+                "model": "grounded-vlm-v1",
                 "category": "vision_analysis",
                 "cost": 0.0,
                 "cost_unit": "local",
                 "credentials_configured": True,
                 "deprecated": False,
-                "simulation_only": True,
+                "simulation_only": False,
+                "supported_task_types": ["grounding_evidence"],
             },
         }
 
@@ -77,6 +78,24 @@ class _ResourceBridge:
 
     def provider_readiness(self, _provider):
         return {"credential_ready": True, "transport_ready": True, "detail": "ready"}
+
+    def candidate_readiness(self, candidate_id):
+        return {
+            "candidate_id": candidate_id,
+            "credential_ready": True,
+            "transport_ready": True,
+            "detail": "ready",
+        }
+
+    def quality_execution_status(self, candidate_id):
+        return {
+            "allowed": candidate_id == "local_vlm_grounded",
+            "blockers": (
+                []
+                if candidate_id == "local_vlm_grounded"
+                else ["quality candidate is not allowlisted"]
+            ),
+        }
 
     def evaluate_prompt(self, **_kwargs):
         return {
@@ -124,6 +143,7 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
             quality_executor=lambda _metadata, _generated: {
                 "score": 92.0,
                 "grounded": True,
+                "scope_satisfied": True,
                 "evidence": ["artifact://vlm-report.json"],
                 "findings": [],
             },
@@ -148,7 +168,9 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
             confirm_live=live,
             require_free=True,
             max_cost_usd=0.0,
-            qa_candidate_id="local_vlm_lab_mock",
+            qa_candidate_id="local_vlm_grounded",
+            quality_scope="object_presence",
+            expected_classes=["person"],
         )
 
     async def test_dry_run_executes_planner_prompt_gate_and_quality_plan_only(self) -> None:
@@ -158,7 +180,7 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.decision, "dry_run")
         self.assertFalse(result.stages["execution"]["performed"])
         self.assertEqual(result.stages["prompt_planner"]["candidate_id"], "llm-planner-primary")
-        self.assertEqual(result.stages["quality_plan"]["candidate_id"], "local_vlm_lab_mock")
+        self.assertEqual(result.stages["quality_plan"]["candidate_id"], "local_vlm_grounded")
         self.assertEqual(self.bridge.generate_calls, 0)
         self.assertTrue(Path(result.artifact_manifest).is_file())
 
@@ -169,6 +191,7 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
             candidate_id=request.candidate_id,
             prompt=request.prompt,
             max_cost_usd=request.max_cost_usd,
+            operator_id="test-operator",
         )
 
         first = await self.pipeline.run(request)
@@ -177,6 +200,9 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.status, "completed")
         self.assertEqual(first.decision, "pass")
         self.assertEqual(first.stages["artifact_quality"]["score"], 92.0)
+        self.assertEqual(first.stages["approval"]["operator_id"], "test-operator")
+        self.assertEqual(first.stages["approval"]["key_id"], "primary")
+        self.assertTrue(first.stages["approval"]["approval_id"])
         self.assertEqual(self.bridge.generate_calls, 1)
         self.assertEqual(second.status, "blocked")
         self.assertIn("already been consumed", second.blockers[0])
@@ -188,6 +214,7 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
             candidate_id=request.candidate_id,
             prompt=request.prompt,
             max_cost_usd=request.max_cost_usd,
+            operator_id="test-operator",
         )
         request.prompt += " Add another character."
 
@@ -217,6 +244,7 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
             candidate_id=request.candidate_id,
             prompt=request.prompt,
             max_cost_usd=request.max_cost_usd,
+            operator_id="test-operator",
         )
 
         def fail_quality(_metadata, _generated):
@@ -230,6 +258,68 @@ class ApprovedResourcePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.stages["execution"]["performed"])
         self.assertIn("VLM unavailable", result.stages["artifact_quality"]["reason"])
         self.assertTrue(Path(result.artifact_manifest).is_file())
+
+    async def test_high_score_without_requested_scope_evidence_requires_review(self) -> None:
+        request = self._request(live=True)
+        request.approval_token = self.issuer.issue(
+            project_id=request.project_id,
+            candidate_id=request.candidate_id,
+            prompt=request.prompt,
+            max_cost_usd=request.max_cost_usd,
+            operator_id="test-operator",
+        )
+        self.pipeline.quality_executor = lambda _metadata, _generated: {
+            "score": 99.0,
+            "grounded": True,
+            "scope_satisfied": False,
+            "evidence": ["bbox:unrelated-object"],
+            "findings": [],
+        }
+
+        result = await self.pipeline.run(request)
+
+        self.assertEqual(result.status, "review")
+        self.assertEqual(result.decision, "review")
+        self.assertFalse(result.stages["artifact_quality"]["scope_satisfied"])
+
+    async def test_approval_key_rotation_verifies_retained_key_and_signs_with_new_key(self) -> None:
+        old = ResourceApprovalTokenIssuer(
+            "old-secret-that-is-long-enough",
+            key_id="2026-q2",
+        )
+        old_token = old.issue(
+            project_id="default",
+            candidate_id="local-image",
+            prompt="approved prompt",
+            max_cost_usd=0.0,
+            operator_id="operator-1",
+        )
+        rotated = ResourceApprovalTokenIssuer(
+            "new-secret-that-is-long-enough",
+            key_id="2026-q3",
+            verification_keys={"2026-q2": "old-secret-that-is-long-enough"},
+        )
+        new_token = rotated.issue(
+            project_id="default",
+            candidate_id="local-image",
+            prompt="approved prompt",
+            max_cost_usd=0.0,
+            operator_id="operator-2",
+        )
+
+        self.assertEqual(rotated.inspect(old_token)["key_id"], "2026-q2")
+        self.assertEqual(rotated.inspect(new_token)["key_id"], "2026-q3")
+        self.assertEqual(rotated.inspect(new_token)["operator_id"], "operator-2")
+
+    async def test_approval_requires_operator_identity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "operator_id"):
+            self.issuer.issue(
+                project_id="default",
+                candidate_id="local-image",
+                prompt="approved prompt",
+                max_cost_usd=0.0,
+                operator_id="",
+            )
 
 
 if __name__ == "__main__":

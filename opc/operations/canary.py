@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import defaultdict
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from opc.operations.capabilities import CapabilityExecutor, UnifiedCapabilityBroker
 from opc.operations.models import CapabilityRequest, ProviderCanaryResult
@@ -136,6 +137,7 @@ class ProviderCanaryService:
         provider: str | None = None,
         limit: int = 100,
         availability_target: float = 0.95,
+        p95_latency_target_ms: float = 30_000.0,
     ) -> dict[str, Any]:
         rows = await self.repository.list_provider_canary_results(
             project_id=project_id,
@@ -155,14 +157,20 @@ class ProviderCanaryService:
                     break
                 consecutive_failures += 1
             availability = successes / len(values)
+            p95_latency = round(_percentile(latencies, 0.95), 3)
+            availability_met = availability >= availability_target
+            latency_met = p95_latency <= p95_latency_target_ms
             summaries[name] = {
                 "samples": len(values),
                 "successes": successes,
                 "availability": round(availability, 6),
                 "availability_target": availability_target,
-                "target_met": availability >= availability_target,
+                "p95_latency_target_ms": p95_latency_target_ms,
+                "availability_target_met": availability_met,
+                "latency_target_met": latency_met,
+                "target_met": availability_met and latency_met,
                 "p50_latency_ms": round(_percentile(latencies, 0.50), 3),
-                "p95_latency_ms": round(_percentile(latencies, 0.95), 3),
+                "p95_latency_ms": p95_latency,
                 "consecutive_failures": consecutive_failures,
                 "model_drift_count": sum(item.model_drift for item in values),
                 "last_model": values[0].model,
@@ -171,9 +179,95 @@ class ProviderCanaryService:
         return {
             "project_id": project_id,
             "availability_target": availability_target,
+            "p95_latency_target_ms": p95_latency_target_ms,
             "sample_count": len(rows),
             "providers": summaries,
         }
+
+
+class ProviderCanaryScheduler:
+    """Run status-only canaries periodically and retain the latest SLO view."""
+
+    def __init__(
+        self,
+        service: ProviderCanaryService,
+        request_factory: Callable[[], CapabilityRequest],
+        *,
+        interval_seconds: float = 300.0,
+        expected_model: str = "",
+        availability_target: float = 0.95,
+        p95_latency_target_ms: float = 30_000.0,
+        project_id: str = "default",
+    ) -> None:
+        self.service = service
+        self.request_factory = request_factory
+        self.interval_seconds = max(0.01, float(interval_seconds))
+        self.expected_model = str(expected_model or "")
+        self.availability_target = float(availability_target)
+        self.p95_latency_target_ms = max(1.0, float(p95_latency_target_ms))
+        self.project_id = str(project_id or "default")
+        self.last_result: ProviderCanaryResult | None = None
+        self.last_slo: dict[str, Any] = {}
+        self.last_error = ""
+        self.run_count = 0
+        self._task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+        self._run_lock = asyncio.Lock()
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    async def run_once(self) -> ProviderCanaryResult:
+        async with self._run_lock:
+            request = self.request_factory()
+            request.project_id = self.project_id
+            result = await self.service.status_canary(
+                request,
+                expected_model=self.expected_model,
+            )
+            self.last_result = result
+            self.last_slo = await self.service.slo_summary(
+                project_id=self.project_id,
+                availability_target=self.availability_target,
+                p95_latency_target_ms=self.p95_latency_target_ms,
+            )
+            self.last_error = ""
+            self.run_count += 1
+            return result
+
+    async def start(self) -> None:
+        if self.running:
+            return
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(
+            self._run_loop(),
+            name=f"provider-canary:{self.project_id}",
+        )
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._stop.set()
+        task = self._task
+        self._task = None
+        await task
+
+    async def _run_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._stop.wait(), timeout=self.interval_seconds
+                )
+                continue
+            except TimeoutError:
+                pass
+            try:
+                await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.last_error = f"{type(exc).__name__}: {exc}"[:1000]
 
 
 def _percentile(values: list[float], fraction: float) -> float:

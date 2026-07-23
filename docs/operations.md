@@ -15,6 +15,8 @@ OpenOPC's operating kernel turns the Self-Built → Self-Run → Self-Grown visi
 
 All records live in the existing project-scoped database at `.opc/projects/<project>/tasks.db`. Cross-project writes are rejected.
 
+The executed release evidence and remaining promotion gates are recorded in [the 2026-07-23 validation report](validation-2026-07-23.md).
+
 ## Quick operating loop
 
 Create a full contract as JSON:
@@ -145,6 +147,16 @@ uv run opc ops outbox recover --project demo
 uv run opc ops outbox replay <message-id> --reason "consumer repaired" --project demo
 ```
 
+Create and verify a consistent SQLite snapshot while OpenOPC is running. Restore always targets an offline destination and refuses to overwrite by default:
+
+```bash
+uv run opc ops backup create backups/demo.db --project demo
+uv run opc ops backup inspect backups/demo.db
+uv run opc ops backup restore backups/demo.db --destination restored/tasks.db
+```
+
+Every backup has a sidecar manifest containing the schema version, SHA-256 digest, byte size, and operations-table row counts. Inspect and restore verify the digest and SQLite integrity before accepting the file. Stop OpenOPC before replacing a live project database; `--overwrite` is an explicit operator decision.
+
 A stale worker cannot write with a fencing token after another owner takes over its expired lease. Dead-letter replay is intentionally not automatic: repair the consumer and replay with an explicit reason. Replay resets the delivery attempt budget and appends an `outbox.replayed` audit event in the same transaction.
 
 When the OpenOPC engine is running, the configured outbox dispatcher claims pending deliveries in bounded batches, publishes them to the internal event bus, and acknowledges them with the claim's fencing token. Handler failures are retried with the durable backoff policy and move to `dead_letter` after the configured attempt limit. Shutdown stops the dispatcher before closing the store. Set `system.operations.durable.outbox_dispatcher_enabled: false` only when a separate process owns delivery.
@@ -212,7 +224,13 @@ uv run opc ops capability plan --request capability-request.json --project demo
 
 Execution through `OperationsService.execute_llm()` first freezes the selected route, ordered fallbacks, request snapshot, budget, and expiry in a `RouteExecutionContract`. The LLM bridge receives that contract and may only try those candidates in that order. A provider/model outside the contract, an expired contract, or a reported cost above its ceiling fails closed and is recorded as a contract violation or budget exceedance.
 
-Subscription CLIs often do not expose trustworthy token or cost counters. Their successful responses are recorded with `measured=false`, `source=unknown`, and null token/cost values. This is a valid execution result but not evidence that the call was free.
+Subscription CLIs often do not expose trustworthy token or cost counters. Their successful responses are recorded with `measured=false`, `source=subscription_cli_unreported`, and null token/cost values. This is a valid execution result but not evidence that the call was free.
+
+Because unknown usage cannot enforce a token or dollar ceiling, subscription routes also have an atomic rolling call-count guard. `system.operations.providers.subscription_call_limit` and `subscription_window_seconds` apply to the configured provider families. A reservation is committed immediately before provider I/O under `BEGIN IMMEDIATE`, so concurrent workers cannot oversubscribe the limit. Failed and timed-out calls remain counted conservatively. Mission Control warns at 80% and blocks new calls when the quota is exhausted.
+
+### Bounded shadow experiments
+
+The linked NU router can collect a served outcome and a non-serving challenger under one content-free decision record, but execution requires both an event database and an explicit whole-process call budget. OpenOPC does not automatically enable this path. Current synchronous `chat_with_shadow` collection finishes the challenger before the call returns, so it is suitable for a bounded operator experiment but not the latency-sensitive user-serving path. Production adoption requires background execution plus a durable budget and shutdown flush; until then, keep `max_total_calls` explicit and treat challenger latency as experiment overhead.
 
 ## Provider canaries and SLOs
 
@@ -224,11 +242,11 @@ uv run opc ops capability canary --request capability-request.json \
 uv run opc ops capability slo --availability-target 0.95 --project demo
 ```
 
-SLO summaries report sample count, availability, p50/p95 latency, consecutive failures, and model-drift count by provider. Mission Control raises an SLO alert after at least three samples fall below 95% availability and separately exposes unmeasured usage. Live canaries exist at the service layer only and require both `allow_live=true`, explicit confirmation, and an injected executor; the CLI intentionally exposes only the no-generation canary.
+SLO summaries report sample count, availability, p50/p95 latency, consecutive failures, and model-drift count by provider. Mission Control raises an alert only after the configured minimum sample count and evaluates availability and p95 latency as separate targets. When the engine is running, a status-only scheduler samples provider readiness at `status_canary_interval_seconds`; it never generates content. Live canaries exist at the service layer only and require both `allow_live=true`, explicit confirmation, and an injected executor; the CLI intentionally exposes only the no-generation canary.
 
 ## Approval-gated resource pipeline
 
-`ops resource run` composes the shared NU planner, provider-specific prompt evaluation, candidate readiness, generation policy, and a grounded artifact-quality gate. A request defaults to dry-run and the real local `local_gemma4_12b_nvfp4` VLM candidate for QA planning:
+`ops resource run` composes the shared NU planner, provider-specific prompt evaluation, candidate readiness, generation policy, and a grounded artifact-quality gate. A request defaults to dry-run and uses the Ampere-compatible `local_rfdetr_detection_nano` candidate for scoped object-presence QA:
 
 ```json
 {
@@ -239,7 +257,10 @@ SLO summaries report sample count, availability, p50/p95 latency, consecutive fa
   "require_free": true,
   "max_cost_usd": 0.0,
   "gpu_free_vram_mib": 12000,
-  "hardware_profile": "Ampere sm_86"
+  "hardware_profile": "Ampere sm_86",
+  "qa_candidate_id": "local_rfdetr_detection_nano",
+  "quality_scope": "object_presence",
+  "expected_classes": ["person"]
 }
 ```
 
@@ -252,19 +273,23 @@ Live generation requires all of the following gates:
 1. `system.nu_resource_gen.allow_live: true` and the exact candidate in `allowed_live_candidates`;
 2. a passing shared prompt evaluation and transport/hardware readiness;
 3. `allow_live=true` and `confirm_live=true` in the request;
-4. `OPENOPC_RESOURCE_APPROVAL_SECRET` containing at least 16 bytes;
-5. a short-lived HMAC approval bound to the exact project, candidate, prompt hash, and cost ceiling;
+4. a configured approval keyring (or the single-key compatibility secret), with every key containing at least 16 bytes;
+5. a short-lived HMAC approval bound to an approval ID, operator ID, key ID, exact project, candidate, prompt hash, and cost ceiling;
 6. the underlying provider's credential, billing, identity, publication, and policy checks.
 
 Issue the approval only after reviewing the dry plan, then copy the returned token into the otherwise unchanged request:
 
 ```bash
-OPENOPC_RESOURCE_APPROVAL_SECRET='<operator-managed-secret>' \
+OPENOPC_RESOURCE_APPROVAL_KEYS='{"2026-q3":"<operator-managed-secret>"}' \
+OPENOPC_RESOURCE_APPROVAL_ACTIVE_KEY_ID='2026-q3' \
   uv run opc ops resource approve --request resource-request.json \
+  --operator-id operator@example.com \
   --expires-in-seconds 300 --project demo
 ```
 
-Approvals are single-use. Prompt, candidate, project, expiry, or cost changes invalidate them. Generated artifacts cannot pass automatically without a configured VLM executor returning a score, grounded findings, and evidence; otherwise the result remains `review`. Simulation candidates, including `local_vlm_lab_mock`, are useful for schema tests only and are never production quality proof. GPU-backed live routes also require explicit hardware profile and free-VRAM evidence and fail closed on architecture or capacity mismatch.
+`OPENOPC_RESOURCE_APPROVAL_KEYS` is a JSON object of `key_id → secret`. Keep the previous key in the verification keyring during rotation while issuing new approvals with `OPENOPC_RESOURCE_APPROVAL_ACTIVE_KEY_ID`. `OPENOPC_RESOURCE_APPROVAL_SECRET` plus optional `OPENOPC_RESOURCE_APPROVAL_KEY_ID` remains a single-key compatibility path.
+
+Approvals are single-use and their safe audit claims are persisted on consumption. Prompt, candidate, project, expiry, or cost changes invalidate them. Generated artifacts cannot pass automatically without a configured VLM executor returning a score, grounded findings, evidence, and proof that the declared quality scope and expected classes were satisfied; otherwise the result remains `review`. RF-DETR evidence proves object presence or prop continuity only, not aesthetics, identity fidelity, composition, or narrative quality. Simulation candidates, including `local_vlm_lab_mock`, are useful for schema tests only and are never production quality proof. GPU-backed live routes also require explicit hardware profile and free-VRAM evidence and fail closed on architecture or capacity mismatch. Python/script paths supplied by an untrusted request are ignored; only allowlisted candidate runtime metadata may select the executor.
 
 ## Staffing evidence and regret
 
@@ -286,20 +311,23 @@ It is available through:
 
 - `opc ops mission status|brief`;
 - the `operations_mission_control` agent tool;
-- the secretary's prompt context and `SecretaryService.mission_brief()`.
+- the secretary's prompt context and `SecretaryService.mission_brief()`;
+- the project-scoped `Mission Control` page in Office UI, with manual refresh and a visibility-aware 30-second polling interval.
+
+The UI displays durable work, gate failures, delivery/approval queues, provider SLOs, subscription call quotas, ordered alerts, and deterministic next actions. A late WebSocket response is discarded after a project switch.
 
 ## Schema and migration
 
-`OPCStore.initialize()` creates additive schema version 2 tables:
+`OPCStore.initialize()` creates additive schema version 3 tables:
 
 - `goal_contracts`, `goal_contract_versions`, `run_manifests`, `run_scorecards`;
 - `operating_events`, `outbox_messages`, `run_leases`;
 - `outbox_delivery_receipts`, `route_execution_contracts`, `provider_usage_events`;
-- `provider_canary_results`, `resource_approval_uses`;
+- `provider_canary_results`, `resource_approval_uses`, `provider_call_reservations`;
 - `learning_assets`, `learning_asset_evaluations`;
 - `capability_attempts`, `staffing_decisions`.
 
-The migration does not rewrite existing task, work-item, runtime, approval, or memory tables. `operations_schema` records the installed component version.
+Version 3 adds atomic subscription call reservations plus approval/operator/key audit columns. The migration does not rewrite existing task, work-item, runtime, or memory tables. A database created by a newer operations schema fails closed instead of being opened by older code. `operations_schema` records the installed component version; migration fixtures cover the original schema and current upgrades.
 
 ## CI regression gate
 

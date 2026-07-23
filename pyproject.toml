@@ -34,7 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 nu = [
     "nu-llm-routing-lib==0.2.1; python_version >= '3.11'",
-    "nu-resource-gen-lib==0.2.0; python_version >= '3.11'",
+    "nu-resource-gen-lib==0.2.1; python_version >= '3.11'",
 ]
 dev = [
     "pytest>=8.0",

@@ -7360,6 +7360,56 @@ class TestWSHandlerCommsState(unittest.IsolatedAsyncioTestCase):
             self.assertIn("executor", roles)
             self.assertEqual(roles["executor"]["unread_count"], 1)
 
+    async def test_mission_control_returns_project_scoped_operations_snapshot(self) -> None:
+        from opc.plugins.office_ui.ws_handler import WSHandler
+
+        engine = _make_engine()
+        summary = AsyncMock(
+            return_value={
+                "available": False,
+                "project_id": "stale-project",
+                "active_runs": 2,
+                "alerts": [],
+            }
+        )
+        engine.operations = SimpleNamespace(
+            mission_control=SimpleNamespace(summary=summary)
+        )
+        handler = WSHandler(engine, MagicMock(), MagicMock(), MagicMock())
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        await handler._handle_mission_control(
+            ws,
+            {"project_id": "test-project"},
+        )
+
+        summary.assert_awaited_once_with(project_id="test-project")
+        envelope = ws.send_json.await_args.args[0]
+        self.assertEqual(envelope["type"], "mission_control")
+        self.assertTrue(envelope["payload"]["available"])
+        self.assertEqual(envelope["payload"]["project_id"], "test-project")
+        self.assertEqual(envelope["payload"]["active_runs"], 2)
+
+    async def test_mission_control_reports_disabled_operations_without_crashing(self) -> None:
+        from opc.plugins.office_ui.ws_handler import WSHandler
+
+        engine = _make_engine()
+        engine.operations = None
+        handler = WSHandler(engine, MagicMock(), MagicMock(), MagicMock())
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        await handler._handle_mission_control(
+            ws,
+            {"project_id": "test-project"},
+        )
+
+        payload = ws.send_json.await_args.args[0]["payload"]
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["project_id"], "test-project")
+        self.assertIn("not enabled", payload["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

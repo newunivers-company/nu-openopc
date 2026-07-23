@@ -30,6 +30,25 @@ const flushPromises = async () => {
 
 const client = new VisualSocketClient('ws://unit.test', {})
 
+// Mission Control is project-scoped and its snapshot response reaches the
+// dedicated handler without falling through the generic collaboration path.
+const missionPayloads: Array<Record<string, unknown>> = []
+const missionClient = new VisualSocketClient('ws://unit.test', {
+  onMissionControl: payload => missionPayloads.push(payload as unknown as Record<string, unknown>),
+})
+missionClient.missionControl('project-a')
+const missionEnvelope = JSON.parse(
+  (missionClient as unknown as TestSocketClient).pendingQueue.pop() ?? '{}',
+) as Record<string, unknown>
+assert.equal(missionEnvelope.type, 'mission_control')
+assert.equal(missionEnvelope.project_id, 'project-a')
+;(missionClient as unknown as TestSocketClient).handleMessage(JSON.stringify({
+  type: 'mission_control',
+  payload: { available: true, project_id: 'project-a', active_runs: 2 },
+}))
+assert.equal(missionPayloads[0]?.project_id, 'project-a')
+assert.equal(missionPayloads[0]?.active_runs, 2)
+
 // Company Continue keeps the selected UI channel task separate from the
 // durable runtime identity used by the checkpoint handoff.
 client.sessionResume('project-a', 'ui-task', 'runtime-session', 'checkpoint-1')

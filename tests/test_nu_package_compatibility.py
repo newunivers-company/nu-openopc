@@ -4,7 +4,7 @@ from scripts.verify_nu_compatibility import verify
 
 
 def test_pinned_nu_stable_facades_are_compatible() -> None:
-    report = verify(expected_llm="0.2.1", expected_resource="0.2.0")
+    report = verify(expected_llm="0.2.1", expected_resource="0.2.1")
 
     assert report["compatible"] is True
     assert report["failures"] == []

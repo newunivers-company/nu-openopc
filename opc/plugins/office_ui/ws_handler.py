@@ -10099,6 +10099,53 @@ class WSHandler:
         except Exception as exc:
             await ws.send_json({"type": "comms_state", "payload": {"available": False, "reason": str(exc)}})
 
+    async def _handle_mission_control(self, ws: Any, data: dict) -> None:
+        """Return the deterministic operations snapshot for one project.
+
+        Mission Control is deliberately read-only and does not invoke an LLM.
+        Keeping the project id in both the request and response lets the UI
+        discard a late response after a project switch.
+        """
+        if self._shutting_down:
+            return
+        project_id = ""
+        try:
+            engine, project_id = await self._engine_for_request(data)
+            operations = getattr(engine, "operations", None)
+            mission_control = getattr(operations, "mission_control", None)
+            summary = getattr(mission_control, "summary", None)
+            if not callable(summary):
+                await ws.send_json(
+                    {
+                        "type": "mission_control",
+                        "payload": {
+                            "available": False,
+                            "project_id": project_id,
+                            "reason": "Operations Mission Control is not enabled for this project.",
+                        },
+                    }
+                )
+                return
+            payload = await summary(project_id=project_id)
+            await ws.send_json(
+                {
+                    "type": "mission_control",
+                    "payload": {**dict(payload or {}), "available": True, "project_id": project_id},
+                }
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to build Mission Control snapshot for {project_id or 'unknown'}: {exc}")
+            await ws.send_json(
+                {
+                    "type": "mission_control",
+                    "payload": {
+                        "available": False,
+                        "project_id": project_id,
+                        "reason": str(exc),
+                    },
+                }
+            )
+
     async def _handle_comms_read_message(self, ws: Any, data: dict) -> None:
         """Read the body of a single comms message file for the UI viewer."""
         if self._shutting_down:
@@ -10116,3 +10163,4 @@ class WSHandler:
     # Register handlers defined after _HANDLERS class-level dict
     _HANDLERS["comms_state"] = _handle_comms_state
     _HANDLERS["comms_read_message"] = _handle_comms_read_message
+    _HANDLERS["mission_control"] = _handle_mission_control

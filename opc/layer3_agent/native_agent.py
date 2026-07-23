@@ -728,6 +728,7 @@ class NativeAgent:
             llm_config = self.llm.config.model_copy(deep=True)
             llm_config.default_model = model_override
             child_llm = LLMProvider(llm_config, opc_home=getattr(self.llm, "opc_home", None))
+            child_llm.inherit_operations_binding(self.llm)
 
         child_config = self.config
         max_iterations = overrides.get("max_iterations")

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+import json
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from opc.core.config import NUResourceGenConfig
 from opc.integrations.nu_resource_gen import NUResourceGenBridge
@@ -71,6 +74,39 @@ class NUResourceGenBridgeTests(unittest.TestCase):
         self.assertTrue(comfy["credential_ready"])
         self.assertTrue(comfy["transport_ready"])
 
+    def test_string_provider_health_is_normalized_without_mapping_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            bridge = self._bridge(Path(raw_root))
+            bridge.health = lambda **_kwargs: {  # type: ignore[method-assign]
+                "providers": {
+                    "local_vlm": "available: local runtime ready",
+                    "gemini": "unavailable: API key missing",
+                }
+            }
+
+            local = bridge.provider_readiness("local_vlm")
+            remote = bridge.provider_readiness("gemini")
+
+        self.assertTrue(local["transport_ready"])
+        self.assertFalse(remote["transport_ready"])
+
+    def test_rfdetr_readiness_uses_trusted_runtime_override_not_catalog_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            runtime = root / "rfdetr" / "bin" / "python"
+            runtime.parent.mkdir(parents=True)
+            runtime.write_text("#!/bin/sh\n", encoding="utf-8")
+            bridge = self._bridge(root)
+            bridge.provider_readiness = lambda _provider: {  # type: ignore[method-assign]
+                "credential_ready": True,
+                "transport_ready": True,
+            }
+            with patch.dict(os.environ, {"NU_RFDETR_PYTHON": str(runtime)}):
+                readiness = bridge.candidate_readiness("local_rfdetr_detection_nano")
+
+        self.assertTrue(readiness["transport_ready"])
+        self.assertEqual(readiness["path_checks"]["python"]["path"], str(runtime))
+
     def test_explicit_live_allowlist_and_confirmation_reach_generator(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             bridge = self._bridge(
@@ -136,6 +172,79 @@ class NUResourceGenBridgeTests(unittest.TestCase):
         self.assertTrue(tools["nu_resource_generate"].requires_confirmation)
         self.assertFalse(tools["nu_resource_generate"].read_only)
         self.assertFalse(tools["nu_resource_candidates"].requires_confirmation)
+
+    def test_local_artifact_quality_requires_expected_grounded_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            artifact = root / "frame.png"
+            artifact.write_bytes(b"test-image")
+            bridge = self._bridge(
+                root,
+                local_quality_candidates=["local-grounding"],
+            )
+
+            class FakeGenerator:
+                execution_policy = SimpleNamespace()
+
+                def get_candidate(self, candidate_id: str) -> object:
+                    return SimpleNamespace(
+                        candidate_id=candidate_id,
+                        provider="local_vlm",
+                        model="grounding-v1",
+                        cost=0.0,
+                        cost_unit="local",
+                        extras={},
+                    )
+
+                def generate(self, candidate_id: str, request: object) -> object:
+                    self.request = request
+                    return SimpleNamespace(
+                        candidate_id=candidate_id,
+                        provider="local_vlm",
+                        model="grounding-v1",
+                        status="completed",
+                        output_text=json.dumps(
+                            {
+                                "score": 93,
+                                "summary": "person grounded",
+                                "findings": [
+                                    {
+                                        "class_name": "person",
+                                        "confidence": 0.91,
+                                        "bbox": [1, 2, 30, 40],
+                                    }
+                                ],
+                                "detected_classes": ["person"],
+                                "missing_expected_classes": [],
+                            }
+                        ),
+                        asset_uri=str(artifact),
+                        job_id="quality-1",
+                        latency_ms=10.0,
+                        cost=0.0,
+                        cost_unit="local",
+                        usage={"count": 1},
+                    )
+
+            fake = FakeGenerator()
+            bridge._generator = fake
+            bridge._load_attempted = True
+            result = bridge.evaluate_artifact_quality(
+                {
+                    "request_id": "request-1",
+                    "qa_candidate_id": "local-grounding",
+                    "quality_scope": "object_presence",
+                    "expected_classes": ["person"],
+                    "qa_params": {"python": "/tmp/untrusted", "threshold": 0.4},
+                },
+                {"asset_uri": str(artifact)},
+            )
+
+        self.assertTrue(result["scope_satisfied"])
+        self.assertTrue(result["grounded"])
+        self.assertEqual(result["evidence"], ["bbox:person"])
+        self.assertNotIn("python", fake.request.params)
+        self.assertEqual(fake.request.params["threshold"], 0.4)
 
 
 if __name__ == "__main__":

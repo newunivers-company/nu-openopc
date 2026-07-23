@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
@@ -37,6 +38,7 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
                     "provider_usage_events",
                     "provider_canary_results",
                     "resource_approval_uses",
+                    "provider_call_reservations",
                     "staffing_decisions",
                 }
                 self.assertTrue(expected.issubset(tables))
@@ -44,7 +46,7 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT version FROM operations_schema WHERE component = 'operating_kernel'"
                 ) as cursor:
                     row = await cursor.fetchone()
-                self.assertEqual(row[0], 2)
+                self.assertEqual(row[0], 3)
             finally:
                 await store.close()
 
@@ -65,6 +67,51 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await second.close()
 
+    async def test_v1_fixture_migrates_to_v3_and_backfills_goal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            path = Path(raw_root) / "tasks.db"
+            fixture = Path("tests/fixtures/operations_schema_v1.sql").read_text(
+                encoding="utf-8"
+            )
+            with sqlite3.connect(path) as connection:
+                connection.executescript(fixture)
+            store = OPCStore(path)
+            await store.initialize()
+            try:
+                async with store._require_db().execute(
+                    "SELECT version FROM operations_schema WHERE component = 'operating_kernel'"
+                ) as cursor:
+                    version = await cursor.fetchone()
+                async with store._require_db().execute(
+                    "SELECT COUNT(*) FROM goal_contract_versions WHERE goal_id = 'legacy-goal'"
+                ) as cursor:
+                    history = await cursor.fetchone()
+                self.assertEqual(version[0], 3)
+                self.assertEqual(history[0], 1)
+            finally:
+                await store.close()
+
+    async def test_newer_schema_fails_closed_instead_of_downgrading(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            path = Path(raw_root) / "tasks.db"
+            with sqlite3.connect(path) as connection:
+                connection.executescript(
+                    """CREATE TABLE operations_schema (
+                           component TEXT PRIMARY KEY,
+                           version INTEGER NOT NULL,
+                           updated_at TEXT NOT NULL
+                       );
+                       INSERT INTO operations_schema VALUES (
+                           'operating_kernel', 999, '2026-01-01T00:00:00+00:00'
+                       );"""
+                )
+            store = OPCStore(path)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "newer than supported"):
+                    await store.initialize()
+            finally:
+                await store.close()
+
 
 class OperationsConfigTests(unittest.TestCase):
     def test_operations_config_round_trips_through_system_yaml(self) -> None:
@@ -75,6 +122,7 @@ class OperationsConfigTests(unittest.TestCase):
             config.system.operations.durable.lease_seconds = 45
             config.system.operations.learning.minimum_sample_size = 7
             config.system.operations.staffing.quality_weight = 0.5
+            config.system.operations.providers.subscription_call_limit = 25
             config.save(config_dir)
 
             loaded = OPCConfig.load(config_dir)
@@ -82,6 +130,9 @@ class OperationsConfigTests(unittest.TestCase):
             self.assertEqual(loaded.system.operations.durable.lease_seconds, 45)
             self.assertEqual(loaded.system.operations.learning.minimum_sample_size, 7)
             self.assertEqual(loaded.system.operations.staffing.quality_weight, 0.5)
+            self.assertEqual(
+                loaded.system.operations.providers.subscription_call_limit, 25
+            )
 
     def test_legacy_config_without_operations_uses_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -94,6 +145,9 @@ class OperationsConfigTests(unittest.TestCase):
             self.assertTrue(config.system.operations.enabled)
             self.assertEqual(config.system.operations.durable.outbox_max_attempts, 5)
             self.assertEqual(config.system.operations.evaluation.minimum_total_score, 0.75)
+            self.assertEqual(
+                config.system.operations.providers.subscription_call_limit, 200
+            )
 
     def test_checked_in_config_contains_complete_operations_policy(self) -> None:
         config = OPCConfig.load(Path("config"))
@@ -105,6 +159,10 @@ class OperationsConfigTests(unittest.TestCase):
         self.assertEqual(
             set(config.system.operations.staffing.normalized_weights()),
             {"quality", "domain", "reliability", "experience", "availability", "cost"},
+        )
+        self.assertTrue(config.system.operations.providers.status_canary_enabled)
+        self.assertEqual(
+            config.system.operations.providers.subscription_call_limit, 200
         )
 
     def test_ci_regression_script_fails_for_regressed_candidate(self) -> None:

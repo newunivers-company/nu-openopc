@@ -7,8 +7,10 @@ import base64
 import hashlib
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, Iterator, Mapping
 from urllib.parse import urlparse
 
 from opc.core.windows_ssl import sanitize_windows_sslkeylogfile
@@ -225,6 +227,55 @@ class LLMProvider:
         self._api_base = config.api_base or None
         self.nu_router = NULlmRoutingBridge(config.nu_routing, opc_home=opc_home)
         self._last_route_target: RoutedLLMTarget | None = None
+        self._operations_service: Any | None = None
+        self._operations_project_id = "default"
+        self._operations_context: ContextVar[dict[str, Any]] = ContextVar(
+            f"openopc_llm_operations_context_{id(self)}",
+            default={},
+        )
+
+    def bind_operations_service(self, service: Any | None, *, project_id: str = "default") -> None:
+        """Route future public calls through the persisted operations contract."""
+
+        self._operations_service = service
+        self._operations_project_id = str(project_id or "default")
+
+    def inherit_operations_binding(self, source: "LLMProvider") -> None:
+        """Copy durable governance binding into a model-override child provider."""
+
+        self.bind_operations_service(
+            getattr(source, "_operations_service", None),
+            project_id=getattr(source, "_operations_project_id", "default"),
+        )
+
+    @contextmanager
+    def operations_call_context(
+        self,
+        context: Mapping[str, Any] | None = None,
+        **values: Any,
+    ) -> Iterator[None]:
+        """Attach task-local execution identity without leaking across coroutines."""
+
+        merged = {
+            **dict(self._operations_context.get()),
+            **dict(context or {}),
+            **values,
+        }
+        token = self._operations_context.set(merged)
+        try:
+            yield
+        finally:
+            self._operations_context.reset(token)
+
+    def _resolved_operations_context(
+        self,
+        explicit: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "project_id": self._operations_project_id,
+            **dict(self._operations_context.get()),
+            **dict(explicit or {}),
+        }
 
     def has_credentials(self) -> bool:
         """Whether an LLM call can plausibly authenticate.
@@ -630,6 +681,31 @@ class LLMProvider:
         route_contract: Mapping[str, Any] | Any | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        operations_context = kwargs.pop("operations_context", None)
+        if route_contract is None and self._operations_service is not None:
+            context = self._resolved_operations_context(
+                operations_context if isinstance(operations_context, Mapping) else None
+            )
+            request = self._operations_service.create_llm_request(
+                messages=messages,
+                task_type=task_type,
+                tools=tools,
+                context=context,
+            )
+            governed_kwargs = dict(kwargs)
+            if tools is not None:
+                governed_kwargs["tools"] = tools
+            if temperature is not None:
+                governed_kwargs["temperature"] = temperature
+            if max_tokens is not None:
+                governed_kwargs["max_tokens"] = max_tokens
+            _route, result = await self._operations_service.execute_llm(
+                request,
+                self,
+                messages,
+                **governed_kwargs,
+            )
+            return result
         targets = self._targets_for_execution_contract(
             self._candidate_targets(task_type, has_tools=bool(tools)),
             route_contract,
@@ -802,7 +878,11 @@ class LLMProvider:
             },
             "usage_accounting": {
                 "measured": measured,
-                "source": "provider_reported" if measured else "unknown",
+                "source": (
+                    "provider_reported"
+                    if measured
+                    else "subscription_cli_unreported"
+                ),
                 "input_tokens": prompt_tokens if measured else None,
                 "output_tokens": completion_tokens if measured else None,
                 "total_tokens": prompt_tokens + completion_tokens if measured else None,
@@ -896,6 +976,36 @@ class LLMProvider:
         route_contract: Mapping[str, Any] | Any | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[RuntimeLLMEvent]:
+        operations_context = kwargs.pop("operations_context", None)
+        if route_contract is None and self._operations_service is not None:
+            context = self._resolved_operations_context(
+                operations_context if isinstance(operations_context, Mapping) else None
+            )
+            request = self._operations_service.create_llm_request(
+                messages=messages,
+                task_type=task_type,
+                tools=tools,
+                context=context,
+            )
+            governed_kwargs = dict(kwargs)
+            if tools is not None:
+                governed_kwargs["tools"] = tools
+            if temperature is not None:
+                governed_kwargs["temperature"] = temperature
+            if max_tokens is not None:
+                governed_kwargs["max_tokens"] = max_tokens
+            governed_stream = self._operations_service.execute_llm_stream(
+                request,
+                self,
+                messages,
+                **governed_kwargs,
+            )
+            try:
+                async for event in governed_stream:
+                    yield event
+            finally:
+                await governed_stream.aclose()
+            return
         targets = self._targets_for_execution_contract(
             self._candidate_targets(task_type, has_tools=bool(tools)),
             route_contract,
@@ -924,7 +1034,7 @@ class LLMProvider:
             yield RuntimeLLMEvent(
                 event_type="message_start",
                 model=resolved_model,
-                payload={"model": resolved_model},
+                payload={"model": resolved_model, "provider": str(result.get("provider") or target.provider)},
             )
             content = str(result.get("content") or "")
             if content:
@@ -944,6 +1054,8 @@ class LLMProvider:
                     "estimated_cost_total": self._total_cost,
                     "context_window": self.get_context_window(model=resolved_model),
                     "model": resolved_model,
+                    "provider": str(result.get("provider") or target.provider),
+                    "usage_accounting": dict(result.get("usage_accounting", {}) or {}),
                 },
             )
             yield RuntimeLLMEvent(
@@ -979,7 +1091,14 @@ class LLMProvider:
         )
 
         last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        yield RuntimeLLMEvent(event_type="message_start", model=model, payload={"model": model})
+        usage_observed = False
+        call_cost_total = 0.0
+        call_cost_known = True
+        yield RuntimeLLMEvent(
+            event_type="message_start",
+            model=model,
+            payload={"model": model, "provider": target.provider},
+        )
 
         try:
             stream = await litellm.acompletion(**call_kwargs)
@@ -987,13 +1106,14 @@ class LLMProvider:
                 async for chunk in stream:
                     for event in self.normalize_stream_event(chunk, model=model):
                         if event.event_type == "usage":
+                            usage_observed = True
                             total_prompt = int(event.payload.get("prompt_tokens", 0) or 0)
                             total_completion = int(event.payload.get("completion_tokens", 0) or 0)
                             delta_prompt = max(0, total_prompt - last_usage["prompt_tokens"])
                             delta_completion = max(0, total_completion - last_usage["completion_tokens"])
                             last_usage["prompt_tokens"] = total_prompt
                             last_usage["completion_tokens"] = total_completion
-                            cost = 0.0
+                            cost: float | None = None
                             try:
                                 prompt_cost, completion_cost = litellm.cost_per_token(
                                     model=model,
@@ -1002,10 +1122,14 @@ class LLMProvider:
                                 )
                                 cost = float(prompt_cost or 0.0) + float(completion_cost or 0.0)
                             except Exception:
-                                cost = 0.0
+                                cost = None
                             self._total_tokens_in += delta_prompt
                             self._total_tokens_out += delta_completion
-                            self._total_cost += cost
+                            if cost is not None:
+                                self._total_cost += cost
+                                call_cost_total += cost
+                            else:
+                                call_cost_known = False
                             event.payload = {
                                 **dict(event.payload),
                                 "prompt_tokens": delta_prompt,
@@ -1016,6 +1140,16 @@ class LLMProvider:
                                 "estimated_cost_total": self._total_cost,
                                 "context_window": event.payload.get("context_window") or self.get_context_window(model=model),
                                 "model": model,
+                                "provider": target.provider,
+                                "usage_accounting": {
+                                    "measured": True,
+                                    "source": "provider_reported",
+                                    "input_tokens": total_prompt,
+                                    "output_tokens": total_completion,
+                                    "total_tokens": total_prompt + total_completion,
+                                    "cost_usd": call_cost_total if call_cost_known else None,
+                                    "subscription_quota": {},
+                                },
                             }
                         yield event
             else:
@@ -1041,7 +1175,8 @@ class LLMProvider:
                     )
                 usage = getattr(stream, "usage", None)
                 if usage:
-                    cost = 0.0
+                    usage_observed = True
+                    cost: float | None = None
                     prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                     completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
                     try:
@@ -1052,10 +1187,11 @@ class LLMProvider:
                         )
                         cost = float(prompt_cost or 0.0) + float(completion_cost or 0.0)
                     except Exception:
-                        cost = 0.0
+                        cost = None
                     self._total_tokens_in += prompt_tokens
                     self._total_tokens_out += completion_tokens
-                    self._total_cost += cost
+                    if cost is not None:
+                        self._total_cost += cost
                     yield RuntimeLLMEvent(
                         event_type="usage",
                         model=model,
@@ -1068,6 +1204,16 @@ class LLMProvider:
                             "estimated_cost_total": self._total_cost,
                             "context_window": self.get_context_window(model=model),
                             "model": model,
+                            "provider": target.provider,
+                            "usage_accounting": {
+                                "measured": True,
+                                "source": "provider_reported",
+                                "input_tokens": prompt_tokens,
+                                "output_tokens": completion_tokens,
+                                "total_tokens": prompt_tokens + completion_tokens,
+                                "cost_usd": cost,
+                                "subscription_quota": {},
+                            },
                         },
                     )
                 yield RuntimeLLMEvent(
@@ -1075,7 +1221,9 @@ class LLMProvider:
                     model=model,
                     payload={"finish_reason": getattr(choice, "finish_reason", "stop")},
                 )
+            self._record_call_accounting(target.provider, measured=usage_observed)
         except Exception as e:
+            self._record_call_accounting(target.provider, measured=False)
             logger.error(f"LLM stream failed: {e}")
             yield RuntimeLLMEvent(
                 event_type="error",
@@ -1089,12 +1237,18 @@ class LLMProvider:
         prompt: str,
         system: str | None = None,
         task_type: str | None = None,
+        *,
+        operations_context: Mapping[str, Any] | None = None,
     ) -> str:
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        result = await self.chat(messages, task_type=task_type)
+        result = await self.chat(
+            messages,
+            task_type=task_type,
+            operations_context=operations_context,
+        )
         return result["content"]
 
     def get_tool_definitions(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

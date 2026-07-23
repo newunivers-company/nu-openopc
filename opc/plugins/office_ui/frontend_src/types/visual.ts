@@ -119,6 +119,7 @@ export type SocketEnvelope =
   | { type: 'comms_state'; payload: Record<string, unknown> }
   | { type: 'comms_message'; payload: Record<string, unknown> }
   | { type: 'comms_state_dirty'; payload: { project_id: string; [key: string]: unknown } }
+  | { type: 'mission_control'; payload: Record<string, unknown> }
 
 export type SocketStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 

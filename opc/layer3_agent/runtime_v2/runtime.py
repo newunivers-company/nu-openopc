@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from loguru import logger
 
@@ -391,7 +391,14 @@ class NativeRuntimeV2:
             tool_call_chunks: dict[int, dict[str, Any]] = {}
             early_tool_runs: dict[int, dict[str, Any]] = {}
             try:
-                async for event in self.llm.chat_stream(messages, tools=tool_schemas):
+                async for event in self._governed_chat_stream(
+                    messages,
+                    tools=tool_schemas,
+                    task=task,
+                    runtime_session_id=runtime_session_id,
+                    conversation_turn_id=conversation_turn_id,
+                    iteration=iteration,
+                ):
                     if event.event_type == "assistant_delta":
                         delta_text = str(event.payload.get("text", "") or "")
                         if delta_text:
@@ -943,6 +950,82 @@ class NativeRuntimeV2:
             if runtime_session_id:
                 return runtime_session_id
         return f"rt_{uuid.uuid4().hex}"
+
+    def _llm_operations_context(
+        self,
+        *,
+        task: Task | None,
+        runtime_session_id: str,
+        conversation_turn_id: str = "",
+        iteration: int = 0,
+        has_tools: bool = False,
+    ) -> dict[str, Any]:
+        metadata = dict(getattr(task, "metadata", {}) or {}) if task is not None else {}
+        run_id = str(
+            metadata.get("delegation_run_id")
+            or metadata.get("run_id")
+            or getattr(task, "checkout_run_id", "")
+            or runtime_session_id
+            or ""
+        ).strip()
+        return {
+            "project_id": str(getattr(task, "project_id", "") or "default"),
+            "run_id": run_id,
+            "task_id": str(getattr(task, "id", "") or ""),
+            "session_id": str(getattr(task, "session_id", "") or ""),
+            "runtime_session_id": runtime_session_id,
+            "conversation_turn_id": conversation_turn_id,
+            "iteration": iteration + 1,
+            "caller": "runtime_v2",
+            "sandboxed_tools": has_tools,
+        }
+
+    async def _governed_chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        task: Task | None,
+        runtime_session_id: str,
+        conversation_turn_id: str,
+        iteration: int,
+    ) -> AsyncIterator[Any]:
+        context_factory = getattr(self.llm, "operations_call_context", None)
+        if not callable(context_factory):
+            async for event in self.llm.chat_stream(messages, tools=tools):
+                yield event
+            return
+        context = self._llm_operations_context(
+            task=task,
+            runtime_session_id=runtime_session_id,
+            conversation_turn_id=conversation_turn_id,
+            iteration=iteration,
+            has_tools=bool(tools),
+        )
+        with context_factory(context):
+            async for event in self.llm.chat_stream(messages, tools=tools):
+                yield event
+
+    async def _governed_chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        task: Task | None,
+        runtime_session_id: str,
+        iteration: int,
+    ) -> dict[str, Any]:
+        context_factory = getattr(self.llm, "operations_call_context", None)
+        if not callable(context_factory):
+            return await self.llm.chat(messages, tools=tools)
+        context = self._llm_operations_context(
+            task=task,
+            runtime_session_id=runtime_session_id,
+            iteration=iteration,
+            has_tools=bool(tools),
+        )
+        with context_factory(context):
+            return await self.llm.chat(messages, tools=tools)
 
     @staticmethod
     def _runtime_resume_payload(task: Task | None) -> dict[str, Any]:
@@ -1727,7 +1810,13 @@ class NativeRuntimeV2:
                 },
             )
             try:
-                response = await self.llm.chat(retry_messages, tools=tool_schemas if tool_schemas else None)
+                response = await self._governed_chat(
+                    retry_messages,
+                    tools=tool_schemas if tool_schemas else None,
+                    task=task,
+                    runtime_session_id=runtime_session_id,
+                    iteration=iteration,
+                )
                 return {
                     "messages": retry_messages,
                     "assistant_text": str(response.get("content", "") or ""),

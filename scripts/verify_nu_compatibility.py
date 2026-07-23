@@ -14,7 +14,6 @@ from typing import Any
 
 
 def verify(*, expected_llm: str, expected_resource: str) -> dict[str, Any]:
-    from nu_resource_gen_lib import evaluate_prompt as resource_evaluate_prompt
     from nu_llm_routing_lib import api as llm
     from nu_resource_gen_lib import api as resource
 
@@ -50,8 +49,9 @@ def verify(*, expected_llm: str, expected_resource: str) -> dict[str, Any]:
         failures.append(f"missing LLM stable exports: {missing_llm}")
     if missing_resource:
         failures.append(f"missing resource stable exports: {missing_resource}")
-    if not callable(resource_evaluate_prompt):
-        failures.append("missing pinned resource prompt-evaluation hook")
+    generator = resource.ResourceGenerator(record_ledger=False)
+    if not callable(getattr(generator, "evaluate_prompt", None)):
+        failures.append("missing stable ResourceGenerator.evaluate_prompt facade")
 
     report = {
         "compatible": not failures,
@@ -67,7 +67,7 @@ def verify(*, expected_llm: str, expected_resource: str) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-llm", default="0.2.1")
-    parser.add_argument("--expected-resource", default="0.2.0")
+    parser.add_argument("--expected-resource", default="0.2.1")
     args = parser.parse_args()
     report = verify(
         expected_llm=args.expected_llm,

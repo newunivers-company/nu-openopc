@@ -7,7 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from opc.core.config import DurableOperationsConfig, OperationsConfig
+from opc.core.config import (
+    DurableOperationsConfig,
+    OperationsConfig,
+    ProviderOperationsConfig,
+)
 from opc.database.store import OPCStore
 from opc.layer2_organization.secretary import SecretaryService
 from opc.layer4_tools.operations import create_operations_tools
@@ -173,6 +177,36 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Approvals 1 pending", brief)
         self.assertIn("[CRITICAL]", brief)
         self.assertIn("Recommended next actions", brief)
+
+    async def test_snapshot_surfaces_exhausted_subscription_call_quota(self) -> None:
+        await self.repository.reserve_provider_call(
+            contract_id="quota-contract",
+            request_id="quota-request",
+            project_id="default",
+            provider="codex",
+            model="subscription-model",
+            limit=1,
+            window_seconds=3600,
+        )
+        mission = MissionControlService(
+            self.repository,
+            self.kernel,
+            provider_config=ProviderOperationsConfig(
+                subscription_call_limit=1,
+                subscription_window_seconds=3600,
+                subscription_providers=["codex"],
+            ),
+        )
+
+        snapshot = await mission.snapshot(project_id="default")
+
+        self.assertEqual(snapshot.provider_call_quotas["codex"]["remaining"], 0)
+        alert = next(
+            item
+            for item in snapshot.alerts
+            if item.kind == "subscription_call_quota"
+        )
+        self.assertEqual(alert.severity, "critical")
 
     async def test_operations_tools_expose_mission_and_force_dry_run_routes(self) -> None:
         service = OperationsService(

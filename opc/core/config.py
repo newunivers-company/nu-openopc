@@ -956,6 +956,10 @@ class NUResourceGenConfig(BaseModel):
     ledger_root: str = ""
     artifact_archive_root: str = ""
     archive_live_artifacts: bool = True
+    allow_local_quality_execution: bool = True
+    local_quality_candidates: list[str] = Field(
+        default_factory=lambda: ["local_rfdetr_detection_nano"]
+    )
     max_timeout_seconds: int = Field(default=900, ge=1, le=86_400)
     max_catalog_results: int = Field(default=50, ge=1, le=200)
 
@@ -1034,6 +1038,26 @@ class StaffingOperationsConfig(BaseModel):
         return {name: value / total for name, value in values.items()}
 
 
+class ProviderOperationsConfig(BaseModel):
+    """Subscription quotas and status-only provider SLO monitoring."""
+
+    subscription_call_limit: int = Field(default=200, ge=0, le=1_000_000)
+    subscription_window_seconds: int = Field(default=86_400, ge=60, le=604_800)
+    subscription_providers: list[str] = Field(
+        default_factory=lambda: ["codex", "claude", "grok"]
+    )
+    status_canary_enabled: bool = True
+    status_canary_interval_seconds: float = Field(
+        default=300.0, ge=1.0, le=86_400.0
+    )
+    slo_min_samples: int = Field(default=3, ge=1, le=10_000)
+    slo_availability_target: float = Field(default=0.95, ge=0.0, le=1.0)
+    slo_p95_latency_target_ms: float = Field(
+        default=30_000.0, ge=1.0, le=3_600_000.0
+    )
+    canary_expected_model: str = ""
+
+
 class OperationsConfig(BaseModel):
     """Configuration for the goal-to-learning operating loop."""
 
@@ -1042,6 +1066,7 @@ class OperationsConfig(BaseModel):
     durable: DurableOperationsConfig = Field(default_factory=DurableOperationsConfig)
     learning: LearningOperationsConfig = Field(default_factory=LearningOperationsConfig)
     staffing: StaffingOperationsConfig = Field(default_factory=StaffingOperationsConfig)
+    providers: ProviderOperationsConfig = Field(default_factory=ProviderOperationsConfig)
 
 
 class SystemConfig(BaseModel):

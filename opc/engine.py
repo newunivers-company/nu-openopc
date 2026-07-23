@@ -624,6 +624,10 @@ class OPCEngine:
                 default_llm_credential_ready=default_llm_readiness["credential_ready"],
                 default_llm_transport_ready=default_llm_readiness["transport_ready"],
             )
+            self.llm.bind_operations_service(
+                self.operations,
+                project_id=self.project_id or "default",
+            )
 
         # Layer 4: Tools
         self._register_tools()
@@ -809,6 +813,7 @@ class OPCEngine:
             await self.comms_reactivation_sweeper.start()
         if self.operations is not None:
             await self.operations.start_outbox_dispatcher(self.event_bus)
+            await self.operations.start_provider_monitoring()
         self._initialized = True
         logger.info("OPC Engine initialized successfully")
         if reconciled:
@@ -13976,6 +13981,7 @@ class OPCEngine:
         if self.heartbeat_scheduler:
             await self.heartbeat_scheduler.stop()
         if self.operations:
+            await self.operations.stop_provider_monitoring()
             await self.operations.stop_outbox_dispatcher()
         self.message_bus.stop()
         if self.channel_manager:
