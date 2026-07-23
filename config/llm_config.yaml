@@ -26,6 +26,18 @@ llm:
     gpu_free_vram_mib: 0
     max_candidates: 4
     allowed_providers: []
+    # Real challenger calls stay off until an operator supplies both a durable
+    # experiment identity and a hard, restart-safe total-call ceiling.
+    background_shadow_enabled: false
+    shadow_experiment_id: ""
+    shadow_max_total_calls: 0
+    shadow_worker_count: 1
+    shadow_queue_capacity: 32
+    shadow_timeout_seconds: 30
+    shadow_shutdown_timeout_seconds: 30
+    shadow_recover_stale_after_seconds: 3600
+    # Empty => $OPC_HOME/operations/llm_shadow.sqlite3
+    shadow_event_db_path: ""
     workload_map:
       coding: coding
       quick_tasks: structured_output

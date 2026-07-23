@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 import unittest
 
+from opc.core.config import OperationsConfig, ProviderOperationsConfig
 from opc.database.store import OPCStore
 from opc.operations.canary import ProviderCanaryScheduler, ProviderCanaryService
 from opc.operations.models import (
@@ -14,6 +15,7 @@ from opc.operations.models import (
     ProviderCanaryResult,
 )
 from opc.operations.repository import OperationsRepository
+from opc.operations.service import OperationsService
 
 
 class _Broker:
@@ -34,6 +36,20 @@ class _Broker:
                 "live_allowed": False,
             },
         )
+
+
+class _ShadowLifecycleRouter:
+    def __init__(self) -> None:
+        self.started = 0
+        self.stopped = 0
+
+    def start_background_shadow(self):
+        self.started += 1
+        return {"running": True}
+
+    def stop_background_shadow(self):
+        self.stopped += 1
+        return {"running": False, "drained": True}
 
 
 class ProviderCanaryTests(unittest.IsolatedAsyncioTestCase):
@@ -111,6 +127,103 @@ class ProviderCanaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(codex["latency_target_met"])
         self.assertFalse(codex["target_met"])
 
+    async def test_slo_attainment_requires_the_configured_sample_floor(self) -> None:
+        for latency in (10.0, 12.0):
+            await self.repository.save_provider_canary_result(
+                ProviderCanaryResult(
+                    project_id="default",
+                    capability_kind=CapabilityKind.LLM,
+                    provider="codex",
+                    success=True,
+                    latency_ms=latency,
+                )
+            )
+
+        insufficient = await self.service.slo_summary(
+            project_id="default",
+            provider="codex",
+            minimum_samples=3,
+        )
+        codex = insufficient["providers"]["codex"]
+        self.assertEqual(codex["attainment_state"], "insufficient_samples")
+        self.assertFalse(codex["sample_target_met"])
+        self.assertFalse(codex["target_met"])
+        self.assertFalse(codex["promotion_ready"])
+
+        await self.repository.save_provider_canary_result(
+            ProviderCanaryResult(
+                project_id="default",
+                capability_kind=CapabilityKind.LLM,
+                provider="codex",
+                success=True,
+                latency_ms=11.0,
+            )
+        )
+        attained = await self.service.slo_summary(
+            project_id="default",
+            provider="codex",
+            minimum_samples=3,
+        )
+        codex = attained["providers"]["codex"]
+        self.assertEqual(codex["attainment_state"], "met")
+        self.assertTrue(codex["target_met"])
+        self.assertFalse(codex["trend"]["ready"])
+        self.assertFalse(codex["promotion_ready"])
+
+        for latency in (10.0, 12.0, 11.0):
+            await self.repository.save_provider_canary_result(
+                ProviderCanaryResult(
+                    project_id="default",
+                    capability_kind=CapabilityKind.LLM,
+                    provider="codex",
+                    success=True,
+                    latency_ms=latency,
+                )
+            )
+        trend_ready = await self.service.slo_summary(
+            project_id="default",
+            provider="codex",
+            minimum_samples=3,
+            trend_window_samples=3,
+        )
+        codex = trend_ready["providers"]["codex"]
+        self.assertTrue(codex["trend"]["ready"])
+        self.assertEqual(codex["trend"]["state"], "stable")
+        self.assertTrue(codex["promotion_ready"])
+
+    async def test_slo_trend_detects_a_degrading_recent_window(self) -> None:
+        # Rows are returned newest first, so persist the healthy prior window
+        # before the degraded current window.
+        for success, latency in (
+            (True, 10.0),
+            (True, 11.0),
+            (True, 12.0),
+            (False, 80.0),
+            (False, 90.0),
+            (False, 100.0),
+        ):
+            await self.repository.save_provider_canary_result(
+                ProviderCanaryResult(
+                    project_id="default",
+                    capability_kind=CapabilityKind.LLM,
+                    provider="codex",
+                    success=success,
+                    latency_ms=latency,
+                )
+            )
+
+        summary = await self.service.slo_summary(
+            project_id="default",
+            provider="codex",
+            minimum_samples=3,
+            trend_window_samples=3,
+        )
+
+        codex = summary["providers"]["codex"]
+        self.assertTrue(codex["trend"]["ready"])
+        self.assertEqual(codex["trend"]["state"], "degrading")
+        self.assertFalse(codex["promotion_ready"])
+
     async def test_periodic_scheduler_runs_status_only_canary_and_stops(self) -> None:
         scheduler = ProviderCanaryScheduler(
             self.service,
@@ -133,6 +246,23 @@ class ProviderCanaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(scheduler.running)
         self.assertEqual(scheduler.last_result.mode, "status")
         self.assertTrue(scheduler.last_slo["providers"]["ollama-local"]["target_met"])
+
+    async def test_provider_monitoring_owns_background_shadow_lifecycle(self) -> None:
+        router = _ShadowLifecycleRouter()
+        operations = OperationsService(
+            self.store,
+            OperationsConfig(
+                providers=ProviderOperationsConfig(status_canary_enabled=False)
+            ),
+            llm_router=router,
+        )
+
+        await operations.start_provider_monitoring()
+        self.assertEqual(router.started, 1)
+        self.assertFalse(operations.canary_scheduler.running)
+
+        await operations.stop_provider_monitoring()
+        self.assertEqual(router.stopped, 1)
 
 
 if __name__ == "__main__":

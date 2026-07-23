@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import json
+import threading
+import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -47,6 +50,37 @@ class _FakeNativeProvider(_FakeSubscriptionProvider):
 
 
 _FakeNativeProvider.__module__ = "nu_llm_routing_lib.providers.ollama"
+
+
+class _ExperimentSubscriptionProvider:
+    def __init__(
+        self,
+        name: str,
+        *,
+        entered: threading.Event | None = None,
+        release: threading.Event | None = None,
+    ) -> None:
+        self.name = name
+        self.model = f"{name}-model"
+        self.entered = entered
+        self.release = release
+
+    def status(self):
+        from nu_llm_routing_lib.api import ProviderStatus
+
+        return ProviderStatus(self.name, True, "subscription=test")
+
+    def chat(self, request):
+        from nu_llm_routing_lib.api import ChatResponse
+
+        if self.entered is not None:
+            self.entered.set()
+        if self.release is not None:
+            self.release.wait(timeout=5)
+        return ChatResponse(f"{self.name}-ok", self.name, self.model)
+
+
+_ExperimentSubscriptionProvider.__module__ = "nu_llm_routing_lib.providers.claude_cli"
 
 
 class _FakeRouter:
@@ -188,6 +222,108 @@ class NULlmRoutingBridgeTests(unittest.TestCase):
         self.assertEqual(result["metadata"]["gpu_free_vram_mib"], 0)
         self.assertEqual(result["provider_checks"]["routed"]["available"], True)
         self.assertNotIn("source_manifest", result["benchmark_ranking"])
+
+    def test_background_shadow_is_durable_and_off_the_serving_latency_path(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        from nu_llm_routing_lib.api import Router
+
+        entered, release = threading.Event(), threading.Event()
+        served = _ExperimentSubscriptionProvider("served")
+        candidate = _ExperimentSubscriptionProvider(
+            "candidate",
+            entered=entered,
+            release=release,
+        )
+        router = Router(
+            [served, candidate],
+            route_order=["served", "candidate"],
+            route_profiles=[{
+                "id": "structured",
+                "workload": "structured_output",
+                "route_order": ["served", "candidate"],
+                "benchmark_routing": True,
+                "benchmark_categories": ["structured_output"],
+            }],
+            benchmark_routing={
+                "quality_floor": 0.8,
+                "category_scores": {
+                    "structured_output": {
+                        "served": {
+                            "quality": 0.95,
+                            "pass_rate": 1.0,
+                            "completion_rate": 1.0,
+                            "sample_count": 5,
+                        }
+                    }
+                },
+            },
+            shadow_routing={
+                "enabled": True,
+                "sample_rate": 1.0,
+                "max_candidates": 1,
+            },
+        )
+        with TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            config_path = root / "router.json"
+            config_path.write_text(json.dumps({}), encoding="utf-8")
+            bridge = NULlmRoutingBridge(
+                NULlmRoutingConfig(
+                    enabled=True,
+                    gpu_free_vram_mib=0,
+                    background_shadow_enabled=True,
+                    shadow_experiment_id="openopc-test-v1",
+                    shadow_max_total_calls=1,
+                    shadow_shutdown_timeout_seconds=1,
+                ),
+                opc_home=root,
+            )
+            bridge._router = router
+            bridge._load_attempted = True
+            bridge._config_path = config_path
+
+            started_status = bridge.start_background_shadow()
+            target = bridge.targets(task_type="quick_tasks", has_tools=False)[0]
+            started = time.monotonic()
+            response = bridge.execute_text_target(
+                target,
+                messages=[{"role": "user", "content": "return json"}],
+                temperature=0.0,
+                max_tokens=32,
+                timeout_seconds=5,
+            )
+
+            self.assertTrue(started_status["running"])
+            self.assertEqual(response.content, "served-ok")
+            self.assertLess(time.monotonic() - started, 0.25)
+            self.assertTrue(entered.wait(timeout=1))
+            live_status = bridge.shadow_status()
+            self.assertTrue(live_status["last_submission"]["accepted"])
+            self.assertTrue(Path(live_status["event_db_path"]).is_file())
+
+            release.set()
+            deadline = time.monotonic() + 2
+            while bridge.shadow_status().get("inflight", 0) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            stopped = bridge.stop_background_shadow()
+            self.assertFalse(stopped["running"])
+            self.assertTrue(stopped["last_shutdown"]["drained"])
+            self.assertEqual(stopped["last_shutdown"]["budget"]["spent_calls"], 1)
+
+    def test_background_shadow_requires_explicit_identity_and_budget(self) -> None:
+        bridge = NULlmRoutingBridge(
+            NULlmRoutingConfig(
+                enabled=True,
+                background_shadow_enabled=True,
+                fail_open=True,
+            )
+        )
+
+        status = bridge.start_background_shadow()
+
+        self.assertFalse(status["running"])
+        self.assertIn("shadow_experiment_id", status["error"])
 
 
 class NULlmProviderIntegrationTests(unittest.IsolatedAsyncioTestCase):

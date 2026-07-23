@@ -78,6 +78,7 @@ system:
       status_canary_enabled: true
       status_canary_interval_seconds: 300
       slo_min_samples: 3
+      slo_trend_window_samples: 3
       slo_availability_target: 0.95
       slo_p95_latency_target_ms: 30000
       canary_expected_model: ''

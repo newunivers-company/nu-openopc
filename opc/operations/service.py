@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,7 @@ class OperationsService:
         default_llm_transport_ready: bool = False,
     ) -> None:
         self.config = config or OperationsConfig()
+        self.llm_router = llm_router
         self.project_id = str(getattr(store, "project_id", "") or "default")
         self.repository = OperationsRepository(store)
         self.evaluator = OutcomeEvaluator(self.repository, self.config.evaluation)
@@ -77,6 +79,10 @@ class OperationsService:
             availability_target=self.config.providers.slo_availability_target,
             p95_latency_target_ms=(
                 self.config.providers.slo_p95_latency_target_ms
+            ),
+            minimum_samples=self.config.providers.slo_min_samples,
+            trend_window_samples=(
+                self.config.providers.slo_trend_window_samples
             ),
             project_id=self.project_id,
         )
@@ -261,11 +267,17 @@ class OperationsService:
             await self.outbox_dispatcher.stop()
 
     async def start_provider_monitoring(self) -> None:
+        start_shadow = getattr(self.llm_router, "start_background_shadow", None)
+        if callable(start_shadow):
+            await asyncio.to_thread(start_shadow)
         if self.config.providers.status_canary_enabled:
             await self.canary_scheduler.start()
 
     async def stop_provider_monitoring(self) -> None:
         await self.canary_scheduler.stop()
+        stop_shadow = getattr(self.llm_router, "stop_background_shadow", None)
+        if callable(stop_shadow):
+            await asyncio.to_thread(stop_shadow)
 
 
 def _resource_approval_issuer_from_environment(

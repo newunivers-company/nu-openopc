@@ -459,6 +459,10 @@ def register_operations_cli(app: typer.Typer) -> None:
     def capability_slo(
         provider: Optional[str] = typer.Option(None, "--provider"),
         limit: int = typer.Option(100, "--limit", min=1, max=5000),
+        minimum_samples: int = typer.Option(3, "--minimum-samples", min=1, max=10_000),
+        trend_window_samples: int = typer.Option(
+            3, "--trend-window-samples", min=1, max=10_000
+        ),
         availability_target: float = typer.Option(0.95, "--availability-target", min=0, max=1),
         p95_latency_target_ms: float = typer.Option(
             30_000.0, "--p95-latency-target-ms", min=1
@@ -472,6 +476,8 @@ def register_operations_cli(app: typer.Typer) -> None:
                     project_id=project,
                     provider=provider,
                     limit=limit,
+                    minimum_samples=minimum_samples,
+                    trend_window_samples=trend_window_samples,
                     availability_target=availability_target,
                     p95_latency_target_ms=p95_latency_target_ms,
                 ),

@@ -12,6 +12,74 @@ from opc.operations.models import CapabilityRequest, ProviderCanaryResult
 from opc.operations.repository import OperationsRepository
 
 
+def summarize_provider_slo(
+    rows: list[ProviderCanaryResult],
+    *,
+    availability_target: float = 0.95,
+    p95_latency_target_ms: float = 30_000.0,
+    minimum_samples: int = 1,
+    trend_window_samples: int = 3,
+) -> dict[str, dict[str, Any]]:
+    """Build an attainment and trend gate from newest-first canary rows."""
+
+    sample_target = max(1, int(minimum_samples))
+    trend_window = max(1, int(trend_window_samples))
+    grouped: dict[str, list[ProviderCanaryResult]] = defaultdict(list)
+    for row in rows:
+        grouped[row.provider].append(row)
+    summaries: dict[str, dict[str, Any]] = {}
+    for name, values in sorted(grouped.items()):
+        latencies = sorted(float(item.latency_ms) for item in values)
+        successes = sum(bool(item.success) for item in values)
+        consecutive_failures = 0
+        for item in values:
+            if item.success:
+                break
+            consecutive_failures += 1
+        availability = successes / len(values)
+        p95_latency = round(_percentile(latencies, 0.95), 3)
+        availability_met = availability >= availability_target
+        latency_met = p95_latency <= p95_latency_target_ms
+        sample_target_met = len(values) >= sample_target
+        attainment_state = (
+            "insufficient_samples"
+            if not sample_target_met
+            else "met"
+            if availability_met and latency_met
+            else "missed"
+        )
+        trend = _trend_summary(values, window_samples=trend_window)
+        model_drift_count = sum(bool(item.model_drift) for item in values)
+        target_met = attainment_state == "met"
+        summaries[name] = {
+            "samples": len(values),
+            "sample_target": sample_target,
+            "sample_target_met": sample_target_met,
+            "successes": successes,
+            "availability": round(availability, 6),
+            "availability_target": availability_target,
+            "p95_latency_target_ms": p95_latency_target_ms,
+            "availability_target_met": availability_met,
+            "latency_target_met": latency_met,
+            "attainment_state": attainment_state,
+            "target_met": target_met,
+            "promotion_ready": (
+                target_met
+                and model_drift_count == 0
+                and trend["ready"]
+                and trend["state"] != "degrading"
+            ),
+            "p50_latency_ms": round(_percentile(latencies, 0.50), 3),
+            "p95_latency_ms": p95_latency,
+            "consecutive_failures": consecutive_failures,
+            "model_drift_count": model_drift_count,
+            "last_model": values[0].model,
+            "last_error_category": values[0].error_category,
+            "trend": trend,
+        }
+    return summaries
+
+
 class ProviderCanaryService:
     def __init__(
         self,
@@ -138,44 +206,21 @@ class ProviderCanaryService:
         limit: int = 100,
         availability_target: float = 0.95,
         p95_latency_target_ms: float = 30_000.0,
+        minimum_samples: int = 1,
+        trend_window_samples: int = 3,
     ) -> dict[str, Any]:
         rows = await self.repository.list_provider_canary_results(
             project_id=project_id,
             provider=provider,
             limit=limit,
         )
-        grouped: dict[str, list[ProviderCanaryResult]] = defaultdict(list)
-        for row in rows:
-            grouped[row.provider].append(row)
-        summaries: dict[str, dict[str, Any]] = {}
-        for name, values in sorted(grouped.items()):
-            latencies = sorted(item.latency_ms for item in values)
-            successes = sum(item.success for item in values)
-            consecutive_failures = 0
-            for item in values:  # repository order is newest first
-                if item.success:
-                    break
-                consecutive_failures += 1
-            availability = successes / len(values)
-            p95_latency = round(_percentile(latencies, 0.95), 3)
-            availability_met = availability >= availability_target
-            latency_met = p95_latency <= p95_latency_target_ms
-            summaries[name] = {
-                "samples": len(values),
-                "successes": successes,
-                "availability": round(availability, 6),
-                "availability_target": availability_target,
-                "p95_latency_target_ms": p95_latency_target_ms,
-                "availability_target_met": availability_met,
-                "latency_target_met": latency_met,
-                "target_met": availability_met and latency_met,
-                "p50_latency_ms": round(_percentile(latencies, 0.50), 3),
-                "p95_latency_ms": p95_latency,
-                "consecutive_failures": consecutive_failures,
-                "model_drift_count": sum(item.model_drift for item in values),
-                "last_model": values[0].model,
-                "last_error_category": values[0].error_category,
-            }
+        summaries = summarize_provider_slo(
+            rows,
+            availability_target=availability_target,
+            p95_latency_target_ms=p95_latency_target_ms,
+            minimum_samples=minimum_samples,
+            trend_window_samples=trend_window_samples,
+        )
         return {
             "project_id": project_id,
             "availability_target": availability_target,
@@ -197,6 +242,8 @@ class ProviderCanaryScheduler:
         expected_model: str = "",
         availability_target: float = 0.95,
         p95_latency_target_ms: float = 30_000.0,
+        minimum_samples: int = 1,
+        trend_window_samples: int = 3,
         project_id: str = "default",
     ) -> None:
         self.service = service
@@ -205,6 +252,8 @@ class ProviderCanaryScheduler:
         self.expected_model = str(expected_model or "")
         self.availability_target = float(availability_target)
         self.p95_latency_target_ms = max(1.0, float(p95_latency_target_ms))
+        self.minimum_samples = max(1, int(minimum_samples))
+        self.trend_window_samples = max(1, int(trend_window_samples))
         self.project_id = str(project_id or "default")
         self.last_result: ProviderCanaryResult | None = None
         self.last_slo: dict[str, Any] = {}
@@ -231,6 +280,8 @@ class ProviderCanaryScheduler:
                 project_id=self.project_id,
                 availability_target=self.availability_target,
                 p95_latency_target_ms=self.p95_latency_target_ms,
+                minimum_samples=self.minimum_samples,
+                trend_window_samples=self.trend_window_samples,
             )
             self.last_error = ""
             self.run_count += 1
@@ -275,6 +326,49 @@ def _percentile(values: list[float], fraction: float) -> float:
         return 0.0
     index = max(0, min(len(values) - 1, int((len(values) - 1) * fraction + 0.999999)))
     return float(values[index])
+
+
+def _trend_summary(
+    values: list[ProviderCanaryResult],
+    *,
+    window_samples: int,
+) -> dict[str, Any]:
+    current = values[:window_samples]
+    previous = values[window_samples : window_samples * 2]
+    if len(current) < window_samples or len(previous) < window_samples:
+        return {
+            "ready": False,
+            "state": "insufficient_samples",
+            "window_samples": window_samples,
+        }
+
+    def metrics(window: list[ProviderCanaryResult]) -> tuple[float, float]:
+        availability = sum(bool(item.success) for item in window) / len(window)
+        latency = _percentile(sorted(float(item.latency_ms) for item in window), 0.95)
+        return availability, latency
+
+    current_availability, current_p95 = metrics(current)
+    previous_availability, previous_p95 = metrics(previous)
+    availability_delta = current_availability - previous_availability
+    latency_delta = current_p95 - previous_p95
+    meaningful_latency = max(10.0, previous_p95 * 0.10)
+    if availability_delta < -0.02 or latency_delta > meaningful_latency:
+        state = "degrading"
+    elif availability_delta > 0.02 or latency_delta < -meaningful_latency:
+        state = "improving"
+    else:
+        state = "stable"
+    return {
+        "ready": True,
+        "state": state,
+        "window_samples": window_samples,
+        "current_availability": round(current_availability, 6),
+        "previous_availability": round(previous_availability, 6),
+        "availability_delta": round(availability_delta, 6),
+        "current_p95_latency_ms": round(current_p95, 3),
+        "previous_p95_latency_ms": round(previous_p95, 3),
+        "p95_latency_delta_ms": round(latency_delta, 3),
+    }
 
 
 def _error_category(error: str) -> str:

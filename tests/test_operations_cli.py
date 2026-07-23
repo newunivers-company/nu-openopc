@@ -287,6 +287,47 @@ class OperationsCliTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("does not match CLI project", str(result.exception))
 
+    def test_capability_slo_cli_enforces_explicit_sample_floor(self) -> None:
+        request = self._write_json(
+            "canary.json",
+            {
+                "capability_kind": "llm",
+                "task_type": "dialogue",
+                "project_id": "demo",
+                "allow_live": False,
+            },
+        )
+        for _ in range(2):
+            self._invoke([
+                "ops",
+                "capability",
+                "canary",
+                "--request",
+                str(request),
+                "--project",
+                "demo",
+            ])
+
+        result = self._invoke([
+            "ops",
+            "capability",
+            "slo",
+            "--provider",
+            "openopc_config",
+            "--minimum-samples",
+            "3",
+            "--trend-window-samples",
+            "2",
+            "--project",
+            "demo",
+        ])
+
+        slo = json.loads(result.output)["providers"]["openopc_config"]
+        self.assertEqual(slo["samples"], 2)
+        self.assertEqual(slo["sample_target"], 3)
+        self.assertEqual(slo["attainment_state"], "insufficient_samples")
+        self.assertFalse(slo["target_met"])
+
 
 if __name__ == "__main__":
     unittest.main()

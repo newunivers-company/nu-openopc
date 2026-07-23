@@ -66,8 +66,8 @@ def verify(*, expected_llm: str, expected_resource: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-llm", default="0.2.1")
-    parser.add_argument("--expected-resource", default="0.2.1")
+    parser.add_argument("--expected-llm", default="0.2.2")
+    parser.add_argument("--expected-resource", default="0.2.2")
     args = parser.parse_args()
     report = verify(
         expected_llm=args.expected_llm,

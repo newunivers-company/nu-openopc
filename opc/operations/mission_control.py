@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from statistics import fmean
 from typing import Any
 
+from opc.operations.canary import summarize_provider_slo
 from opc.operations.durable import DurableRunKernel
 from opc.operations.models import (
     GateStatus,
@@ -94,10 +95,15 @@ class MissionControlService:
         minimum_slo_samples = int(
             getattr(self.provider_config, "slo_min_samples", 3)
         )
-        provider_slo = _provider_slo_summary(
+        trend_window_samples = int(
+            getattr(self.provider_config, "slo_trend_window_samples", 3)
+        )
+        provider_slo = summarize_provider_slo(
             canary_results,
             availability_target=availability_target,
             p95_latency_target_ms=latency_target,
+            minimum_samples=minimum_slo_samples,
+            trend_window_samples=trend_window_samples,
         )
         quota_limit = int(
             getattr(self.provider_config, "subscription_call_limit", 0)
@@ -299,7 +305,7 @@ class MissionControlService:
                     )
                 )
         for provider, slo in provider_slo.items():
-            if slo["samples"] >= minimum_slo_samples and not slo["target_met"]:
+            if slo["attainment_state"] == "missed":
                 alerts.append(
                     MissionAlert(
                         severity="high",
@@ -434,36 +440,6 @@ def _recommendations(
     if pending_outbox_count and not any(item.kind in {"dead_letter", "outbox_backlog"} for item in alerts):
         recommendations.append("Keep the outbox dispatcher running until the pending delivery queue drains.")
     return list(dict.fromkeys(recommendations))[:12]
-
-
-def _provider_slo_summary(
-    rows: list[Any],
-    *,
-    availability_target: float = 0.95,
-    p95_latency_target_ms: float = 30_000.0,
-) -> dict[str, dict[str, Any]]:
-    grouped: dict[str, list[Any]] = {}
-    for row in rows:
-        grouped.setdefault(row.provider, []).append(row)
-    result: dict[str, dict[str, Any]] = {}
-    for provider, values in sorted(grouped.items()):
-        latencies = sorted(float(item.latency_ms) for item in values)
-        percentile_index = max(0, min(len(latencies) - 1, int(len(latencies) * 0.95)))
-        availability = sum(bool(item.success) for item in values) / len(values)
-        p95_latency = latencies[percentile_index]
-        result[provider] = {
-            "samples": len(values),
-            "availability": availability,
-            "availability_target": availability_target,
-            "p95_latency_ms": p95_latency,
-            "p95_latency_target_ms": p95_latency_target_ms,
-            "target_met": (
-                availability >= availability_target
-                and p95_latency <= p95_latency_target_ms
-            ),
-            "model_drift_count": sum(bool(item.model_drift) for item in values),
-        }
-    return result
 
 
 def _provider_family_match(provider: str, family: str) -> bool:

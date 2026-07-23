@@ -276,6 +276,21 @@ class NULlmRoutingConfig(BaseModel):
     gpu_free_vram_mib: int = Field(default=0, ge=0)
     max_candidates: int = Field(default=4, ge=1, le=20)
     allowed_providers: list[str] = Field(default_factory=list)
+    # Real challenger calls are separately and explicitly authorized. The
+    # experiment ID binds a durable, restart-safe budget in SQLite.
+    background_shadow_enabled: bool = False
+    shadow_experiment_id: str = ""
+    shadow_max_total_calls: int = Field(default=0, ge=0, le=1_000_000)
+    shadow_worker_count: int = Field(default=1, ge=1, le=8)
+    shadow_queue_capacity: int = Field(default=32, ge=1, le=10_000)
+    shadow_timeout_seconds: float = Field(default=30.0, gt=0.0, le=600.0)
+    shadow_shutdown_timeout_seconds: float = Field(
+        default=30.0, ge=0.0, le=600.0
+    )
+    shadow_recover_stale_after_seconds: float = Field(
+        default=3600.0, ge=0.0, le=604_800.0
+    )
+    shadow_event_db_path: str = ""
     workload_map: dict[str, str] = Field(default_factory=lambda: {
         "coding": "coding",
         "quick_tasks": "structured_output",
@@ -1051,6 +1066,7 @@ class ProviderOperationsConfig(BaseModel):
         default=300.0, ge=1.0, le=86_400.0
     )
     slo_min_samples: int = Field(default=3, ge=1, le=10_000)
+    slo_trend_window_samples: int = Field(default=3, ge=1, le=10_000)
     slo_availability_target: float = Field(default=0.95, ge=0.0, le=1.0)
     slo_p95_latency_target_ms: float = Field(
         default=30_000.0, ge=1.0, le=3_600_000.0

@@ -230,7 +230,26 @@ Because unknown usage cannot enforce a token or dollar ceiling, subscription rou
 
 ### Bounded shadow experiments
 
-The linked NU router can collect a served outcome and a non-serving challenger under one content-free decision record, but execution requires both an event database and an explicit whole-process call budget. OpenOPC does not automatically enable this path. Current synchronous `chat_with_shadow` collection finishes the challenger before the call returns, so it is suitable for a bounded operator experiment but not the latency-sensitive user-serving path. Production adoption requires background execution plus a durable budget and shutdown flush; until then, keep `max_total_calls` explicit and treat challenger latency as experiment overhead.
+The linked NU router can collect a served outcome and a non-serving challenger under one content-free decision record without adding challenger latency to the user response. It remains off by default and starts only when an operator supplies a durable experiment identity and a hard total-call ceiling:
+
+```yaml
+llm:
+  nu_routing:
+    background_shadow_enabled: true
+    shadow_experiment_id: "openopc-dialogue-2026q3-v1"
+    shadow_max_total_calls: 30
+    shadow_worker_count: 1
+    shadow_queue_capacity: 8
+    shadow_timeout_seconds: 30
+    shadow_shutdown_timeout_seconds: 30
+    shadow_recover_stale_after_seconds: 3600
+    # Empty uses $OPC_HOME/operations/llm_shadow.sqlite3.
+    shadow_event_db_path: ""
+```
+
+`OperationsService.start_provider_monitoring()` starts the bounded worker before the canary scheduler. A served terminal outcome crosses the SQLite durability boundary before the challenger enters the queue. Budget reservation uses the same private SQLite database and is atomic across processes and restarts; failed, cancelled, and abandoned reservations still consume the immutable experiment ceiling. `stop_provider_monitoring()` stops canaries first and then drains shadow work up to `shadow_shutdown_timeout_seconds`. Queued calls are cancelled on timeout, while an in-flight provider transport may finish under its already-bounded request timeout. `NULlmRoutingBridge.shadow_status()` exposes queue, in-flight, completion, budget, stale-recovery, last-submission, and last-shutdown evidence.
+
+The integration applies only to native/subscription text transports. Tool calls, streaming, and OpenAI-compatible/LiteLLM execution retain their existing paths. Queue saturation or shadow setup failure never retries through an unapproved challenger: with the default `fail_open=true`, only shadow collection is skipped and the served result is preserved. Set `fail_open=false` when a missing experiment contract should prevent service startup.
 
 ## Provider canaries and SLOs
 
@@ -239,10 +258,11 @@ Status canaries persist provider, model, readiness, latency, model drift, and no
 ```bash
 uv run opc ops capability canary --request capability-request.json \
   --expected-model gpt-5.6-sol --project demo
-uv run opc ops capability slo --availability-target 0.95 --project demo
+uv run opc ops capability slo --availability-target 0.95 \
+  --minimum-samples 3 --trend-window-samples 3 --project demo
 ```
 
-SLO summaries report sample count, availability, p50/p95 latency, consecutive failures, and model-drift count by provider. Mission Control raises an alert only after the configured minimum sample count and evaluates availability and p95 latency as separate targets. When the engine is running, a status-only scheduler samples provider readiness at `status_canary_interval_seconds`; it never generates content. Live canaries exist at the service layer only and require both `allow_live=true`, explicit confirmation, and an injected executor; the CLI intentionally exposes only the no-generation canary.
+SLO summaries report sample count, sample-floor state, availability, p50/p95 latency, consecutive failures, model drift, and current-versus-previous window trends by provider. `attainment_state` is `insufficient_samples`, `met`, or `missed`; a provider is `promotion_ready` only after the sample floor, both SLO targets, no model drift, and a non-degrading trend all pass. Trend readiness requires two complete windows, so `trend_window_samples: 3` needs at least six samples even when the SLO sample floor is three. Mission Control does not turn an insufficient sample into an outage alert, but exposes it as pending evidence. When the engine is running, a status-only scheduler samples provider readiness at `status_canary_interval_seconds`; it never generates content. Live canaries exist at the service layer only and require both `allow_live=true`, explicit confirmation, and an injected executor; the CLI intentionally exposes only the no-generation canary.
 
 ## Approval-gated resource pipeline
 
