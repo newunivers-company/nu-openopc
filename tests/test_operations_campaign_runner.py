@@ -467,3 +467,105 @@ class ExecOutputRobustnessTests(unittest.TestCase):
         verdict = evaluate_exec_output(0, stdout)
         self.assertTrue(verdict["success"])
         self.assertEqual(verdict["response"], "# Long deliverable")
+
+
+class CheckpointProtocolTests(unittest.IsolatedAsyncioTestCase):
+    def test_classify_response_kinds(self) -> None:
+        from opc.operations.campaign_runner import classify_response
+
+        self.assertEqual(classify_response("# Real deliverable"), "deliverable")
+        self.assertEqual(
+            classify_response(
+                "Company mode has a pending manual staffing selection before execution."
+            ),
+            "staffing_checkpoint",
+        )
+        self.assertEqual(
+            classify_response(
+                "Tool execution blocked by autonomy policy: ... Awaiting user input."
+            ),
+            "blocked",
+        )
+
+    async def test_staffing_checkpoint_gets_scripted_continuation(self) -> None:
+        from opc.operations.campaign_runner import (
+            SubprocessExecutorConfig,
+            SubprocessSlotExecutor,
+        )
+
+        executor = SubprocessSlotExecutor(
+            project_id="benchmark-pilot", config=SubprocessExecutorConfig()
+        )
+        outputs = [
+            json.dumps(
+                {
+                    "ok": True,
+                    "task_id": "t-company",
+                    "session_id": "s1",
+                    "task_status": "waiting",
+                    "response": "Company mode has a pending manual staffing "
+                    "selection before execution. Reply `approve` to use these defaults",
+                }
+            ),
+            json.dumps(
+                {
+                    "ok": True,
+                    "task_status": "done",
+                    "response": "# Final integrated deliverable",
+                }
+            ),
+        ]
+        spawned: list[list[str]] = []
+
+        async def fake_spawn(command: list[str]) -> dict[str, Any]:
+            spawned.append(command)
+            return {
+                "command": command,
+                "timed_out": False,
+                "exit_code": 0,
+                "stdout": outputs[len(spawned) - 1],
+                "stderr_tail": "",
+            }
+
+        executor._spawn = fake_spawn  # type: ignore[method-assign]
+        result = await executor({"mode": "company", "prompt": "Build it"}, Path("."))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output_text, "# Final integrated deliverable")
+        self.assertEqual(result.metadata["continuations"], 1)
+        self.assertEqual(spawned[1][:3], ["opc", "session", "continue"])
+        self.assertIn("auto recruit", spawned[1])
+        self.assertIn("t-company", spawned[1])
+
+    async def test_blocked_response_is_a_failure_not_a_deliverable(self) -> None:
+        from opc.operations.campaign_runner import (
+            SubprocessExecutorConfig,
+            SubprocessSlotExecutor,
+        )
+
+        executor = SubprocessSlotExecutor(
+            project_id="benchmark-pilot", config=SubprocessExecutorConfig()
+        )
+
+        async def fake_spawn(command: list[str]) -> dict[str, Any]:
+            return {
+                "command": command,
+                "timed_out": False,
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "ok": True,
+                        "task_id": "t1",
+                        "task_status": "done",
+                        "response": "Tool execution blocked by autonomy policy: "
+                        "first use requires approval. | Awaiting user input.",
+                    }
+                ),
+                "stderr_tail": "",
+            }
+
+        executor._spawn = fake_spawn  # type: ignore[method-assign]
+        result = await executor({"mode": "task", "prompt": "Fix it"}, Path("."))
+        self.assertFalse(result.success)
+        self.assertIn("blocked response", result.metadata["failure_reason"])
+        self.assertEqual(result.output_text, "")

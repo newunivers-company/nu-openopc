@@ -405,13 +405,43 @@ def write_result_skeleton(
     return path
 
 
+STAFFING_CHECKPOINT_MARKERS = (
+    "pending manual staffing selection",
+    "Reply `approve` to use these defaults",
+)
+BLOCKED_RESPONSE_MARKERS = (
+    "Awaiting user input",
+    "Tool execution blocked by autonomy policy",
+)
+
+
+def classify_response(response: str) -> str:
+    """Classify an exec response: deliverable, staffing_checkpoint, or blocked.
+
+    Headless runs can end "successfully" while actually returning an approval
+    prompt instead of work. Staffing checkpoints get a scripted protocol reply
+    (identical for every company slot, so it cannot bias the comparison);
+    blocked responses are failures, never deliverables.
+    """
+
+    text = str(response or "")
+    if any(marker in text for marker in STAFFING_CHECKPOINT_MARKERS):
+        return "staffing_checkpoint"
+    if any(marker in text for marker in BLOCKED_RESPONSE_MARKERS):
+        return "blocked"
+    return "deliverable"
+
+
 @dataclass
 class SubprocessExecutorConfig:
-    """Command template for driving slots through the real ``opc exec`` CLI."""
+    """Command template for driving slots through the real ``opc`` CLI."""
 
     base_command: tuple[str, ...] = ("opc", "exec")
     task_args: tuple[str, ...] = ("--mode", "task", "--agent", "native")
     company_args: tuple[str, ...] = ("--mode", "company", "--company-profile", "corporate")
+    continue_command: tuple[str, ...] = ("opc", "session", "continue")
+    checkpoint_reply: str = "auto recruit"
+    max_continuations: int = 2
     timeout_seconds: float = 3600.0
 
 
@@ -510,6 +540,60 @@ class SubprocessSlotExecutor:
         command = build_slot_command(
             slot, project_id=self.project_id, config=self.config
         )
+        spawn = await self._spawn(command)
+        if spawn.get("timed_out"):
+            return SlotExecution(success=False, metadata=spawn)
+        verdict = evaluate_exec_output(spawn["exit_code"], spawn["stdout"])
+        continuations = 0
+        task_id = str(verdict["task_id"])
+        # A "successful" exec that returns a staffing checkpoint is not a
+        # deliverable yet — answer it with the scripted protocol reply and
+        # keep the run's real result instead.
+        while (
+            verdict["success"]
+            and classify_response(verdict["response"]) == "staffing_checkpoint"
+            and continuations < self.config.max_continuations
+            and task_id
+        ):
+            continuations += 1
+            continue_command = [
+                *self.config.continue_command,
+                task_id,
+                self.config.checkpoint_reply,
+                "-p",
+                self.project_id,
+                "--json",
+            ]
+            spawn = await self._spawn(continue_command)
+            if spawn.get("timed_out"):
+                return SlotExecution(
+                    success=False,
+                    metadata={**spawn, "continuations": continuations},
+                )
+            verdict = evaluate_exec_output(spawn["exit_code"], spawn["stdout"])
+            verdict["task_id"] = verdict["task_id"] or task_id
+        success = bool(verdict["success"])
+        reason = str(verdict["reason"])
+        kind = classify_response(verdict["response"]) if success else "failure"
+        if success and kind != "deliverable":
+            success = False
+            reason = f"run ended with a {kind} response, not a deliverable"
+        return SlotExecution(
+            success=success,
+            output_text=str(verdict["response"]) if success else "",
+            metadata={
+                "command": command,
+                "exit_code": spawn["exit_code"],
+                "task_id": verdict["task_id"] or task_id,
+                "session_id": verdict["session_id"],
+                "task_status": verdict["task_status"],
+                "failure_reason": reason,
+                "continuations": continuations,
+                "stderr_tail": spawn["stderr_tail"],
+            },
+        )
+
+    async def _spawn(self, command: list[str]) -> dict[str, Any]:
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -522,29 +606,21 @@ class SubprocessSlotExecutor:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            return SlotExecution(
-                success=False,
-                metadata={
-                    "command": command,
-                    "error": f"timed out after {self.config.timeout_seconds}s",
-                },
-            )
-        verdict = evaluate_exec_output(
-            process.returncode, stdout.decode("utf-8", errors="replace")
-        )
-        return SlotExecution(
-            success=bool(verdict["success"]),
-            output_text=str(verdict["response"]),
-            metadata={
+            return {
                 "command": command,
-                "exit_code": process.returncode,
-                "task_id": verdict["task_id"],
-                "session_id": verdict["session_id"],
-                "task_status": verdict["task_status"],
-                "failure_reason": verdict["reason"],
-                "stderr_tail": stderr.decode("utf-8", errors="replace")[-2000:],
-            },
-        )
+                "timed_out": True,
+                "exit_code": None,
+                "stdout": "",
+                "stderr_tail": "",
+                "error": f"timed out after {self.config.timeout_seconds}s",
+            }
+        return {
+            "command": command,
+            "timed_out": False,
+            "exit_code": process.returncode,
+            "stdout": stdout.decode("utf-8", errors="replace"),
+            "stderr_tail": stderr.decode("utf-8", errors="replace")[-2000:],
+        }
 
 
 async def pending_judgment_slots(
