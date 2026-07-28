@@ -510,6 +510,15 @@ class CheckpointProtocolTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(
                 {
                     "ok": True,
+                    "task_status": "waiting",
+                    "response": "Company mode has a pending staffing decision "
+                    "before execution. Reply `1` or `approve` / `continue` to "
+                    "accept these hires and start execution.",
+                }
+            ),
+            json.dumps(
+                {
+                    "ok": True,
                     "task_status": "done",
                     "response": "# Final integrated deliverable",
                 }
@@ -532,9 +541,10 @@ class CheckpointProtocolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.output_text, "# Final integrated deliverable")
-        self.assertEqual(result.metadata["continuations"], 1)
-        self.assertEqual(spawned[1][:3], ["opc", "session", "continue"])
+        self.assertEqual(result.metadata["continuations"], 2)
+        self.assertEqual(spawned[1][:3], ["opc", "session", "send"])
         self.assertIn("auto recruit", spawned[1])
+        self.assertIn("approve", spawned[2])
         self.assertIn("t-company", spawned[1])
 
     async def test_blocked_response_is_a_failure_not_a_deliverable(self) -> None:
