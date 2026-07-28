@@ -14,12 +14,15 @@ from opc.operations.canary import ProviderCanaryScheduler, ProviderCanaryService
 from opc.operations.durable import DurableRunKernel
 from opc.operations.evaluation import OutcomeEvaluator
 from opc.operations.learning import LearningAssetManager
+from opc.operations.learning_activation import LearningActivationResolver
 from opc.operations.mission_control import MissionControlService
 from opc.operations.models import CapabilityKind, CapabilityRequest
 from opc.operations.outbox import OutboxDispatcher, event_bus_handler
+from opc.operations.operator_actions import OperatorActionService
 from opc.operations.repository import OperationsRepository
 from opc.operations.resource_pipeline import ApprovedResourcePipeline, ResourceApprovalTokenIssuer
 from opc.operations.routing_outcomes import RoutingOutcomeService
+from opc.operations.skill_assembly import SkillAssemblyService
 from opc.operations.staffing import StaffingOptimizer
 
 
@@ -46,6 +49,13 @@ class OperationsService:
         self.evaluator = OutcomeEvaluator(self.repository, self.config.evaluation)
         self.durable = DurableRunKernel(self.repository, self.config.durable)
         self.learning = LearningAssetManager(self.repository, self.config.learning)
+        self.learning_activations = LearningActivationResolver(self.repository)
+        self.operator_actions = OperatorActionService(
+            self.repository,
+            self.durable,
+            self.learning,
+        )
+        self.skill_assembly = SkillAssemblyService()
         self.capabilities = UnifiedCapabilityBroker(
             self.repository,
             llm_router=llm_router,
@@ -115,6 +125,23 @@ class OperationsService:
 
     def bind_adapter_registry(self, registry: Any | None) -> None:
         self.capabilities.bind_adapter_registry(registry)
+
+    def bind_skill_library(self, skill_library: Any) -> None:
+        self.skill_assembly.bind(skill_library)
+
+    async def start_run(self, manifest: Any, *, now: Any = None) -> tuple[Any, Any]:
+        """Start a run after pinning its goal identity and promoted learning assets."""
+        existing = await self.repository.get_manifest(manifest.run_id)
+        if existing is None:
+            goal = await self.repository.get_goal(manifest.goal_id)
+            if goal is None:
+                raise KeyError(f"goal contract not found: {manifest.goal_id}")
+            if not manifest.organization_id:
+                manifest.organization_id = goal.organization_id
+            if manifest.goal_version == 0:
+                manifest.goal_version = goal.version
+            await self.learning_activations.pin_manifest(manifest)
+        return await self.durable.start_run(manifest, now=now)
 
     async def execute_llm(
         self,

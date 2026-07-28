@@ -264,6 +264,10 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
                 "operations_mission_control",
                 "operations_capability_plan",
                 "operations_active_learning",
+                "operations_pinned_learning",
+                "operations_action_plan",
+                "operations_action_execute",
+                "operations_skill_assembly",
             },
         )
         mission_result = await tools["operations_mission_control"].func(project_id="default")

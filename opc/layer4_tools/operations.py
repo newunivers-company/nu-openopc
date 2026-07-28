@@ -69,6 +69,63 @@ def create_operations_tools(service: OperationsService) -> list[ToolDefinition]:
         )
         return [item.to_dict() for item in assets]
 
+    async def pinned_learning(
+        run_id: str,
+        role_id: str = "",
+        employee_id: str = "",
+    ) -> dict[str, Any]:
+        return await service.learning_activations.render_for_run(
+            run_id,
+            role_id=role_id,
+            employee_id=employee_id,
+        )
+
+    async def action_plan(
+        kind: str,
+        target_id: str,
+        reason: str,
+        project_id: str = "default",
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        return await service.operator_actions.plan(
+            project_id=project_id,
+            kind=kind,
+            target_id=target_id,
+            reason=reason,
+            idempotency_key=idempotency_key,
+        )
+
+    async def action_execute(
+        action_id: str,
+        plan_digest: str,
+        operator_id: str,
+        confirmed: bool,
+        project_id: str = "default",
+    ) -> dict[str, Any]:
+        return await service.operator_actions.execute(
+            project_id=project_id,
+            action_id=action_id,
+            plan_digest=plan_digest,
+            operator_id=operator_id,
+            confirmed=confirmed,
+        )
+
+    async def skill_assembly(
+        goal: str,
+        roles: list[dict[str, Any]],
+        required_capabilities: list[str] | None = None,
+        project_id: str = "default",
+        max_additions_per_role: int = 4,
+    ) -> dict[str, Any]:
+        service.repository.assert_project(project_id)
+        return service.skill_assembly.recommend(
+            goal=goal,
+            roles=roles,
+            required_capabilities=required_capabilities,
+            project_id=project_id,
+            max_additions_per_role=max_additions_per_role,
+        )
+
     return [
         ToolDefinition(
             name="operations_mission_control",
@@ -140,5 +197,141 @@ def create_operations_tools(service: OperationsService) -> list[ToolDefinition]:
             read_only=True,
             persist_large_results=False,
             max_result_chars=12_000,
+        ),
+        ToolDefinition(
+            name="operations_pinned_learning",
+            description=(
+                "Inspect the immutable, content-addressed self-grown assets pinned "
+                "to a run, optionally filtered for one role and employee."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "role_id": {"type": "string"},
+                    "employee_id": {"type": "string"},
+                },
+                "required": ["run_id"],
+            },
+            func=pinned_learning,
+            category="operations",
+            concurrency_safe=True,
+            read_only=True,
+            persist_large_results=False,
+            max_result_chars=16_000,
+        ),
+        ToolDefinition(
+            name="operations_action_plan",
+            description=(
+                "Create a short-lived, project-scoped Mission Control action plan. "
+                "This does not perform the recovery or learning mutation."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "default": "default"},
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "recover_run",
+                            "replay_dead_letter",
+                            "rollback_learning_asset",
+                            "retire_learning_asset",
+                        ],
+                    },
+                    "target_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                },
+                "required": ["kind", "target_id", "reason"],
+            },
+            func=action_plan,
+            category="operations",
+            concurrency_safe=False,
+            read_only=False,
+            persist_large_results=False,
+            max_result_chars=12_000,
+        ),
+        ToolDefinition(
+            name="operations_action_execute",
+            description=(
+                "Execute one exact Mission Control plan after the operator confirms "
+                "its SHA-256 digest. The action is single-use and durably audited."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "default": "default"},
+                    "action_id": {"type": "string"},
+                    "plan_digest": {"type": "string"},
+                    "operator_id": {"type": "string"},
+                    "confirmed": {"type": "boolean"},
+                },
+                "required": [
+                    "action_id",
+                    "plan_digest",
+                    "operator_id",
+                    "confirmed",
+                ],
+            },
+            func=action_execute,
+            category="operations",
+            requires_confirmation=True,
+            concurrency_safe=False,
+            read_only=False,
+            persist_large_results=False,
+            max_result_chars=18_000,
+        ),
+        ToolDefinition(
+            name="operations_skill_assembly",
+            description=(
+                "Recommend installed, content-addressed skills for each role from "
+                "a goal and explicit capability requirements. Never installs or "
+                "changes role configuration."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "default": "default"},
+                    "goal": {"type": "string"},
+                    "roles": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role_id": {"type": "string"},
+                                "name": {"type": "string"},
+                                "responsibility": {"type": "string"},
+                                "capabilities": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "skill_refs": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                            },
+                            "required": ["role_id"],
+                        },
+                    },
+                    "required_capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "max_additions_per_role": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 12,
+                        "default": 4,
+                    },
+                },
+                "required": ["goal", "roles"],
+            },
+            func=skill_assembly,
+            category="operations",
+            concurrency_safe=True,
+            read_only=True,
+            persist_large_results=False,
+            max_result_chars=24_000,
         ),
     ]

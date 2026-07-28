@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Optional, TypeVar
 
@@ -27,10 +28,30 @@ from opc.operations.models import (
     StaffingCandidate,
     utc_now,
 )
+from opc.operations.canary import build_readiness_campaign_plan
 from opc.operations.backup import OperationsBackupManager
+from opc.operations.benchmarks import (
+    DEFAULT_SUITE_PATH,
+    build_campaign_plan,
+    campaign_progress,
+    evaluate_outcomes,
+    load_observations,
+    load_suite,
+    observation_from_run,
+)
+from opc.operations.experiments import (
+    ShadowQualityObservation,
+    bind_shadow_observation_to_transport,
+    evaluate_shadow_promotion,
+    load_shadow_observations,
+    shadow_review_queue,
+    shadow_transport_report,
+)
 from opc.operations.service import OperationsService
+from opc.operations.promotion import build_promotion_dossier
 from opc.operations.outbox import IndependentOutboxWorker, audit_outbox_handler
 from opc.operations.resource_pipeline import ResourcePipelineRequest
+from opc.layer5_memory.skill_library import SkillLibrary
 
 
 T = TypeVar("T")
@@ -48,6 +69,8 @@ def register_operations_cli(app: typer.Typer) -> None:
     mission_app = typer.Typer(help="Inspect the secretary Mission Control view")
     resource_app = typer.Typer(help="Run approval-gated NU resource pipelines")
     backup_app = typer.Typer(help="Create, inspect, and restore verified SQLite snapshots")
+    benchmark_app = typer.Typer(help="Run versioned Task-versus-Company outcome benchmarks")
+    skills_app = typer.Typer(help="Assemble installed skills for explicit role capabilities")
 
     app.add_typer(ops_app, name="ops")
     ops_app.add_typer(goal_app, name="goal")
@@ -60,6 +83,555 @@ def register_operations_cli(app: typer.Typer) -> None:
     ops_app.add_typer(mission_app, name="mission")
     ops_app.add_typer(resource_app, name="resource")
     ops_app.add_typer(backup_app, name="backup")
+    ops_app.add_typer(benchmark_app, name="benchmark")
+    ops_app.add_typer(skills_app, name="skills")
+
+    @skills_app.command("recommend")
+    def skills_recommend(
+        request_json: Path = typer.Option(..., "--request"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        async def action(service: OperationsService) -> dict[str, Any]:
+            payload = _load_mapping(request_json)
+            library = SkillLibrary(get_opc_home())
+            library.load_all(project)
+            service.bind_skill_library(library)
+            return service.skill_assembly.recommend(
+                goal=str(payload.get("goal", "")),
+                roles=[
+                    dict(item)
+                    for item in payload.get("roles", []) or []
+                    if isinstance(item, Mapping)
+                ],
+                required_capabilities=[
+                    str(item)
+                    for item in payload.get("required_capabilities", []) or []
+                ],
+                project_id=project,
+                max_additions_per_role=int(
+                    payload.get("max_additions_per_role", 4) or 4
+                ),
+            )
+
+        report = _run(project, action)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
+    @benchmark_app.command("validate")
+    def benchmark_validate(
+        suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
+    ) -> None:
+        suite = load_suite(suite_path)
+        _emit(
+            {
+                "valid": True,
+                "suite_id": suite.suite_id,
+                "version": suite.version,
+                "status": suite.status,
+                "digest": suite.digest,
+                "cases": len(suite.cases),
+                "workloads": list(suite.workloads),
+                "repetitions": suite.repetitions,
+                "minimum_paired_samples_per_workload": (
+                    suite.minimum_paired_samples_per_workload
+                ),
+            }
+        )
+
+    @benchmark_app.command("plan")
+    def benchmark_plan(
+        campaign_id: str = typer.Option(..., "--campaign-id"),
+        suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+    ) -> None:
+        report = build_campaign_plan(
+            load_suite(suite_path),
+            campaign_id=campaign_id,
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
+    @benchmark_app.command("progress")
+    def benchmark_progress(
+        campaign_id: str = typer.Option(..., "--campaign-id"),
+        observations: Path = typer.Option(..., "--observations"),
+        suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        fail_on_blocked: bool = typer.Option(False, "--fail-on-blocked"),
+    ) -> None:
+        report = campaign_progress(
+            load_suite(suite_path),
+            load_observations(observations),
+            campaign_id=campaign_id,
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+        if fail_on_blocked and not report["promotion_eligible"]:
+            raise typer.Exit(code=1)
+
+    @benchmark_app.command("evaluate")
+    def benchmark_evaluate(
+        observations: Path = typer.Option(..., "--observations"),
+        suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        fail_on_blocked: bool = typer.Option(False, "--fail-on-blocked"),
+    ) -> None:
+        suite = load_suite(suite_path)
+        report = evaluate_outcomes(suite, load_observations(observations))
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+        if fail_on_blocked and not report["promotion_eligible"]:
+            raise typer.Exit(code=1)
+
+    @benchmark_app.command("observe-run")
+    def benchmark_observe_run(
+        case_id: str = typer.Argument(...),
+        run_id: str = typer.Argument(...),
+        mode: str = typer.Option(..., "--mode", help="task or company"),
+        repetition: int = typer.Option(..., "--repetition", min=1),
+        authority: str = typer.Option(
+            ...,
+            "--authority",
+            help="human_confirmed or independent_judge",
+        ),
+        artifact_digest: str = typer.Option(..., "--artifact-digest"),
+        campaign_id: str = typer.Option("", "--campaign-id"),
+        observations: Path = typer.Option(..., "--observations"),
+        suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        suite = load_suite(suite_path)
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            manifest = await service.repository.get_manifest(run_id)
+            scorecard = await service.repository.get_scorecard(run_id)
+            if manifest is None:
+                raise KeyError(f"run manifest not found: {run_id}")
+            if scorecard is None:
+                raise KeyError(f"run scorecard not found: {run_id}")
+            row = observation_from_run(
+                suite,
+                case_id=case_id,
+                mode=mode,
+                repetition=repetition,
+                manifest=manifest,
+                scorecard=scorecard,
+                authority=authority,
+                artifact_digest=artifact_digest,
+                campaign_id=campaign_id,
+            )
+            if not row.trusted:
+                raise ValueError(
+                    "observation lacks trusted authority, evidence, or a SHA-256 artifact digest"
+                )
+            return row.to_dict()
+
+        row = _run(project, action)
+        observations.parent.mkdir(parents=True, exist_ok=True)
+        existing = load_observations(observations) if observations.exists() else []
+        slot = (case_id, mode, repetition)
+        if any(
+            (item.case_id, item.mode, item.repetition) == slot
+            for item in existing
+        ):
+            raise ValueError(
+                f"benchmark slot already exists: {case_id}/{mode}/{repetition}"
+            )
+        with observations.open("a", encoding="utf-8") as output_file:
+            output_file.write(
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            )
+        _emit(row)
+
+    @benchmark_app.command("shadow-gate")
+    def benchmark_shadow_gate(
+        observations: Path = typer.Option(..., "--observations"),
+        experiment_id: str = typer.Option(..., "--experiment-id"),
+        transport_db: Optional[Path] = typer.Option(None, "--transport-db"),
+        minimum_samples_per_workload: int = typer.Option(
+            30,
+            "--minimum-samples-per-workload",
+            min=2,
+        ),
+        minimum_transport_decisions: int = typer.Option(
+            20,
+            "--minimum-transport-decisions",
+            min=1,
+        ),
+        maximum_quality_regression: float = typer.Option(
+            0.02,
+            "--maximum-quality-regression",
+            min=0,
+            max=1,
+        ),
+        maximum_success_regression: float = typer.Option(
+            0.02,
+            "--maximum-success-regression",
+            min=0,
+            max=1,
+        ),
+        minimum_quality_improvement: float = typer.Option(
+            0.0,
+            "--minimum-quality-improvement",
+            min=0,
+            max=1,
+        ),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        fail_on_blocked: bool = typer.Option(False, "--fail-on-blocked"),
+    ) -> None:
+        transport = (
+            shadow_transport_report(
+                transport_db,
+                minimum_decisions=minimum_transport_decisions,
+            )
+            if transport_db is not None
+            else None
+        )
+        report = evaluate_shadow_promotion(
+            load_shadow_observations(observations),
+            experiment_id=experiment_id,
+            minimum_samples_per_workload=minimum_samples_per_workload,
+            maximum_quality_regression=maximum_quality_regression,
+            maximum_success_regression=maximum_success_regression,
+            minimum_quality_improvement=minimum_quality_improvement,
+            transport_report=transport,
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+        if fail_on_blocked and not report["promotion_ready"]:
+            raise typer.Exit(code=1)
+
+    @benchmark_app.command("shadow-review-queue")
+    def benchmark_shadow_review_queue(
+        experiment_id: str = typer.Option(..., "--experiment-id"),
+        transport_db: Path = typer.Option(..., "--transport-db"),
+        observations: Optional[Path] = typer.Option(None, "--observations"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+    ) -> None:
+        rows = (
+            load_shadow_observations(observations)
+            if observations is not None and observations.exists()
+            else []
+        )
+        report = shadow_review_queue(
+            transport_db,
+            experiment_id=experiment_id,
+            observations=rows,
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
+    @benchmark_app.command("shadow-observe")
+    def benchmark_shadow_observe(
+        observation_json: Path = typer.Option(..., "--observation"),
+        observations: Path = typer.Option(..., "--observations"),
+        transport_db: Path = typer.Option(..., "--transport-db"),
+        latency_tolerance_ms: float = typer.Option(
+            1.0,
+            "--latency-tolerance-ms",
+            min=0,
+        ),
+    ) -> None:
+        row = bind_shadow_observation_to_transport(
+            ShadowQualityObservation.from_dict(
+                _load_mapping(observation_json)
+            ),
+            transport_db,
+            latency_tolerance_ms=latency_tolerance_ms,
+        )
+        existing = (
+            load_shadow_observations(observations)
+            if observations.exists()
+            else []
+        )
+        if any(item.decision_id == row.decision_id for item in existing):
+            raise ValueError(
+                f"shadow decision already observed: {row.decision_id}"
+            )
+        observations.parent.mkdir(parents=True, exist_ok=True)
+        with observations.open("a", encoding="utf-8") as output_file:
+            output_file.write(
+                json.dumps(row.to_dict(), ensure_ascii=False, sort_keys=True)
+                + "\n"
+            )
+        _emit(row.to_dict())
+
+    @benchmark_app.command("promotion-dossier")
+    def benchmark_promotion_dossier(
+        dependency_report: Path = typer.Option(
+            ...,
+            "--dependency-report",
+        ),
+        outcome_report: Path = typer.Option(..., "--outcome-report"),
+        shadow_report: Path = typer.Option(..., "--shadow-report"),
+        canary_report: Path = typer.Option(..., "--canary-report"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        fail_on_blocked: bool = typer.Option(False, "--fail-on-blocked"),
+    ) -> None:
+        report = build_promotion_dossier(
+            dependency_report=_load_mapping(dependency_report),
+            outcome_report=_load_mapping(outcome_report),
+            shadow_report=_load_mapping(shadow_report),
+            canary_report=_load_mapping(canary_report),
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+        if fail_on_blocked and not report["promotion_ready"]:
+            raise typer.Exit(code=1)
+
+    @capability_app.command("shadow-report")
+    def capability_shadow_report(
+        minimum_decisions: int = typer.Option(20, "--minimum-decisions", min=1),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        async def action(service: OperationsService) -> dict[str, Any]:
+            report = getattr(service.llm_router, "shadow_evidence_report", None)
+            if not callable(report):
+                return {
+                    "available": False,
+                    "blockers": ["NU LLM shadow bridge is unavailable"],
+                }
+            return report(minimum_decisions=minimum_decisions)
+
+        _emit(_run(project, action, integrations=True))
+
+    @capability_app.command("record-drill")
+    def capability_record_drill(
+        provider: str = typer.Option(..., "--provider"),
+        scenario: str = typer.Option(..., "--scenario"),
+        result_json: Path = typer.Option(..., "--result"),
+        model: str = typer.Option("", "--model"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        result = _load_mapping(result_json)
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            row = await service.canaries.record_failure_drill(
+                project_id=project,
+                provider=provider,
+                scenario=scenario,
+                result=result,
+                model=model,
+            )
+            return row.to_dict()
+
+        _emit(_run(project, action))
+
+    @capability_app.command("campaign-plan")
+    def capability_campaign_plan(
+        campaign_id: str = typer.Option(..., "--campaign-id"),
+        provider: str = typer.Option(..., "--provider"),
+        model: str = typer.Option("", "--model"),
+        start_at: str = typer.Option("", "--start-at"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+    ) -> None:
+        config_dir = get_opc_home() / "config"
+        config = (
+            OPCConfig.load(config_dir)
+            if config_dir.exists()
+            else OPCConfig()
+        ).system.operations.providers
+        if start_at:
+            parsed_start = datetime.fromisoformat(
+                start_at.replace("Z", "+00:00")
+            )
+        else:
+            parsed_start = datetime.now(timezone.utc)
+        report = build_readiness_campaign_plan(
+            campaign_id=campaign_id,
+            provider=provider,
+            model=model,
+            start_at=parsed_start,
+            interval_seconds=config.status_canary_interval_seconds,
+            observation_seconds=config.readiness_min_observation_seconds,
+            time_bucket_seconds=config.readiness_time_bucket_seconds,
+            minimum_time_buckets=config.readiness_min_time_buckets,
+            maximum_sample_age_seconds=(
+                config.readiness_max_sample_age_seconds
+            ),
+            maximum_gap_seconds=config.readiness_max_gap_seconds,
+            failure_drill_max_age_seconds=(
+                config.readiness_failure_drill_max_age_seconds
+            ),
+            required_failure_scenarios=(
+                config.readiness_required_failure_scenarios
+            ),
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
+    @capability_app.command("readiness")
+    def capability_readiness(
+        provider: str = typer.Option("", "--provider"),
+        minimum_samples: Optional[int] = typer.Option(
+            None,
+            "--minimum-samples",
+            min=1,
+        ),
+        trend_window_samples: Optional[int] = typer.Option(
+            None,
+            "--trend-window-samples",
+            min=1,
+        ),
+        minimum_observation_seconds: Optional[int] = typer.Option(
+            None,
+            "--minimum-observation-seconds",
+            min=0,
+        ),
+        time_bucket_seconds: Optional[int] = typer.Option(
+            None,
+            "--time-bucket-seconds",
+            min=60,
+        ),
+        minimum_time_buckets: Optional[int] = typer.Option(
+            None,
+            "--minimum-time-buckets",
+            min=1,
+        ),
+        minimum_samples_per_bucket: Optional[int] = typer.Option(
+            None,
+            "--minimum-samples-per-bucket",
+            min=1,
+        ),
+        maximum_sample_age_seconds: Optional[int] = typer.Option(
+            None,
+            "--maximum-sample-age-seconds",
+            min=0,
+        ),
+        maximum_gap_seconds: Optional[int] = typer.Option(
+            None,
+            "--maximum-gap-seconds",
+            min=60,
+        ),
+        failure_drill_max_age_seconds: Optional[int] = typer.Option(
+            None,
+            "--failure-drill-max-age-seconds",
+            min=60,
+        ),
+        required_drill: list[str] = typer.Option(
+            [],
+            "--required-drill",
+        ),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        fail_on_blocked: bool = typer.Option(False, "--fail-on-blocked"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        async def action(service: OperationsService) -> dict[str, Any]:
+            config = service.config.providers
+            return await service.canaries.readiness_summary(
+                project_id=project,
+                provider=provider or None,
+                availability_target=config.slo_availability_target,
+                p95_latency_target_ms=config.slo_p95_latency_target_ms,
+                minimum_samples=(
+                    minimum_samples
+                    if minimum_samples is not None
+                    else config.slo_min_samples
+                ),
+                trend_window_samples=(
+                    trend_window_samples
+                    if trend_window_samples is not None
+                    else config.slo_trend_window_samples
+                ),
+                minimum_observation_seconds=(
+                    minimum_observation_seconds
+                    if minimum_observation_seconds is not None
+                    else config.readiness_min_observation_seconds
+                ),
+                time_bucket_seconds=(
+                    time_bucket_seconds
+                    if time_bucket_seconds is not None
+                    else config.readiness_time_bucket_seconds
+                ),
+                minimum_time_buckets=(
+                    minimum_time_buckets
+                    if minimum_time_buckets is not None
+                    else config.readiness_min_time_buckets
+                ),
+                minimum_samples_per_bucket=(
+                    minimum_samples_per_bucket
+                    if minimum_samples_per_bucket is not None
+                    else config.readiness_min_samples_per_bucket
+                ),
+                maximum_sample_age_seconds=(
+                    maximum_sample_age_seconds
+                    if maximum_sample_age_seconds is not None
+                    else config.readiness_max_sample_age_seconds
+                ),
+                maximum_gap_seconds=(
+                    maximum_gap_seconds
+                    if maximum_gap_seconds is not None
+                    else config.readiness_max_gap_seconds
+                ),
+                failure_drill_max_age_seconds=(
+                    failure_drill_max_age_seconds
+                    if failure_drill_max_age_seconds is not None
+                    else config.readiness_failure_drill_max_age_seconds
+                ),
+                required_failure_scenarios=(
+                    required_drill
+                    or config.readiness_required_failure_scenarios
+                ),
+            )
+
+        report = _run(project, action)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+        providers = report.get("providers", {})
+        if fail_on_blocked and (
+            not providers
+            or not all(
+                bool(item.get("production_ready"))
+                for item in providers.values()
+            )
+        ):
+            raise typer.Exit(code=1)
 
     @goal_app.command("create")
     def goal_create(
@@ -194,7 +766,7 @@ def register_operations_cli(app: typer.Typer) -> None:
                 )
             if complete_goal_on_pass:
                 manifest.metadata["complete_goal_on_pass"] = True
-            saved, _ = await service.durable.start_run(manifest)
+            saved, _ = await service.start_run(manifest)
             return saved.to_dict()
 
         _emit(_run(project, action))
@@ -441,6 +1013,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     def capability_canary(
         request_json: Path = typer.Option(..., "--request"),
         expected_model: str = typer.Option("", "--expected-model"),
+        output: Optional[Path] = typer.Option(None, "--output"),
         project: str = typer.Option("default", "--project", "-p"),
     ) -> None:
         """Run a no-generation readiness canary and persist its SLO evidence."""
@@ -449,11 +1022,21 @@ def register_operations_cli(app: typer.Typer) -> None:
             request = CapabilityRequest.from_dict(_load_mapping(request_json))
             request.project_id = project
             request.allow_live = False
+            request.require_preferred_provider = bool(
+                request.preferred_providers
+            )
             return (
                 await service.canaries.status_canary(request, expected_model=expected_model)
             ).to_dict()
 
-        _emit(_run(project, action, integrations=True))
+        report = _run(project, action, integrations=True)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
 
     @capability_app.command("slo")
     def capability_slo(
@@ -664,6 +1247,72 @@ def register_operations_cli(app: typer.Typer) -> None:
             lambda service: service.mission_control.daily_brief(project_id=project),
         )
         typer.echo(value)
+
+    @mission_app.command("plan-action")
+    def mission_plan_action(
+        kind: str = typer.Argument(...),
+        target_id: str = typer.Argument(...),
+        reason: str = typer.Option(..., "--reason"),
+        idempotency_key: str = typer.Option("", "--idempotency-key"),
+        expires_in_seconds: int = typer.Option(
+            300,
+            "--expires-in-seconds",
+            min=30,
+            max=3600,
+        ),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        _emit(
+            _run(
+                project,
+                lambda service: service.operator_actions.plan(
+                    project_id=project,
+                    kind=kind,
+                    target_id=target_id,
+                    reason=reason,
+                    idempotency_key=idempotency_key,
+                    expires_in_seconds=expires_in_seconds,
+                ),
+            )
+        )
+
+    @mission_app.command("execute-action")
+    def mission_execute_action(
+        action_id: str = typer.Argument(...),
+        plan_digest: str = typer.Option(..., "--plan-digest"),
+        operator_id: str = typer.Option(..., "--operator-id"),
+        confirm: bool = typer.Option(False, "--confirm"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        _emit(
+            _run(
+                project,
+                lambda service: service.operator_actions.execute(
+                    project_id=project,
+                    action_id=action_id,
+                    plan_digest=plan_digest,
+                    operator_id=operator_id,
+                    confirmed=confirm,
+                ),
+            )
+        )
+
+    @mission_app.command("actions")
+    def mission_actions(
+        status: list[str] = typer.Option([], "--status"),
+        limit: int = typer.Option(100, "--limit", "-n", min=1, max=1000),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        _emit(
+            _run(
+                project,
+                lambda service: service.operator_actions.list(
+                    project_id=project,
+                    statuses=status,
+                    limit=limit,
+                ),
+            )
+        )
 
     @backup_app.command("create")
     def backup_create(

@@ -19,6 +19,7 @@ from opc.operations.models import (
     LearningAsset,
     LearningAssetEvaluation,
     LearningAssetStatus,
+    OperatorAction,
     ResourceBudget,
     RoleOutcome,
     RunManifest,
@@ -33,7 +34,10 @@ from opc.operations.canary import ProviderCanaryService
 from opc.operations.durable import DurableRunKernel
 from opc.operations.evaluation import OutcomeEvaluator
 from opc.operations.learning import LearningAssetManager
+from opc.operations.learning_activation import LearningActivationResolver
 from opc.operations.mission_control import MissionControlService
+from opc.operations.operator_actions import OperatorActionService
+from opc.operations.promotion import build_promotion_dossier
 from opc.operations.repository import OperationsRepository
 from opc.operations.resource_pipeline import (
     ApprovedResourcePipeline,
@@ -44,6 +48,7 @@ from opc.operations.resource_pipeline import (
 from opc.operations.routing_outcomes import RoutingOutcomeService
 from opc.operations.service import OperationsService
 from opc.operations.staffing import StaffingOptimizer
+from opc.operations.skill_assembly import SkillAssemblyService
 
 __all__ = [
     "AcceptanceCriterion",
@@ -58,6 +63,7 @@ __all__ = [
     "LearningAsset",
     "LearningAssetEvaluation",
     "LearningAssetStatus",
+    "OperatorAction",
     "ResourceBudget",
     "RoleOutcome",
     "RunManifest",
@@ -68,11 +74,15 @@ __all__ = [
     "StaffingDecision",
     "DurableRunKernel",
     "LearningAssetManager",
+    "LearningActivationResolver",
     "MissionControlService",
+    "OperatorActionService",
+    "build_promotion_dossier",
     "OperationsRepository",
     "OperationsService",
     "OutcomeEvaluator",
     "StaffingOptimizer",
+    "SkillAssemblyService",
     "UnifiedCapabilityBroker",
     "ProviderCanaryService",
     "ApprovedResourcePipeline",

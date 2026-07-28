@@ -328,6 +328,62 @@ class OperationsCliTests(unittest.TestCase):
         self.assertEqual(slo["attainment_state"], "insufficient_samples")
         self.assertFalse(slo["target_met"])
 
+    def test_capability_readiness_writes_auditable_blocked_report(self) -> None:
+        request = self._write_json(
+            "readiness-canary.json",
+            {
+                "capability_kind": "llm",
+                "task_type": "dialogue",
+                "project_id": "demo",
+                "allow_live": False,
+            },
+        )
+        self._invoke([
+            "ops",
+            "capability",
+            "canary",
+            "--request",
+            str(request),
+            "--project",
+            "demo",
+        ])
+        output = self.root / "readiness.json"
+
+        result = self._invoke(
+            [
+                "ops",
+                "capability",
+                "readiness",
+                "--provider",
+                "openopc_config",
+                "--minimum-samples",
+                "2",
+                "--minimum-observation-seconds",
+                "86400",
+                "--minimum-time-buckets",
+                "4",
+                "--required-drill",
+                "credential_expiry",
+                "--output",
+                str(output),
+                "--fail-on-blocked",
+                "--project",
+                "demo",
+            ],
+            expected_exit=1,
+        )
+
+        report = json.loads(result.output)
+        self.assertEqual(report, json.loads(output.read_text(encoding="utf-8")))
+        readiness = report["providers"]["openopc_config"]
+        self.assertFalse(readiness["production_ready"])
+        self.assertFalse(readiness["sample_target_met"])
+        self.assertFalse(readiness["observation_target_met"])
+        self.assertEqual(
+            readiness["missing_failure_scenarios"],
+            ["credential_expiry"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
