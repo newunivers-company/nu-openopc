@@ -356,6 +356,11 @@ def observation_from_run(
             "source_revision": manifest.source_revision,
             "scorecard_id": scorecard.scorecard_id,
             "campaign_id": campaign,
+            # Execution-environment pins for reproducibility audits: which
+            # exact configuration and models produced this observation.
+            "configuration_digest": manifest.configuration_digest,
+            "model_versions": dict(manifest.model_versions)
+            or dict(scorecard.metadata.get("model_versions", {}) or {}),
         },
     )
 

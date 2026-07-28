@@ -858,3 +858,72 @@ async def run_status_canary_loop(
         "interval_seconds": interval_seconds,
         "last": last,
     }
+
+
+_DRILL_RUNBOOKS: dict[str, list[str]] = {
+    "credential_expiry": [
+        "Coordinate a window with the provider owner; announce the drill.",
+        "Temporarily rotate or invalidate the provider credential (actual injection).",
+        "Confirm the expected authentication failure is observed by a canary call.",
+        "Confirm routing falls back to the next healthy target.",
+        "Confirm the readiness/Mission Control alert fired.",
+        "Restore the credential and confirm recovery with a passing canary.",
+    ],
+    "transport_timeout": [
+        "Insert a controlled delay (proxy or firewall rule) in front of the provider endpoint.",
+        "Confirm the expected timeout failure is observed.",
+        "Confirm fallback routing and alerting, then remove the delay.",
+        "Confirm recovery with a passing canary.",
+    ],
+    "quota_exhaustion": [
+        "Drive the provider to its quota ceiling in a controlled scope "
+        "(or coordinate a temporary quota reduction).",
+        "Confirm the expected quota rejection is observed and categorized.",
+        "Confirm fallback routing and alerting.",
+        "Wait for or restore quota; confirm recovery.",
+    ],
+    "model_drift": [
+        "Pin an expected model revision that intentionally mismatches the "
+        "provider's served model.",
+        "Confirm the drift is detected and surfaced.",
+        "Confirm alerting, restore the correct pin, and confirm recovery.",
+    ],
+}
+
+
+def build_drill_result_template(
+    scenario: str,
+    *,
+    provider: str = "",
+    model: str = "",
+) -> dict[str, Any]:
+    """Emit a record-drill result skeleton with the scenario's runbook.
+
+    Every verification flag starts ``False`` and the evidence list starts
+    empty, so an unedited template can never be recorded as a passing drill.
+    """
+
+    drill = str(scenario or "").strip()
+    if drill not in _DRILL_RUNBOOKS:
+        raise ValueError(
+            f"unknown drill scenario: {drill!r}; expected one of "
+            f"{sorted(_DRILL_RUNBOOKS)}"
+        )
+    return {
+        "provider": str(provider or "").strip(),
+        "model": str(model or "").strip(),
+        "scenario": drill,
+        "actual_injection": False,
+        "expected_failure_observed": False,
+        "fallback_verified": False,
+        "alert_verified": False,
+        "recovery_verified": False,
+        "authority": "",
+        "evidence": [],
+        "runbook": list(_DRILL_RUNBOOKS[drill]),
+        "notes": (
+            "Set authority to human_confirmed or independent_observer, add at "
+            "least one durable evidence URI, and flip each verification flag "
+            "only after the behavior was actually observed."
+        ),
+    }

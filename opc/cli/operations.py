@@ -28,7 +28,13 @@ from opc.operations.models import (
     StaffingCandidate,
     utc_now,
 )
-from opc.operations.canary import build_readiness_campaign_plan, run_status_canary_loop
+from opc.operations.canary import (
+    build_drill_result_template,
+    build_readiness_campaign_plan,
+    run_status_canary_loop,
+)
+from opc.operations.shadow_artifacts import ShadowArtifactStore
+from opc.operations.shadow_traffic import drive_shadow_prompts, load_prompts
 from opc.operations.backup import OperationsBackupManager
 from opc.operations.benchmarks import (
     DEFAULT_SUITE_PATH,
@@ -601,21 +607,59 @@ def register_operations_cli(app: typer.Typer) -> None:
             )
         _emit(report)
 
+    @benchmark_app.command("shadow-artifacts-add")
+    def benchmark_shadow_artifacts_add(
+        decision_id: str = typer.Argument(...),
+        served: Path = typer.Option(..., "--served", help="Served response text file"),
+        challenger: Path = typer.Option(..., "--challenger", help="Challenger response text file"),
+        store: Path = typer.Option(..., "--store", help="Artifact store directory"),
+        overwrite: bool = typer.Option(False, "--overwrite"),
+    ) -> None:
+        """Store a served/challenger pair so judges never re-capture texts."""
+
+        index = ShadowArtifactStore(store).add(
+            decision_id,
+            served_text=served.read_text(encoding="utf-8"),
+            challenger_text=challenger.read_text(encoding="utf-8"),
+            overwrite=overwrite,
+        )
+        _emit(index)
+
+    @benchmark_app.command("shadow-artifacts-show")
+    def benchmark_shadow_artifacts_show(
+        decision_id: str = typer.Argument(...),
+        store: Path = typer.Option(..., "--store"),
+    ) -> None:
+        """Show a stored pair's digests after verifying it was not altered."""
+
+        _emit(ShadowArtifactStore(store).get(decision_id))
+
     @benchmark_app.command("shadow-observe")
     def benchmark_shadow_observe(
         observation_json: Path = typer.Option(..., "--observation"),
         observations: Path = typer.Option(..., "--observations"),
         transport_db: Path = typer.Option(..., "--transport-db"),
+        artifact_store: Optional[Path] = typer.Option(
+            None,
+            "--artifact-store",
+            help="Fill missing served/challenger digests from this store",
+        ),
         latency_tolerance_ms: float = typer.Option(
             1.0,
             "--latency-tolerance-ms",
             min=0,
         ),
     ) -> None:
+        payload = _load_mapping(observation_json)
+        if artifact_store is not None:
+            digests = ShadowArtifactStore(artifact_store).digests(
+                str(payload.get("decision_id", ""))
+            )
+            for key, value in digests.items():
+                if not str(payload.get(key, "") or "").strip():
+                    payload[key] = value
         row = bind_shadow_observation_to_transport(
-            ShadowQualityObservation.from_dict(
-                _load_mapping(observation_json)
-            ),
+            ShadowQualityObservation.from_dict(payload),
             transport_db,
             latency_tolerance_ms=latency_tolerance_ms,
         )
@@ -701,6 +745,76 @@ def register_operations_cli(app: typer.Typer) -> None:
             return row.to_dict()
 
         _emit(_run(project, action))
+
+    @capability_app.command("drill-template")
+    def capability_drill_template(
+        scenario: str = typer.Argument(...),
+        provider: str = typer.Option("", "--provider"),
+        model: str = typer.Option("", "--model"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+    ) -> None:
+        """Emit a record-drill result skeleton with the scenario runbook."""
+
+        template = build_drill_result_template(
+            scenario, provider=provider, model=model
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(template, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(template)
+
+    @capability_app.command("shadow-drive")
+    def capability_shadow_drive(
+        prompts_path: Path = typer.Option(..., "--prompts", help="JSON/JSONL prompts"),
+        max_calls: int = typer.Option(..., "--max-calls", min=1, max=500),
+        task_type: str = typer.Option("dialogue", "--task-type"),
+        delay_seconds: float = typer.Option(0.0, "--delay-seconds", min=0),
+        confirm_live: bool = typer.Option(
+            False,
+            "--confirm-live",
+            help="Required: driving shadow traffic makes real provider calls",
+        ),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Replay curated text turns through the routed serving path so shadow
+        decisions accumulate as genuine transport calls."""
+
+        prompts = load_prompts(prompts_path)
+        if not prompts:
+            raise ValueError(f"no prompts found in {prompts_path}")
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            from opc.llm.provider import LLMProvider
+
+            opc_home = get_opc_home()
+            config_dir = opc_home / "config"
+            config = OPCConfig.load(config_dir) if config_dir.exists() else OPCConfig()
+            provider = LLMProvider(config.llm, opc_home=opc_home)
+            provider.bind_operations_service(service, project_id=project)
+            shadow_status = provider.nu_router.start_background_shadow()
+            if not shadow_status.get("running"):
+                raise ValueError(
+                    "background shadow is not running; configure "
+                    "shadow_experiment_id and shadow_max_total_calls first: "
+                    f"{shadow_status.get('error') or shadow_status}"
+                )
+            try:
+                report = await drive_shadow_prompts(
+                    lambda prompt: provider.simple_chat(prompt, task_type=task_type),
+                    prompts,
+                    max_calls=max_calls,
+                    confirm_live=confirm_live,
+                    delay_seconds=delay_seconds,
+                )
+            finally:
+                shutdown = provider.nu_router.stop_background_shadow()
+            report["shadow_status"] = shutdown
+            return report
+
+        _emit(_run(project, action, integrations=True))
 
     @capability_app.command("campaign-plan")
     def capability_campaign_plan(
