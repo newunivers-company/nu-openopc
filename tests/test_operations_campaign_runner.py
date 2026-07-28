@@ -569,3 +569,62 @@ class CheckpointProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertIn("blocked response", result.metadata["failure_reason"])
         self.assertEqual(result.output_text, "")
+
+
+class ForcedRerunTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.store = OPCStore(root / "tasks.db")
+        await self.store.initialize()
+        self.service = OperationsService(self.store, OperationsConfig())
+        self.plan = build_campaign_plan(load_suite(), campaign_id="force-campaign")
+        self.artifacts_root = root / "artifacts"
+
+    async def asyncTearDown(self) -> None:
+        await self.store.close()
+        self._tmp.cleanup()
+
+    def _runner(self, executor: _FakeExecutor) -> CampaignSlotRunner:
+        return CampaignSlotRunner(
+            self.service,
+            executor,
+            project_id="default",
+            artifacts_root=self.artifacts_root,
+        )
+
+    async def test_force_reopens_terminal_manifest_with_audit_trail(self) -> None:
+        slot = dict(self.plan["slots"][0])
+        first = await self._runner(_FakeExecutor(success=False)).run_slot(
+            self.plan, slot["slot_id"]
+        )
+        self.assertEqual(first.status, "failed")
+
+        second = await self._runner(_FakeExecutor()).run_slot(
+            self.plan, slot["slot_id"], force=True
+        )
+        self.assertEqual(second.status, "completed")
+        manifest = await self.service.repository.get_manifest(slot["run_id"])
+        self.assertEqual(manifest.status, RunStatus.COMPLETED)
+        self.assertEqual(
+            manifest.metadata["forced_rerun_previous_status"], "failed"
+        )
+
+    async def test_force_refuses_to_overwrite_a_scored_run(self) -> None:
+        slot = dict(self.plan["slots"][0])
+        runner = self._runner(_FakeExecutor())
+        await runner.run_slot(self.plan, slot["slot_id"])
+        await self.service.evaluator.evaluate_run(
+            slot["run_id"],
+            criterion_scores={
+                item["criterion_id"]: 0.9
+                for item in slot["goal"]["acceptance_criteria"]
+            },
+            evidence={
+                item["criterion_id"]: ["output.md"]
+                for item in slot["goal"]["acceptance_criteria"]
+            },
+            metrics=RunMetrics.from_dict({"duration_seconds": 5, "total_attempts": 1}),
+        )
+        with self.assertRaises(ValueError):
+            await runner.run_slot(self.plan, slot["slot_id"], force=True)

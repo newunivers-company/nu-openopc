@@ -132,6 +132,22 @@ class CampaignSlotRunner:
                 artifact_directory=str(artifact_dir),
                 error=f"run manifest already exists with status {existing.status.value}",
             )
+        if existing is not None and force:
+            # A forced rerun is an audited operator decision: reopen the
+            # manifest so the durable kernel can settle the new attempt, and
+            # never overwrite a run that already has a scorecard.
+            if await self.service.repository.get_scorecard(run_id) is not None:
+                raise ValueError(
+                    f"cannot force-rerun {run_id}: a scorecard already exists"
+                )
+            existing.metadata = {
+                **dict(existing.metadata),
+                "forced_rerun_at": utc_now().isoformat(),
+                "forced_rerun_previous_status": existing.status.value,
+            }
+            existing.status = RunStatus.RUNNING
+            existing.completed_at = None
+            await self.service.repository.save_manifest(existing)
 
         await self._ensure_goal(slot)
         manifest = RunManifest(
