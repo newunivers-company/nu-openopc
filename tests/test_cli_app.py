@@ -3407,3 +3407,33 @@ class CliBoardCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExecFinalContractTests(unittest.TestCase):
+    """opc exec must not report ok/exit-0 for failed or cancelled tasks."""
+
+    def _contract(self, task_status: str):
+        from opc.cli.app import _exec_final_contract
+
+        return _exec_final_contract(
+            project_id="demo",
+            task_id="t1",
+            session_id="s1",
+            mode="task",
+            company_profile="",
+            response="answer",
+            task_status=task_status,
+        )
+
+    def test_terminal_failures_yield_ok_false_and_exit_three(self) -> None:
+        for status in ("failed", "cancelled", "FAILED"):
+            payload, exit_code = self._contract(status)
+            self.assertFalse(payload["ok"], status)
+            self.assertEqual(exit_code, 3)
+            self.assertEqual(payload["task_status"], status.lower())
+
+    def test_non_failure_statuses_keep_ok_true(self) -> None:
+        for status in ("done", "completed", "waiting", ""):
+            payload, exit_code = self._contract(status)
+            self.assertTrue(payload["ok"], status)
+            self.assertEqual(exit_code, 0)

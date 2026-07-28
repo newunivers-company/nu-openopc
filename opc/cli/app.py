@@ -1472,6 +1472,43 @@ def _exec_event_payload(value: Any) -> Any:
     return _json_safe(value)
 
 
+_EXEC_FAILURE_STATUSES = {"failed", "cancelled"}
+
+
+def _exec_final_contract(
+    *,
+    project_id: str,
+    task_id: str,
+    session_id: str,
+    mode: str,
+    company_profile: str,
+    response: str,
+    task_status: str,
+) -> tuple[dict[str, Any], int]:
+    """Build the exec final payload with an honest success verdict.
+
+    Historically ``opc exec`` reported ``ok: true`` and exit 0 whenever the
+    send call returned, hiding soft failures (failed/cancelled tasks) from
+    automation. The verdict now reflects the task's terminal status: a
+    failed or cancelled task yields ``ok: false`` and exit code 3, so CI
+    and the benchmark harness can trust the exit code again.
+    """
+
+    status = str(task_status or "").strip().lower()
+    succeeded = status not in _EXEC_FAILURE_STATUSES
+    payload = {
+        "ok": succeeded,
+        "project_id": project_id,
+        "task_id": task_id,
+        "session_id": session_id,
+        "mode": mode,
+        "company_profile": company_profile,
+        "task_status": status,
+        "response": response,
+    }
+    return payload, 0 if succeeded else 3
+
+
 def _print_exec_event(
     event_state: dict[str, Any],
     event_type: str,
@@ -1670,15 +1707,26 @@ async def _exec_message(
                         payload={"role": "assistant", "content": response},
                     )
 
-            final_payload = {
-                "ok": True,
-                "project_id": project_id,
-                "task_id": task_id,
-                "session_id": resolved_session_id,
-                "mode": mode,
-                "company_profile": company_profile,
-                "response": response,
-            }
+            task_status = ""
+            if prompt and task_id:
+                try:
+                    detail = await services.session.detail(
+                        project_id=project_id, task_id=task_id, limit=1
+                    )
+                    task_status = str(
+                        (detail.payload.get("task") or {}).get("status", "") or ""
+                    )
+                except Exception:  # noqa: BLE001 - status probe must not mask the response
+                    task_status = ""
+            final_payload, exit_code = _exec_final_contract(
+                project_id=project_id,
+                task_id=task_id,
+                session_id=resolved_session_id,
+                mode=mode,
+                company_profile=company_profile,
+                response=response,
+                task_status=task_status,
+            )
             if stream_json:
                 _print_exec_event(
                     event_state,
@@ -1688,14 +1736,14 @@ async def _exec_message(
                     session_id=resolved_session_id,
                     payload=final_payload,
                 )
-                return
-            if json_output:
+            elif json_output:
                 console.print(json.dumps(final_payload, ensure_ascii=False, indent=2, default=_json_safe))
-                return
-            if response:
+            elif response:
                 _print_response(response, no_markdown=no_markdown)
             else:
                 _emit_payload(final_payload)
+            if exit_code:
+                raise typer.Exit(code=exit_code)
     except ServiceError as exc:
         payload = {"ok": False, **exc.to_payload()}
         if stream_json:

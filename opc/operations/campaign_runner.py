@@ -403,13 +403,60 @@ def build_slot_command(
     ]
 
 
+def evaluate_exec_output(returncode: int | None, stdout: str) -> dict[str, Any]:
+    """Judge one ``opc exec --json`` invocation fail-closed.
+
+    Success requires ALL of: exit code 0, parseable JSON, ``ok`` true, a
+    task_status outside the failure set, and a non-empty response (a
+    benchmark slot without a deliverable is a failure, not a success).
+    Anything unparseable is a failure — never trust a bare exit code.
+    """
+
+    verdict: dict[str, Any] = {
+        "success": False,
+        "response": "",
+        "task_id": "",
+        "session_id": "",
+        "task_status": "",
+        "reason": "",
+    }
+    if returncode != 0:
+        verdict["reason"] = f"exit code {returncode}"
+        return verdict
+    text = str(stdout or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        verdict["reason"] = "stdout contains no JSON payload"
+        return verdict
+    try:
+        payload = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        verdict["reason"] = "stdout JSON payload is malformed"
+        return verdict
+    verdict["task_id"] = str(payload.get("task_id", "") or "")
+    verdict["session_id"] = str(payload.get("session_id", "") or "")
+    verdict["task_status"] = str(payload.get("task_status", "") or "").lower()
+    verdict["response"] = str(payload.get("response", "") or "")
+    if payload.get("ok") is not True:
+        verdict["reason"] = "exec reported ok=false"
+        return verdict
+    if verdict["task_status"] in {"failed", "cancelled"}:
+        verdict["reason"] = f"task ended {verdict['task_status']}"
+        return verdict
+    if not verdict["response"].strip():
+        verdict["reason"] = "exec produced no deliverable response"
+        return verdict
+    verdict["success"] = True
+    return verdict
+
+
 class SubprocessSlotExecutor:
     """Default executor: run the slot prompt through the ``opc exec`` CLI.
 
-    Success mirrors the subprocess exit code. Note the historical caveat that
-    ``opc exec`` has returned 0 on some soft failures — treat harness success
-    as "the run completed", never as a quality verdict; quality only comes
-    from the human-judged scorecard.
+    Success is decided by :func:`evaluate_exec_output` over the ``--json``
+    payload, never by the bare exit code — harness success still only means
+    "the run completed with a deliverable"; quality comes exclusively from
+    the human-judged scorecard.
     """
 
     def __init__(
@@ -446,12 +493,19 @@ class SubprocessSlotExecutor:
                     "error": f"timed out after {self.config.timeout_seconds}s",
                 },
             )
+        verdict = evaluate_exec_output(
+            process.returncode, stdout.decode("utf-8", errors="replace")
+        )
         return SlotExecution(
-            success=process.returncode == 0,
-            output_text=stdout.decode("utf-8", errors="replace"),
+            success=bool(verdict["success"]),
+            output_text=str(verdict["response"]),
             metadata={
                 "command": command,
                 "exit_code": process.returncode,
+                "task_id": verdict["task_id"],
+                "session_id": verdict["session_id"],
+                "task_status": verdict["task_status"],
+                "failure_reason": verdict["reason"],
                 "stderr_tail": stderr.decode("utf-8", errors="replace")[-2000:],
             },
         )

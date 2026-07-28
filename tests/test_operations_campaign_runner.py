@@ -266,3 +266,48 @@ class SlotCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExecOutputContractTests(unittest.TestCase):
+    """Fail-closed verdicts over the opc exec --json payload (A-1)."""
+
+    def _payload(self, **overrides: Any) -> str:
+        base = {
+            "ok": True,
+            "task_id": "t1",
+            "session_id": "s1",
+            "task_status": "done",
+            "response": "# Deliverable",
+        }
+        base.update(overrides)
+        return json.dumps(base)
+
+    def test_success_requires_ok_status_and_deliverable(self) -> None:
+        from opc.operations.campaign_runner import evaluate_exec_output
+
+        verdict = evaluate_exec_output(0, self._payload())
+        self.assertTrue(verdict["success"])
+        self.assertEqual(verdict["response"], "# Deliverable")
+        self.assertEqual(verdict["task_id"], "t1")
+
+    def test_soft_failures_are_not_masked_by_exit_zero(self) -> None:
+        from opc.operations.campaign_runner import evaluate_exec_output
+
+        for stdout, reason_fragment in [
+            (self._payload(ok=False), "ok=false"),
+            (self._payload(task_status="failed"), "task ended failed"),
+            (self._payload(task_status="cancelled"), "task ended cancelled"),
+            (self._payload(response="  "), "no deliverable"),
+            ("plain text, not json", "no JSON"),
+            ('{"ok": broken}', "malformed"),
+        ]:
+            verdict = evaluate_exec_output(0, stdout)
+            self.assertFalse(verdict["success"], stdout)
+            self.assertIn(reason_fragment, verdict["reason"])
+
+    def test_nonzero_exit_fails_regardless_of_payload(self) -> None:
+        from opc.operations.campaign_runner import evaluate_exec_output
+
+        verdict = evaluate_exec_output(2, self._payload())
+        self.assertFalse(verdict["success"])
+        self.assertIn("exit code 2", verdict["reason"])
