@@ -204,16 +204,25 @@ class CampaignSlotRunner:
 
 @dataclass
 class CampaignBudget:
-    """Campaign-level execution ceilings enforced by the batch runner."""
+    """Campaign-level execution ceilings enforced by the batch runner.
+
+    ``max_cost_usd`` only counts *measured* provider usage; subscription CLI
+    calls report no cost and are governed by the rolling call-count quota
+    instead — the ceiling is a hard stop on what can be measured, never a
+    claim that unmeasured usage was free.
+    """
 
     max_slots: int | None = None
     max_failures: int = 3
+    max_cost_usd: float | None = None
 
     def validate(self) -> None:
         if self.max_slots is not None and self.max_slots < 1:
             raise ValueError("max_slots must be positive when set")
         if self.max_failures < 0:
             raise ValueError("max_failures must be non-negative")
+        if self.max_cost_usd is not None and self.max_cost_usd <= 0:
+            raise ValueError("max_cost_usd must be positive when set")
 
 
 class CampaignRunner:
@@ -239,6 +248,7 @@ class CampaignRunner:
 
         results: list[SlotRunResult] = []
         executed = failed = skipped = 0
+        measured_cost = 0.0
         halted_reason = ""
         slots: Sequence[Mapping[str, Any]] = sorted(
             plan.get("slots", []) or [], key=lambda item: int(item.get("sequence", 0))
@@ -257,6 +267,13 @@ class CampaignRunner:
                 skipped += 1
                 continue
             executed += 1
+            if budget.max_cost_usd is not None:
+                measured_cost += await self._measured_run_cost(result.run_id)
+                if measured_cost >= budget.max_cost_usd:
+                    halted_reason = "max_cost_usd budget reached"
+                    if result.status == "failed":
+                        failed += 1
+                    break
             if result.status == "failed":
                 failed += 1
                 if stop_on_failure:
@@ -271,9 +288,20 @@ class CampaignRunner:
             "executed": executed,
             "failed": failed,
             "skipped": skipped,
+            "measured_cost_usd": round(measured_cost, 6),
             "halted_reason": halted_reason,
             "results": [item.to_dict() for item in results],
         }
+
+    async def _measured_run_cost(self, run_id: str) -> float:
+        events = await self.slot_runner.service.repository.list_provider_usage_events(
+            run_id=run_id, limit=1000
+        )
+        return sum(
+            float(event.cost_usd)
+            for event in events
+            if event.measured and event.cost_usd is not None
+        )
 
 
 def write_artifact_index(artifact_dir: Path) -> str:

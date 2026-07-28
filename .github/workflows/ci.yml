@@ -63,6 +63,13 @@ jobs:
       - run: uv run pytest -q -p no:cacheprovider
       - name: Validate versioned outcome benchmark contract
         run: uv run opc ops benchmark validate
+      - name: Smoke the campaign harness plan and dry-run contract
+        run: |
+          uv run opc ops benchmark plan --campaign-id ci-smoke \
+            --output "$RUNNER_TEMP/ci-campaign-plan.json" > /dev/null
+          SLOT_ID="$(uv run python -c "import json,os;print(json.load(open(os.environ['RUNNER_TEMP']+'/ci-campaign-plan.json'))['slots'][0]['slot_id'])")"
+          uv run opc ops benchmark run-slot "$SLOT_ID" \
+            --plan "$RUNNER_TEMP/ci-campaign-plan.json" --dry-run
       - name: Run repeatable operations golden loop
         run: |
           uv run python scripts/operations_golden_e2e.py \

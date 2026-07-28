@@ -473,6 +473,13 @@ def register_operations_cli(app: typer.Typer) -> None:
         ),
         max_slots: Optional[int] = typer.Option(None, "--max-slots", min=1),
         max_failures: int = typer.Option(3, "--max-failures", min=0),
+        max_cost_usd: Optional[float] = typer.Option(
+            None,
+            "--max-cost-usd",
+            min=0.000001,
+            help="Halt when MEASURED usage cost reaches this ceiling "
+            "(subscription CLI calls are unmeasured and governed by call quotas)",
+        ),
         workload: list[str] = typer.Option([], "--workload"),
         mode: list[str] = typer.Option([], "--mode"),
         stop_on_failure: bool = typer.Option(False, "--stop-on-failure"),
@@ -501,7 +508,9 @@ def register_operations_cli(app: typer.Typer) -> None:
             return await campaign.run_campaign(
                 plan,
                 budget=CampaignBudget(
-                    max_slots=max_slots, max_failures=max_failures
+                    max_slots=max_slots,
+                    max_failures=max_failures,
+                    max_cost_usd=max_cost_usd,
                 ),
                 workloads=workload or None,
                 modes=mode or None,

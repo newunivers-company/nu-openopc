@@ -387,3 +387,68 @@ class OperationsCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BenchmarkRunSlotDryRunTests(unittest.TestCase):
+    """A-3 smoke: plan -> run-slot --dry-run works without any OPC home."""
+
+    def setUp(self) -> None:
+        self.runner = CliRunner()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_plan_and_dry_run_roundtrip(self) -> None:
+        plan_path = self.root / "plan.json"
+        planned = self.runner.invoke(
+            app,
+            [
+                "ops", "benchmark", "plan",
+                "--campaign-id", "ci-smoke",
+                "--output", str(plan_path),
+            ],
+        )
+        self.assertEqual(planned.exit_code, 0, planned.output)
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        slot_id = plan["slots"][0]["slot_id"]
+
+        result = self.runner.invoke(
+            app,
+            [
+                "ops", "benchmark", "run-slot", slot_id,
+                "--plan", str(plan_path),
+                "--dry-run",
+                "-p", "demo",
+            ],
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(payload["run_id"], plan["slots"][0]["run_id"])
+        self.assertIn("opc", payload["command"][0])
+        self.assertIn("--json", payload["command"])
+
+    def test_tampered_plan_is_rejected_before_any_execution(self) -> None:
+        plan_path = self.root / "plan.json"
+        self.runner.invoke(
+            app,
+            [
+                "ops", "benchmark", "plan",
+                "--campaign-id", "ci-smoke",
+                "--output", str(plan_path),
+            ],
+        )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["slots"][0]["prompt"] = "tampered"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        result = self.runner.invoke(
+            app,
+            [
+                "ops", "benchmark", "run-slot", plan["slots"][0]["slot_id"],
+                "--plan", str(plan_path),
+                "--dry-run",
+            ],
+        )
+        self.assertNotEqual(result.exit_code, 0)

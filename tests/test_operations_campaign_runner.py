@@ -229,6 +229,39 @@ class CampaignRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["failed"], 2)
         self.assertEqual(report["halted_reason"], "max_failures budget exceeded")
 
+    async def test_measured_cost_ceiling_halts_campaign(self) -> None:
+        from opc.operations.models import CapabilityKind, ProviderUsageEvent
+
+        executor = _FakeExecutor()
+        campaign = self._campaign(executor)
+
+        original_run_slot = campaign.slot_runner.run_slot
+
+        async def run_slot_with_usage(plan: Any, slot_id: str, **kwargs: Any):
+            result = await original_run_slot(plan, slot_id, **kwargs)
+            await self.service.repository.save_provider_usage_event(
+                ProviderUsageEvent(
+                    contract_id=f"contract-{result.run_id}",
+                    request_id=f"request-{result.run_id}",
+                    route_id="route-1",
+                    capability_kind=CapabilityKind.LLM,
+                    run_id=result.run_id,
+                    provider="litellm",
+                    measured=True,
+                    total_tokens=1000,
+                    cost_usd=0.6,
+                )
+            )
+            return result
+
+        campaign.slot_runner.run_slot = run_slot_with_usage  # type: ignore[method-assign]
+        report = await campaign.run_campaign(
+            self.plan, budget=CampaignBudget(max_slots=10, max_cost_usd=1.0)
+        )
+        self.assertEqual(report["halted_reason"], "max_cost_usd budget reached")
+        self.assertEqual(report["executed"], 2)
+        self.assertAlmostEqual(report["measured_cost_usd"], 1.2)
+
     async def test_workload_and_mode_filters(self) -> None:
         executor = _FakeExecutor()
         campaign = self._campaign(executor)
