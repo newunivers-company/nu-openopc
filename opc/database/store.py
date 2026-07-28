@@ -5646,6 +5646,12 @@ class OPCStore:
         target = coerce_phase(target_phase)
         validate_transition(Phase.AWAITING_MANAGER_REVIEW, target)
         expected_source = str(source_report_work_item_id or "").strip()
+        # A card projected back into a fresh-runnable phase must be claimable
+        # by its next attempt. Residual claim fields from the settled attempt
+        # make the dispatcher's claim CAS refuse forever while the enqueue
+        # gate keeps offering the card — the claim-livelock variant observed
+        # in the 2026-07-28 pilot (thousands of losses on one rework card).
+        release_claims = target in {Phase.READY, Phase.READY_FOR_REWORK}
         db = self._require_db()
 
         for _attempt in range(3):
@@ -5654,6 +5660,9 @@ class OPCStore:
                 return None
             metadata = dict(item.metadata or {})
             metadata.update(dict(metadata_updates or {}))
+            if release_claims:
+                metadata["claimed_by_role_session_id"] = ""
+                metadata["claimed_task_id"] = ""
             if (
                 self._metadata_has_work_item_projection_identity(metadata)
                 or str(item.projection_id or "").strip()
@@ -5668,9 +5677,16 @@ class OPCStore:
                 )
             previous_updated_at = item.updated_at.isoformat()
             updated_at = datetime.now()
+            claim_clause = (
+                """,
+                       claimed_by_role_runtime_session_id = '',
+                       claimed_by_seat_id = ''"""
+                if release_claims
+                else ""
+            )
             cursor = await db.execute(
-                """UPDATE delegation_work_items
-                   SET phase = ?, blocked_reason = ?, metadata = ?, updated_at = ?
+                f"""UPDATE delegation_work_items
+                   SET phase = ?, blocked_reason = ?, metadata = ?, updated_at = ?{claim_clause}
                    WHERE work_item_id = ?
                      AND phase = ?
                      AND updated_at = ?

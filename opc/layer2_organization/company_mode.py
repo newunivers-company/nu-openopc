@@ -7697,11 +7697,17 @@ class CompanyWorkItemExecutor:
                 metadata_updates=metadata_updates,
             )
         else:
+            release_claims = target_phase in {Phase.READY, Phase.READY_FOR_REWORK}
+            if release_claims:
+                metadata_updates["claimed_by_role_session_id"] = ""
+                metadata_updates["claimed_task_id"] = ""
             applied = await self.store.update_delegation_work_item(
                 target_work_item_id,
                 phase=target_phase,
                 blocked_reason=str(resolution.get("blocked_reason", "") or ""),
                 metadata_updates=metadata_updates,
+                claimed_by_role_runtime_session_id="" if release_claims else None,
+                claimed_by_seat_id="" if release_claims else None,
             )
         if applied is None:
             _target, stale_reason = await self._current_review_resolution_target(
