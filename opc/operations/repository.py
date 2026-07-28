@@ -17,6 +17,7 @@ from opc.operations.models import (
     LearningAssetEvaluation,
     OutboxMessage,
     OutboxDeliveryReceipt,
+    OperatorAction,
     ProviderUsageEvent,
     ProviderCanaryResult,
     RouteExecutionContract,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from opc.database.store import OPCStore, _SQLiteConnectionAdapter
 
 
-OPERATIONS_SCHEMA_VERSION = 3
+OPERATIONS_SCHEMA_VERSION = 4
 
 
 class ProviderCallQuotaExceeded(PermissionError):
@@ -297,6 +298,21 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS operator_actions (
+            action_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            plan_digest TEXT NOT NULL,
+            idempotency_key TEXT UNIQUE,
+            operator_id TEXT DEFAULT '',
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            executed_at TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_goal_contracts_project_status
             ON goal_contracts(project_id, status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_goal_contract_versions_project
@@ -337,6 +353,8 @@ async def create_operations_schema(db: "_SQLiteConnectionAdapter") -> None:
             ON provider_call_reservations(project_id, provider, created_at, status);
         CREATE INDEX IF NOT EXISTS idx_staffing_decisions_run_role
             ON staffing_decisions(run_id, role_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_operator_actions_project_status
+            ON operator_actions(project_id, status, created_at);
         """
     )
     await _ensure_columns(
@@ -880,6 +898,17 @@ class OperationsRepository:
         async with self.db.execute(query, params) as cursor:
             rows = await cursor.fetchall()
         return [_outbox_from_row(row) for row in rows]
+
+    async def get_outbox_message(self, message_id: str) -> OutboxMessage | None:
+        async with self.db.execute(
+            """SELECT message_id, event_id, run_id, topic, payload, status, attempts,
+                      max_attempts, next_attempt_at, lease_owner, lease_token,
+                      lease_expires_at, last_error, created_at, delivered_at
+               FROM outbox_messages WHERE message_id = ?""",
+            (message_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _outbox_from_row(row) if row else None
 
     async def save_outbox_delivery_receipt(
         self,
@@ -1551,6 +1580,83 @@ class OperationsRepository:
         params.append(max(1, min(int(limit), 1000)))
         return [StaffingDecision.from_dict(item) for item in await self._payload_all(query, params)]
 
+    async def save_operator_action(self, action: OperatorAction) -> OperatorAction:
+        action.validate()
+        self._assert_project(action.project_id)
+        await self.db.execute(
+            """INSERT INTO operator_actions
+               (action_id, project_id, kind, target_id, status, plan_digest,
+                idempotency_key, operator_id, payload, created_at, expires_at,
+                executed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(action_id) DO UPDATE SET
+                   status = excluded.status,
+                   operator_id = excluded.operator_id,
+                   payload = excluded.payload,
+                   executed_at = excluded.executed_at""",
+            (
+                action.action_id,
+                action.project_id,
+                action.kind,
+                action.target_id,
+                action.status,
+                action.plan_digest,
+                action.idempotency_key or None,
+                action.operator_id,
+                _dump(action.to_dict()),
+                action.created_at.isoformat(),
+                _iso(action.expires_at),
+                _iso(action.executed_at),
+            ),
+        )
+        await self.db.commit()
+        return action
+
+    async def get_operator_action(self, action_id: str) -> OperatorAction | None:
+        payload = await self._payload_one(
+            "SELECT payload FROM operator_actions WHERE action_id = ?",
+            (action_id,),
+        )
+        return OperatorAction.from_dict(payload) if payload else None
+
+    async def get_operator_action_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> OperatorAction | None:
+        if not idempotency_key:
+            return None
+        payload = await self._payload_one(
+            "SELECT payload FROM operator_actions WHERE idempotency_key = ?",
+            (idempotency_key,),
+        )
+        return OperatorAction.from_dict(payload) if payload else None
+
+    async def list_operator_actions(
+        self,
+        *,
+        project_id: str | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[OperatorAction]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        clean_statuses = [str(item).strip() for item in statuses or [] if str(item).strip()]
+        if clean_statuses:
+            clauses.append(f"status IN ({','.join('?' for _ in clean_statuses)})")
+            params.extend(clean_statuses)
+        query = "SELECT payload FROM operator_actions"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
+        return [
+            OperatorAction.from_dict(item)
+            for item in await self._payload_all(query, params)
+        ]
+
     async def count_rows(self, table: str, *, where: str = "", params: tuple[Any, ...] = ()) -> int:
         allowed = {
             "goal_contracts",
@@ -1568,6 +1674,7 @@ class OperationsRepository:
             "resource_approval_uses",
             "provider_call_reservations",
             "staffing_decisions",
+            "operator_actions",
         }
         if table not in allowed:
             raise ValueError(f"unsupported operations table: {table}")

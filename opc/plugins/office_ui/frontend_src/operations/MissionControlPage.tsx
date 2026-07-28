@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import type {
+  MissionActionPayload,
   MissionControlAlert,
   MissionControlPayload,
   MissionControlProviderQuota,
@@ -9,6 +11,14 @@ interface MissionControlPageProps {
   data: MissionControlPayload | null
   loading: boolean
   onRefresh: () => void
+  actionData: MissionActionPayload | null
+  actionLoading: boolean
+  onPlanAction: (alert: MissionControlAlert) => void
+  onExecuteAction: (
+    actionId: string,
+    planDigest: string,
+    operatorId: string,
+  ) => void
 }
 
 const numberOrZero = (value: number | undefined): number => (
@@ -62,8 +72,13 @@ function MetricCard({ label, value, detail, tone = 'neutral' }: {
   )
 }
 
-function AlertRow({ alert }: { alert: MissionControlAlert }) {
+function AlertRow({ alert, onPlanAction, actionLoading }: {
+  alert: MissionControlAlert
+  onPlanAction: (alert: MissionControlAlert) => void
+  actionLoading: boolean
+}) {
   const severity = alert.severity.toLowerCase()
+  const actionable = Boolean(alert.action_kind && alert.action_target_id)
   return (
     <li className={`mc-alert mc-alert--${severity}`}>
       <div className="mc-alert-rail" aria-hidden="true" />
@@ -75,13 +90,99 @@ function AlertRow({ alert }: { alert: MissionControlAlert }) {
         <strong>{alert.title}</strong>
         <p>{alert.detail}</p>
         {alert.action && <div className="mc-alert-action">Next: {alert.action}</div>}
+        {actionable && (
+          <button
+            type="button"
+            className="mc-action-btn"
+            onClick={() => onPlanAction(alert)}
+            disabled={actionLoading}
+          >
+            Review governed action
+          </button>
+        )}
       </div>
     </li>
   )
 }
 
+function ActionReview({ data, loading, operatorId, onOperatorId, onExecute }: {
+  data: MissionActionPayload | null
+  loading: boolean
+  operatorId: string
+  onOperatorId: (value: string) => void
+  onExecute: (actionId: string, planDigest: string, operatorId: string) => void
+}) {
+  if (!data && !loading) return null
+  if (loading && !data) {
+    return (
+      <div className="mc-action-review" role="status">
+        Preparing an immutable action plan…
+      </div>
+    )
+  }
+  if (!data?.ok || !data.action) {
+    return (
+      <div className="mc-action-review mc-action-review--error" role="alert">
+        <strong>Action was not accepted</strong>
+        <span>{data?.error ?? 'No action receipt was returned.'}</span>
+      </div>
+    )
+  }
+  const action = data.action
+  const planned = action.status === 'planned'
+  return (
+    <div className={`mc-action-review mc-action-review--${action.status}`} aria-live="polite">
+      <div className="mc-action-review-head">
+        <div>
+          <span>GOVERNED ACTION / {action.status.toUpperCase()}</span>
+          <strong>{action.kind.replaceAll('_', ' ')}</strong>
+        </div>
+        <code>{action.target_id}</code>
+      </div>
+      <p>{action.consequence}</p>
+      <dl>
+        <div><dt>Plan digest</dt><dd><code>{action.plan_digest}</code></dd></div>
+        <div><dt>Expires</dt><dd>{formatTimestamp(action.expires_at ?? undefined)}</dd></div>
+        {action.operator_id && <div><dt>Operator</dt><dd>{action.operator_id}</dd></div>}
+      </dl>
+      {planned ? (
+        <div className="mc-action-confirm">
+          <label>
+            Operator ID
+            <input
+              value={operatorId}
+              onChange={event => onOperatorId(event.target.value)}
+              autoComplete="username"
+            />
+          </label>
+          <button
+            type="button"
+            className="mc-action-btn mc-action-btn--confirm"
+            disabled={loading || operatorId.trim().length === 0}
+            onClick={() => onExecute(
+              action.action_id,
+              action.plan_digest,
+              operatorId.trim(),
+            )}
+          >
+            {loading ? 'Executing…' : 'Confirm exact plan'}
+          </button>
+        </div>
+      ) : (
+        <div className="mc-action-receipt">
+          {action.status === 'executed'
+            ? `Execution receipt recorded ${formatTimestamp(action.executed_at ?? undefined)}.`
+            : `Action ended with status: ${action.status}.`}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function SloBlock({ slo }: { slo?: MissionControlProviderSlo }) {
   if (!slo) return <span className="mc-provider-empty">No canary samples</span>
+  const productionReady = slo.production_ready === true
+  const readinessLabel = productionReady ? 'Production ready' : 'Evidence pending'
   return (
     <div className="mc-provider-measure">
       <div className="mc-provider-measure-head">
@@ -99,6 +200,12 @@ function SloBlock({ slo }: { slo?: MissionControlProviderSlo }) {
         <span style={{ width: `${Math.min(100, Math.max(0, numberOrZero(slo.availability) * 100))}%` }} />
       </div>
       <span>{slo.samples} samples · p95 {Math.round(numberOrZero(slo.p95_latency_ms))} ms</span>
+      <div className="mc-provider-readiness">
+        <strong className={productionReady ? 'is-good' : 'is-risk'}>{readinessLabel}</strong>
+        {!productionReady && (slo.blockers ?? []).length > 0 && (
+          <span>{slo.blockers?.[0]}</span>
+        )}
+      </div>
     </div>
   )
 }
@@ -127,7 +234,30 @@ function QuotaBlock({ quota }: { quota?: MissionControlProviderQuota }) {
   )
 }
 
-export function MissionControlPage({ data, loading, onRefresh }: MissionControlPageProps) {
+export function MissionControlPage({
+  data,
+  loading,
+  onRefresh,
+  actionData,
+  actionLoading,
+  onPlanAction,
+  onExecuteAction,
+}: MissionControlPageProps) {
+  const [operatorId, setOperatorId] = useState(() => {
+    try {
+      return localStorage.getItem('opc_operator_id') || 'owner'
+    } catch {
+      return 'owner'
+    }
+  })
+  const updateOperatorId = (value: string) => {
+    setOperatorId(value)
+    try {
+      localStorage.setItem('opc_operator_id', value)
+    } catch {
+      // Private browsing may reject storage; the current input still works.
+    }
+  }
   if (!data && loading) {
     return (
       <section className="mission-control-page mc-state" aria-busy="true" aria-live="polite">
@@ -217,8 +347,24 @@ export function MissionControlPage({ data, loading, onRefresh }: MissionControlP
             </div>
             <span>{alerts.length} open</span>
           </div>
+          <ActionReview
+            data={actionData}
+            loading={actionLoading}
+            operatorId={operatorId}
+            onOperatorId={updateOperatorId}
+            onExecute={onExecuteAction}
+          />
           {alerts.length > 0 ? (
-            <ul className="mc-alert-list">{alerts.map((alert, index) => <AlertRow key={`${alert.kind}-${alert.run_id ?? ''}-${index}`} alert={alert} />)}</ul>
+            <ul className="mc-alert-list">
+              {alerts.map((alert, index) => (
+                <AlertRow
+                  key={`${alert.kind}-${alert.action_target_id ?? alert.run_id ?? ''}-${index}`}
+                  alert={alert}
+                  onPlanAction={onPlanAction}
+                  actionLoading={actionLoading}
+                />
+              ))}
+            </ul>
           ) : (
             <div className="mc-empty">
               <strong>No active alerts</strong>

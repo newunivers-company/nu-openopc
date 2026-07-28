@@ -10146,6 +10146,68 @@ class WSHandler:
                 }
             )
 
+    async def _handle_mission_action(self, ws: Any, data: dict) -> None:
+        """Plan or confirm one allowlisted, digest-bound operator action."""
+        if self._shutting_down:
+            return
+        project_id = ""
+        phase = str(data.get("phase", "") or "").strip().lower()
+        try:
+            engine, project_id = await self._engine_for_request(data)
+            operations = getattr(engine, "operations", None)
+            actions = getattr(operations, "operator_actions", None)
+            if actions is None:
+                raise RuntimeError(
+                    "Operations action center is not enabled for this project."
+                )
+            if phase == "plan":
+                action = await actions.plan(
+                    project_id=project_id,
+                    kind=str(data.get("kind", "") or ""),
+                    target_id=str(data.get("target_id", "") or ""),
+                    reason=str(data.get("reason", "") or ""),
+                    idempotency_key=str(data.get("idempotency_key", "") or ""),
+                )
+            elif phase == "execute":
+                action = await actions.execute(
+                    project_id=project_id,
+                    action_id=str(data.get("action_id", "") or ""),
+                    plan_digest=str(data.get("plan_digest", "") or ""),
+                    operator_id=str(data.get("operator_id", "") or ""),
+                    confirmed=data.get("confirmed") is True,
+                )
+            else:
+                raise ValueError("mission action phase must be plan or execute")
+            await ws.send_json(
+                {
+                    "type": "mission_action",
+                    "payload": {
+                        "ok": True,
+                        "phase": phase,
+                        "project_id": project_id,
+                        "action": action,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "Mission Control action {} failed for {}: {}",
+                phase or "unknown",
+                project_id or "unknown",
+                exc,
+            )
+            await ws.send_json(
+                {
+                    "type": "mission_action",
+                    "payload": {
+                        "ok": False,
+                        "phase": phase,
+                        "project_id": project_id,
+                        "error": str(exc),
+                    },
+                }
+            )
+
     async def _handle_comms_read_message(self, ws: Any, data: dict) -> None:
         """Read the body of a single comms message file for the UI viewer."""
         if self._shutting_down:
@@ -10164,3 +10226,4 @@ class WSHandler:
     _HANDLERS["comms_state"] = _handle_comms_state
     _HANDLERS["comms_read_message"] = _handle_comms_read_message
     _HANDLERS["mission_control"] = _handle_mission_control
+    _HANDLERS["mission_action"] = _handle_mission_action

@@ -1,7 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { VisualSocketClient, type MissionControlPayload } from './lib/wsClient'
+import {
+  VisualSocketClient,
+  type MissionActionPayload,
+  type MissionControlAlert,
+  type MissionControlPayload,
+} from './lib/wsClient'
 import { PhaserGame } from './game/PhaserGame'
 import { GameBridge } from './game/GameBridge'
 import { registerTestRunner } from './game/test/eventTestRunner'
@@ -500,6 +505,8 @@ export default function App() {
   const [commsMessage, setCommsMessage] = useState<import('./lib/wsClient').CommsMessagePayload | null>(null)
   const [missionControlData, setMissionControlData] = useState<MissionControlPayload | null>(null)
   const [missionControlLoading, setMissionControlLoading] = useState(false)
+  const [missionActionData, setMissionActionData] = useState<MissionActionPayload | null>(null)
+  const [missionActionLoading, setMissionActionLoading] = useState(false)
   const [talentTemplates, setTalentTemplates] = useState<TalentTemplate[]>([])
   const [defaultTalentDir, setDefaultTalentDir] = useState<string>('')
   const [employeeDetail, setEmployeeDetail] = useState<EmployeeDetailPayload | null>(null)
@@ -1791,6 +1798,14 @@ export default function App() {
         setMissionControlData(payload)
         setMissionControlLoading(false)
       },
+      onMissionAction: (payload) => {
+        if (!payloadMatchesActiveProject(payload as unknown as Record<string, unknown>, false)) return
+        setMissionActionData(payload)
+        setMissionActionLoading(false)
+        if (payload.ok && payload.action?.status === 'executed') {
+          clientRef.current?.missionControl(payload.project_id)
+        }
+      },
       onTalentList: (payload) => {
         setTalentTemplates(payload.templates ?? [])
         if (payload.talent_dir) setDefaultTalentDir(payload.talent_dir)
@@ -2000,6 +2015,37 @@ export default function App() {
     if (status !== 'connected') return
     setMissionControlLoading(true)
     clientRef.current?.missionControl(getActiveProjectId())
+  }, [getActiveProjectId, status])
+
+  const planMissionAction = useCallback((alert: MissionControlAlert) => {
+    if (
+      status !== 'connected'
+      || !alert.action_kind
+      || !alert.action_target_id
+    ) return
+    setMissionActionData(null)
+    setMissionActionLoading(true)
+    clientRef.current?.missionActionPlan(
+      getActiveProjectId(),
+      alert.action_kind,
+      alert.action_target_id,
+      `Mission Control review: ${alert.title}`,
+    )
+  }, [getActiveProjectId, status])
+
+  const executeMissionAction = useCallback((
+    actionId: string,
+    planDigest: string,
+    operatorId: string,
+  ) => {
+    if (status !== 'connected') return
+    setMissionActionLoading(true)
+    clientRef.current?.missionActionExecute(
+      getActiveProjectId(),
+      actionId,
+      planDigest,
+      operatorId,
+    )
   }, [getActiveProjectId, status])
 
   useEffect(() => {
@@ -2536,6 +2582,10 @@ export default function App() {
             data={missionControlData}
             loading={missionControlLoading}
             onRefresh={refreshMissionControl}
+            actionData={missionActionData}
+            actionLoading={missionActionLoading}
+            onPlanAction={planMissionAction}
+            onExecuteAction={executeMissionAction}
           />
         </Suspense>
       )}

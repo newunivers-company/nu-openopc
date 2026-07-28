@@ -1089,7 +1089,59 @@ class MissionAlert(ContractMixin):
     run_id: str = ""
     goal_id: str = ""
     action: str = ""
+    action_kind: str = ""
+    action_target_id: str = ""
     schema_version: int = 1
+
+
+@dataclass
+class OperatorAction(ContractMixin):
+    """Auditable, single-use Mission Control action plan and receipt."""
+
+    project_id: str
+    kind: str
+    target_id: str
+    plan_digest: str
+    action_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    status: str = "planned"
+    idempotency_key: str = ""
+    operator_id: str = ""
+    parameters: dict[str, Any] = field(default_factory=dict)
+    result: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+    expires_at: datetime | None = None
+    executed_at: datetime | None = None
+    schema_version: int = 1
+
+    def validate(self) -> None:
+        if not all(
+            item.strip()
+            for item in (self.action_id, self.project_id, self.kind, self.target_id)
+        ):
+            raise ValueError("operator action identity fields are required")
+        if self.status not in {"planned", "executing", "executed", "failed", "expired"}:
+            raise ValueError(f"unsupported operator action status: {self.status}")
+        if len(self.plan_digest) != 64:
+            raise ValueError("operator action plan_digest must be SHA-256")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "OperatorAction":
+        return cls(
+            action_id=str(data.get("action_id", "") or str(uuid.uuid4())),
+            project_id=str(data.get("project_id", "default") or "default"),
+            kind=str(data.get("kind", "")),
+            target_id=str(data.get("target_id", "")),
+            plan_digest=str(data.get("plan_digest", "")),
+            status=str(data.get("status", "planned") or "planned"),
+            idempotency_key=str(data.get("idempotency_key", "") or ""),
+            operator_id=str(data.get("operator_id", "") or ""),
+            parameters=dict(data.get("parameters", {}) or {}),
+            result=dict(data.get("result", {}) or {}),
+            created_at=parse_datetime(data.get("created_at"), default=utc_now()) or utc_now(),
+            expires_at=parse_datetime(data.get("expires_at")),
+            executed_at=parse_datetime(data.get("executed_at")),
+            schema_version=int(data.get("schema_version", 1) or 1),
+        )
 
 
 @dataclass

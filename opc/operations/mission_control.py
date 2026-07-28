@@ -219,6 +219,8 @@ class MissionControlService:
                         run_id=run.run_id,
                         goal_id=run.goal_id,
                         action=f"Run recovery for {run.run_id} and inspect its last event.",
+                        action_kind="recover_run",
+                        action_target_id=run.run_id,
                     )
                 )
             elif run.status == RunStatus.BLOCKED:
@@ -307,7 +309,12 @@ class MissionControlService:
                     kind="dead_letter",
                     title=f"{len(dead_letters)} outbox message(s) exhausted retries",
                     detail="At-least-once delivery stopped after the configured attempt limit.",
-                    action="Inspect errors, repair the consumer, then replay intentionally.",
+                    action=(
+                        "Inspect errors, repair the consumer, then replay the oldest "
+                        "dead letter intentionally."
+                    ),
+                    action_kind="replay_dead_letter",
+                    action_target_id=dead_letters[0].message_id,
                 )
             )
         if pending_approvals:
@@ -410,6 +417,8 @@ class MissionControlService:
                         title=f"Promoted learning asset {asset.name} has expired",
                         detail=f"Asset {asset.asset_id} v{asset.version} should no longer be injected.",
                         action="Retire it or create and evaluate a replacement candidate.",
+                        action_kind="retire_learning_asset",
+                        action_target_id=asset.asset_id,
                     )
                 )
 

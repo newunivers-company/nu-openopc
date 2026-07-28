@@ -61,7 +61,7 @@ class OperationsBackupTests(unittest.IsolatedAsyncioTestCase):
                 await reopened.close()
 
             self.assertEqual(created["integrity"], "ok")
-            self.assertEqual(created["operations_schema_version"], 3)
+            self.assertEqual(created["operations_schema_version"], 4)
             self.assertTrue(Path(f"{backup_path}.manifest.json").is_file())
             self.assertEqual(restored["integrity"], "ok")
             self.assertIsNotNone(goal)

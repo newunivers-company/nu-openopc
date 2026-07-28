@@ -40,13 +40,14 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
                     "resource_approval_uses",
                     "provider_call_reservations",
                     "staffing_decisions",
+                    "operator_actions",
                 }
                 self.assertTrue(expected.issubset(tables))
                 async with store._require_db().execute(
                     "SELECT version FROM operations_schema WHERE component = 'operating_kernel'"
                 ) as cursor:
                     row = await cursor.fetchone()
-                self.assertEqual(row[0], 3)
+                self.assertEqual(row[0], 4)
             finally:
                 await store.close()
 
@@ -67,7 +68,7 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await second.close()
 
-    async def test_v1_fixture_migrates_to_v3_and_backfills_goal_history(self) -> None:
+    async def test_v1_fixture_migrates_to_v4_and_backfills_goal_history(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             path = Path(raw_root) / "tasks.db"
             fixture = Path("tests/fixtures/operations_schema_v1.sql").read_text(
@@ -86,7 +87,7 @@ class OperationsSchemaAndConfigTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT COUNT(*) FROM goal_contract_versions WHERE goal_id = 'legacy-goal'"
                 ) as cursor:
                     history = await cursor.fetchone()
-                self.assertEqual(version[0], 3)
+                self.assertEqual(version[0], 4)
                 self.assertEqual(history[0], 1)
             finally:
                 await store.close()

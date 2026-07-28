@@ -157,8 +157,17 @@ def _inspect_backup_sync(path: Path, verify_manifest: bool) -> dict[str, Any]:
                 "provider_canary_results",
                 "provider_call_reservations",
                 "resource_approval_uses",
+                "operator_actions",
             ):
-                counts[table] = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table,),
+                ).fetchone()
+                counts[table] = (
+                    int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+                    if exists
+                    else 0
+                )
     except sqlite3.DatabaseError as exc:
         raise OperationsBackupError(f"cannot inspect SQLite backup: {exc}") from exc
     return {
