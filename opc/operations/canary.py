@@ -813,3 +813,48 @@ def _error_category(error: str) -> str:
     if "cost" in text or "budget" in text:
         return "budget"
     return "other"
+
+
+async def run_status_canary_loop(
+    canaries: "ProviderCanaryService",
+    request: CapabilityRequest,
+    *,
+    expected_model: str = "",
+    interval_seconds: float = 300.0,
+    iterations: int = 1,
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Drive periodic status canaries without a resident engine process.
+
+    This is the operational answer to the 24h readiness window: an external
+    scheduler (cron/systemd) or a long-lived CLI invocation keeps samples
+    flowing while the engine is down. ``iterations=0`` runs until cancelled;
+    every sample is persisted through the normal status-canary path, so it
+    counts toward the same SLO/readiness evidence as engine-driven samples.
+    """
+
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if iterations < 0:
+        raise ValueError("iterations must be non-negative")
+    samples = 0
+    failures = 0
+    last: dict[str, Any] | None = None
+    while True:
+        result = await canaries.status_canary(request, expected_model=expected_model)
+        last = result.to_dict()
+        samples += 1
+        if not result.success:
+            failures += 1
+        if on_result is not None:
+            on_result(last)
+        if iterations and samples >= iterations:
+            break
+        await sleep(interval_seconds)
+    return {
+        "samples": samples,
+        "failures": failures,
+        "interval_seconds": interval_seconds,
+        "last": last,
+    }

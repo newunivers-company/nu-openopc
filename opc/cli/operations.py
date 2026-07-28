@@ -28,7 +28,7 @@ from opc.operations.models import (
     StaffingCandidate,
     utc_now,
 )
-from opc.operations.canary import build_readiness_campaign_plan
+from opc.operations.canary import build_readiness_campaign_plan, run_status_canary_loop
 from opc.operations.backup import OperationsBackupManager
 from opc.operations.benchmarks import (
     DEFAULT_SUITE_PATH,
@@ -1263,6 +1263,21 @@ def register_operations_cli(app: typer.Typer) -> None:
         request_json: Path = typer.Option(..., "--request"),
         expected_model: str = typer.Option("", "--expected-model"),
         output: Optional[Path] = typer.Option(None, "--output"),
+        loop: bool = typer.Option(
+            False,
+            "--loop",
+            help="Keep sampling on an interval so readiness windows fill "
+            "without a resident engine (cron/systemd friendly)",
+        ),
+        interval_seconds: float = typer.Option(
+            300.0, "--interval-seconds", min=1.0
+        ),
+        iterations: int = typer.Option(
+            0,
+            "--iterations",
+            min=0,
+            help="With --loop: stop after N samples; 0 runs until interrupted",
+        ),
         project: str = typer.Option("default", "--project", "-p"),
     ) -> None:
         """Run a no-generation readiness canary and persist its SLO evidence."""
@@ -1274,9 +1289,22 @@ def register_operations_cli(app: typer.Typer) -> None:
             request.require_preferred_provider = bool(
                 request.preferred_providers
             )
-            return (
-                await service.canaries.status_canary(request, expected_model=expected_model)
-            ).to_dict()
+            if not loop:
+                return (
+                    await service.canaries.status_canary(
+                        request, expected_model=expected_model
+                    )
+                ).to_dict()
+            return await run_status_canary_loop(
+                service.canaries,
+                request,
+                expected_model=expected_model,
+                interval_seconds=interval_seconds,
+                iterations=iterations,
+                on_result=lambda sample: typer.echo(
+                    json.dumps(sample, ensure_ascii=False, sort_keys=True, default=str)
+                ),
+            )
 
         report = _run(project, action, integrations=True)
         if output is not None:

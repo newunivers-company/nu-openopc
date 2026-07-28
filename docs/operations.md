@@ -417,6 +417,33 @@ SLO arithmetic. A drill passes only when actual injection, independent
 authority, durable evidence, expected failure, fallback, alerting, and recovery
 are all recorded.
 
+### Keeping the readiness window filled without a resident engine
+
+The in-engine status scheduler stops when the engine process exits, so a 24h
+observation window needs an external heartbeat. `--loop` keeps the same
+no-generation canary sampling on an interval and persists every sample through
+the normal SLO/readiness path:
+
+```bash
+# Long-lived loop (Ctrl-C to stop; 0 iterations = run until interrupted)
+uv run opc ops capability canary --request capability-request.json \
+  --loop --interval-seconds 300 --project demo
+
+# Bounded batch, cron/systemd friendly (one sample per invocation also works)
+uv run opc ops capability canary --request capability-request.json \
+  --loop --interval-seconds 300 --iterations 12 --project demo
+```
+
+Example cron line sampling every 5 minutes (each invocation takes one sample):
+
+```cron
+*/5 * * * * cd /path/to/nu-openopc && uv run opc ops capability canary \
+  --request capability-request.json --project demo >> /tmp/opc-canary.log 2>&1
+```
+
+Pair this with a daily `mint_ark_key.py --renew-if-expiring 7` cron in
+`nu-llm-routing-lib` so credential expiry cannot silently break the window.
+
 After dependency, outcome, shadow, and canary reports exist, one model-free
 dossier prevents partial evidence from being mistaken for a release:
 
