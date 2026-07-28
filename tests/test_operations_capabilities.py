@@ -37,6 +37,7 @@ class _FakeLLMRouter:
 
     def __init__(self) -> None:
         self.calls = []
+        self.target_calls = []
 
     def diagnostics(self, **kwargs):
         self.calls.append(kwargs)
@@ -46,7 +47,8 @@ class _FakeLLMRouter:
             "matched_profile_id": "agentic-tools",
         }
 
-    def targets(self, **_kwargs):
+    def targets(self, **kwargs):
+        self.target_calls.append(kwargs)
         return (
             _FakeTarget("cloud", "openai/cloud-model", "https://cloud.example/v1"),
             _FakeTarget("ollama-local", "openai/local-model", "http://127.0.0.1:11434/v1"),
@@ -251,6 +253,31 @@ class UnifiedCapabilityBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.diagnostics["selection_order"][0], "ollama-local")
         self.assertTrue(free_route.allowed)
         self.assertEqual(free_route.provider, "ollama-local")
+
+    async def test_strict_preferred_llm_fails_closed_without_fallback(self) -> None:
+        route = await self.broker.plan(
+            CapabilityRequest(
+                capability_kind=CapabilityKind.LLM,
+                task_type="dialogue",
+                preferred_providers=["missing-subscription"],
+                require_preferred_provider=True,
+            )
+        )
+
+        self.assertFalse(route.allowed)
+        self.assertEqual(route.provider, "missing-subscription")
+        self.assertEqual(route.model, "")
+        self.assertEqual(route.reason, "preferred LLM provider is unavailable")
+        self.assertTrue(
+            any(
+                "preferred LLM providers are unavailable" in blocker
+                for blocker in route.blockers
+            )
+        )
+        self.assertEqual(
+            self.llm_router.target_calls[-1]["preferred_providers"],
+            ["missing-subscription"],
+        )
 
     async def test_resource_route_uses_actual_catalog_and_local_free_first(self) -> None:
         route = await self.broker.plan(

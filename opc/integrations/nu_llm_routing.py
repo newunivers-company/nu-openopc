@@ -63,7 +63,10 @@ class NULlmRoutingBridge:
         self._config_path: Path | None = None
         self._load_attempted = False
         self._load_error = ""
-        self._target_cache: dict[tuple[str, bool], tuple[RoutedLLMTarget, ...]] = {}
+        self._target_cache: dict[
+            tuple[str, bool, tuple[str, ...]],
+            tuple[RoutedLLMTarget, ...],
+        ] = {}
         self._background_shadow: Any | None = None
         self._shadow_error = ""
         self._shadow_recovered = 0
@@ -254,10 +257,18 @@ class NULlmRoutingBridge:
         *,
         task_type: str | None,
         has_tools: bool,
+        preferred_providers: Sequence[str] | None = None,
     ) -> tuple[RoutedLLMTarget, ...]:
         if has_tools and not self.config.apply_to_tool_calls:
             return ()
-        cache_key = (str(task_type or ""), bool(has_tools))
+        preferred = tuple(
+            dict.fromkeys(
+                str(item).strip().lower()
+                for item in (preferred_providers or ())
+                if str(item).strip()
+            )
+        )
+        cache_key = (str(task_type or ""), bool(has_tools), preferred)
         if cache_key in self._target_cache:
             return self._target_cache[cache_key]
         router = self._load_router()
@@ -274,6 +285,16 @@ class NULlmRoutingBridge:
             logger.warning("NU LLM route planning failed: {}", exc)
             return ()
 
+        if preferred:
+            preferred_order = [
+                provider_name
+                for preference in preferred
+                for provider_name in ordered_names
+                if _provider_family_match(provider_name, preference)
+            ]
+            ordered_names = list(
+                dict.fromkeys([*preferred_order, *ordered_names])
+            )
         allowed = {str(item).strip() for item in self.config.allowed_providers if str(item).strip()}
         targets: list[RoutedLLMTarget] = []
         for provider_name in ordered_names:
@@ -295,6 +316,52 @@ class NULlmRoutingBridge:
         return result
     def has_usable_target(self) -> bool:
         return bool(self.targets(task_type="quick_tasks", has_tools=False))
+
+    def provider_readiness(self, provider_name: str) -> dict[str, Any]:
+        """Return a privacy-safe status code for one explicitly requested provider."""
+
+        name = str(provider_name or "").strip()
+        router = self._load_router()
+        if router is None:
+            return {
+                "provider": name,
+                "registered": False,
+                "available": False,
+                "category": "router_unavailable",
+            }
+        provider = getattr(router, "providers", {}).get(name)
+        if provider is None:
+            return {
+                "provider": name,
+                "registered": False,
+                "available": False,
+                "category": "not_registered",
+            }
+        status_reader = getattr(provider, "status", None)
+        if not callable(status_reader):
+            return {
+                "provider": name,
+                "registered": True,
+                "available": False,
+                "category": "status_unsupported",
+            }
+        try:
+            status = status_reader()
+        except Exception:
+            return {
+                "provider": name,
+                "registered": True,
+                "available": False,
+                "category": "status_error",
+            }
+        available = bool(getattr(status, "available", False))
+        detail = str(getattr(status, "detail", "") or "")
+        return {
+            "provider": name,
+            "registered": True,
+            "available": available,
+            "category": "ready" if available else _provider_status_category(detail),
+        }
 
     @staticmethod
     def _target_from_provider(
@@ -516,6 +583,36 @@ class NULlmRoutingBridge:
             **status,
         }
 
+    def shadow_evidence_report(
+        self,
+        *,
+        minimum_decisions: int = 20,
+    ) -> dict[str, Any]:
+        """Read the durable content-free event log without invoking a model."""
+
+        from opc.operations.experiments import shadow_transport_report
+
+        status = self.shadow_status()
+        database_path = Path(str(status.get("event_db_path", "") or ""))
+        if not status["enabled"]:
+            return {
+                "available": False,
+                "status": status,
+                "blockers": ["background_shadow_disabled"],
+            }
+        try:
+            report = shadow_transport_report(
+                database_path,
+                minimum_decisions=max(1, int(minimum_decisions)),
+            )
+        except Exception as exc:
+            return {
+                "available": False,
+                "status": status,
+                "blockers": [f"{type(exc).__name__}: {exc}"],
+            }
+        return {"available": True, "status": status, **report}
+
     def execute_text_target(
         self,
         target: RoutedLLMTarget,
@@ -607,3 +704,39 @@ class NULlmRoutingBridge:
         if checks is not None:
             result["provider_checks"] = checks
         return result
+
+
+def _provider_family_match(provider: str, preferred: str) -> bool:
+    candidate = str(provider or "").strip().lower()
+    family = str(preferred or "").strip().lower()
+    return bool(
+        candidate
+        and family
+        and (
+            candidate == family
+            or candidate.startswith(f"{family}-")
+            or candidate.startswith(f"{family}_")
+        )
+    )
+
+
+def _provider_status_category(detail: str) -> str:
+    text = str(detail or "").strip().lower()
+    if "subscription quota" in text or "usage limit" in text or "rate limit" in text:
+        return "subscription_quota"
+    if any(
+        token in text
+        for token in (
+            "authentication",
+            "not authenticated",
+            "unauthorized",
+            "login failed",
+            "sign in",
+        )
+    ):
+        return "authentication"
+    if "not found" in text or "was not found on path" in text:
+        return "missing_command"
+    if "policy" in text:
+        return "policy_denied"
+    return "unavailable"

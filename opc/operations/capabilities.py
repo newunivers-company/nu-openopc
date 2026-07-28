@@ -406,6 +406,7 @@ class UnifiedCapabilityBroker:
                     raw_targets = self.llm_router.targets(
                         task_type=request.task_type,
                         has_tools=has_tools,
+                        preferred_providers=request.preferred_providers,
                     )
                     targets = [item.safe_dict() for item in raw_targets]
                 except Exception as exc:
@@ -435,9 +436,68 @@ class UnifiedCapabilityBroker:
             selection_order = [*free_order, *(item for item in usable_order if item not in free_order)]
         else:
             selection_order = usable_order
-        selected_provider = _preferred_value(selection_order, request.preferred_providers)
+        selected_provider = ""
+        if request.preferred_providers:
+            selected_provider = next(
+                (
+                    available
+                    for preferred in request.preferred_providers
+                    for available in selection_order
+                    if available == preferred
+                    or _provider_matches(available, [preferred])
+                ),
+                "",
+            )
+            if not selected_provider and request.require_preferred_provider:
+                selected_provider = request.preferred_providers[0]
+                preferred_readiness: list[dict[str, Any]] = []
+                status_reader = getattr(
+                    self.llm_router,
+                    "provider_readiness",
+                    None,
+                )
+                if callable(status_reader):
+                    for preferred in request.preferred_providers:
+                        preferred_readiness.append(
+                            await asyncio.to_thread(
+                                status_reader,
+                                preferred,
+                            )
+                        )
+                diagnostics["preferred_provider_readiness"] = (
+                    preferred_readiness
+                )
+                status_by_provider = {
+                    str(item.get("provider", "")): str(
+                        item.get("category", "unavailable")
+                    )
+                    for item in preferred_readiness
+                }
+                blockers.append(
+                    "preferred LLM providers are unavailable: "
+                    + ", ".join(
+                        (
+                            f"{preferred} "
+                            f"({status_by_provider[preferred]})"
+                            if preferred in status_by_provider
+                            else preferred
+                        )
+                        for preferred in request.preferred_providers
+                    )
+                )
+            elif not selected_provider:
+                selected_provider = _preferred_value(
+                    selection_order,
+                    request.preferred_providers,
+                )
+        else:
+            selected_provider = _preferred_value(selection_order, ())
         selected_target = target_by_provider.get(selected_provider)
-        if not selected_provider and self.default_llm_model:
+        if (
+            not selected_provider
+            and not request.require_preferred_provider
+            and self.default_llm_model
+        ):
             selected_provider = "openopc_config"
             selected_target = {
                 "provider": selected_provider,
@@ -503,8 +563,11 @@ class UnifiedCapabilityBroker:
             mode="live" if request.allow_live else "dry_run",
             allowed=plan_allowed,
             reason=(
-                "selected from NU route diagnostics"
-                if diagnostics.get("available") and selected_provider != "openopc"
+                "preferred LLM provider is unavailable"
+                if request.preferred_providers and selected_target is None
+                else "selected from NU route diagnostics"
+                if diagnostics.get("available")
+                and selected_provider != "openopc_config"
                 else "selected OpenOPC default LLM transport"
             ),
             blockers=_dedupe(blockers),

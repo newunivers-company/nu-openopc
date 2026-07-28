@@ -45,6 +45,19 @@ class _FakeSubscriptionProvider:
 _FakeSubscriptionProvider.__module__ = "nu_llm_routing_lib.providers.claude_cli"
 
 
+class _FakeUnavailableSubscriptionProvider(_FakeSubscriptionProvider):
+    def status(self):
+        return SimpleNamespace(
+            available=False,
+            detail="subscription quota cooldown (120s remaining): redacted",
+        )
+
+
+_FakeUnavailableSubscriptionProvider.__module__ = (
+    "nu_llm_routing_lib.providers.codex_cli"
+)
+
+
 class _FakeNativeProvider(_FakeSubscriptionProvider):
     model = "qwen3:test"
 
@@ -188,6 +201,62 @@ class NULlmRoutingBridgeTests(unittest.TestCase):
         self.assertTrue(target.transport_ready)
         self.assertFalse(target.supports_tools)
         self.assertEqual(response.content, "subscription-ok")
+
+    def test_preferred_subscription_target_is_not_hidden_by_candidate_cap(self) -> None:
+        bridge = NULlmRoutingBridge(
+            NULlmRoutingConfig(
+                enabled=True,
+                gpu_free_vram_mib=0,
+                max_candidates=2,
+            ),
+            opc_home=Path("/tmp/openopc-test"),
+        )
+        router = _FakeSubscriptionRouter()
+        router.providers = {
+            "claude_opus": _FakeSubscriptionProvider(),
+            "claude_sonnet": _FakeSubscriptionProvider(),
+            "grok": _FakeSubscriptionProvider(),
+        }
+        router.route_order_for = lambda _request: [
+            "claude_opus",
+            "claude_sonnet",
+            "grok",
+        ]
+        bridge._router = router
+        bridge._load_attempted = True
+
+        default_targets = bridge.targets(
+            task_type="dialogue",
+            has_tools=False,
+        )
+        preferred_targets = bridge.targets(
+            task_type="dialogue",
+            has_tools=False,
+            preferred_providers=["grok"],
+        )
+
+        self.assertEqual(
+            [item.provider for item in default_targets],
+            ["claude_opus", "claude_sonnet"],
+        )
+        self.assertEqual(preferred_targets[0].provider, "grok")
+
+    def test_provider_readiness_redacts_detail_and_classifies_quota(self) -> None:
+        bridge = _subscription_bridge()
+        bridge._router.providers["codex"] = _FakeUnavailableSubscriptionProvider()
+
+        readiness = bridge.provider_readiness("codex")
+
+        self.assertEqual(
+            readiness,
+            {
+                "provider": "codex",
+                "registered": True,
+                "available": False,
+                "category": "subscription_quota",
+            },
+        )
+        self.assertNotIn("detail", readiness)
 
     def test_native_nu_text_provider_is_executable(self) -> None:
         bridge = _subscription_bridge()

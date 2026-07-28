@@ -675,6 +675,7 @@ class CapabilityRequest(ContractMixin):
     modality: str = "text"
     required_capabilities: list[str] = field(default_factory=list)
     preferred_providers: list[str] = field(default_factory=list)
+    require_preferred_provider: bool = False
     tags: list[str] = field(default_factory=list)
     max_cost_usd: float | None = None
     allow_live: bool = False
@@ -709,6 +710,9 @@ class CapabilityRequest(ContractMixin):
             modality=str(data.get("modality", "text") or "text"),
             required_capabilities=[str(item) for item in data.get("required_capabilities", []) or []],
             preferred_providers=[str(item) for item in data.get("preferred_providers", []) or []],
+            require_preferred_provider=bool(
+                data.get("require_preferred_provider", False)
+            ),
             tags=[str(item) for item in data.get("tags", []) or []],
             max_cost_usd=_optional_float(data.get("max_cost_usd")),
             allow_live=bool(data.get("allow_live", False)),
