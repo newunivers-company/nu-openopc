@@ -441,7 +441,10 @@ def write_result_skeleton(
 # Company-mode preflight is a chain of checkpoints, each answered with a
 # fixed protocol reply (identical for every slot, so it cannot bias the
 # comparison): staffing selection -> "auto recruit", recruitment proposal
-# -> "approve".
+# -> "approve". The final delivery-release gate (awaiting_human) is also
+# answered with a scripted approve FOR BENCHMARK SLOTS ONLY: it releases
+# the deliverable inside a synthetic run, it does not attest quality —
+# quality authority stays exclusively with the human-confirmed scorecard.
 CHECKPOINT_REPLIES: tuple[tuple[tuple[str, ...], str], ...] = (
     (
         (
@@ -474,6 +477,13 @@ CHECKPOINT_REPLIES: tuple[tuple[tuple[str, ...], str], ...] = (
             "Latest Runtime Snapshot",
         ),
         "continue",
+    ),
+    (
+        (
+            "Organization Runtime Parked",
+            "waiting on human input",
+        ),
+        "approve",
     ),
 )
 BLOCKED_RESPONSE_MARKERS = (

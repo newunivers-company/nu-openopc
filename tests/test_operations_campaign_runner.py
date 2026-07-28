@@ -729,3 +729,20 @@ class RuntimeSnapshotNudgeTests(unittest.TestCase):
         )
         self.assertEqual(classify_response(snapshot), "staffing_checkpoint")
         self.assertEqual(checkpoint_reply_for(snapshot), "continue")
+
+
+class DeliveryGateProtocolTests(unittest.TestCase):
+    def test_parked_runtime_awaiting_human_gets_scripted_approve(self) -> None:
+        from opc.operations.campaign_runner import (
+            checkpoint_reply_for,
+            classify_response,
+        )
+
+        parked = (
+            "## Organization Runtime Parked\n"
+            "All remaining work items are waiting on human input. Answer the "
+            "pending approval/review card(s) and the run will continue.\n"
+            "- Deliver final result to user: CEO Intake: awaiting_human"
+        )
+        self.assertEqual(classify_response(parked), "staffing_checkpoint")
+        self.assertEqual(checkpoint_reply_for(parked), "approve")
