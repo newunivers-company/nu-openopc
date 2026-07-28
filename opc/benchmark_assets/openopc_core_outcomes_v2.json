@@ -1,0 +1,396 @@
+{
+  "schema_version": 1,
+  "suite_id": "openopc-core-outcomes",
+  "version": 2,
+  "status": "candidate_requires_operator_evidence",
+  "description": "Paired Task Mode versus Company Mode outcome suite for software, content, and research work, expanded to six cases per workload with tagged difficulty tiers. Synthetic inputs are safe to run, but only completed governed runs with independent evidence can support promotion.",
+  "repetitions": 3,
+  "gate_policy": {
+    "baseline_mode": "task",
+    "candidate_mode": "company",
+    "minimum_paired_samples_per_workload": 10,
+    "maximum_quality_regression": 0.02,
+    "maximum_success_regression": 0.02,
+    "minimum_quality_improvement": 0.0
+  },
+  "cases": [
+    {
+      "case_id": "software-race-fix",
+      "workload": "software",
+      "title": "Repair an atomic reservation race",
+      "prompt": "Diagnose and repair a concurrent reservation race in a small SQLite-backed service. Preserve failed-call accounting, add multiprocess regression coverage, and produce a concise operator note.",
+      "tags": ["concurrency", "sqlite", "recovery", "difficulty:hard"],
+      "goal": {
+        "goal_id": "benchmark-software-race-fix",
+        "project_id": "benchmark",
+        "title": "Repair an atomic reservation race",
+        "objective": "Produce a verified race-free reservation implementation and evidence.",
+        "deliverables": ["source patch", "multiprocess regression test", "operator note"],
+        "acceptance_criteria": [
+          {"criterion_id": "correctness", "description": "Concurrent workers cannot exceed the declared limit.", "minimum_score": 0.9},
+          {"criterion_id": "recovery", "description": "Failures remain conservatively accounted and expire by policy.", "minimum_score": 0.85},
+          {"criterion_id": "evidence", "description": "A repeatable multiprocess test and commands are supplied.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["test output", "source revision", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "software-api-feature",
+      "workload": "software",
+      "title": "Add a governed API feature",
+      "prompt": "Add a versioned JSON API endpoint to an existing service, including validation, authorization boundaries, backwards compatibility, tests, and migration notes.",
+      "tags": ["api", "compatibility", "security", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-software-api-feature",
+        "project_id": "benchmark",
+        "title": "Add a governed API feature",
+        "objective": "Ship a backwards-compatible endpoint with enforceable contracts.",
+        "deliverables": ["API implementation", "contract tests", "migration notes"],
+        "acceptance_criteria": [
+          {"criterion_id": "contract", "description": "The API rejects malformed and unauthorized requests.", "minimum_score": 0.9},
+          {"criterion_id": "compatibility", "description": "Existing clients and tests remain compatible.", "minimum_score": 0.9},
+          {"criterion_id": "documentation", "description": "Usage and migration behavior are documented.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["contract test output", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "software-dependency-release",
+      "workload": "software",
+      "title": "Make a private dependency release reproducible",
+      "prompt": "Replace mutable sibling dependency checkouts with an immutable release manifest, exact source refs, installed-version checks, and clean-wheel verification.",
+      "tags": ["release", "supply-chain", "ci", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-software-dependency-release",
+        "project_id": "benchmark",
+        "title": "Make dependency release reproducible",
+        "objective": "Ensure CI and local release checks consume the same immutable dependency sources.",
+        "deliverables": ["release manifest", "CI pinning", "verification tests"],
+        "acceptance_criteria": [
+          {"criterion_id": "immutability", "description": "All dependency refs are full immutable commits.", "minimum_score": 1.0},
+          {"criterion_id": "identity", "description": "Source HEAD, package version, and public API are verified.", "minimum_score": 0.95},
+          {"criterion_id": "failure_mode", "description": "Drift fails closed with an actionable message.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 1, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["clean install report", "CI configuration digest"]
+      }
+    },
+    {
+      "case_id": "software-incident-recovery",
+      "workload": "software",
+      "title": "Recover a failed durable delivery",
+      "prompt": "Investigate a dead-letter delivery after a process crash, prove the external side effect is not duplicated, replay it safely, and document the recovery decision.",
+      "tags": ["incident", "outbox", "idempotency", "difficulty:hard"],
+      "goal": {
+        "goal_id": "benchmark-software-incident-recovery",
+        "project_id": "benchmark",
+        "title": "Recover failed durable delivery",
+        "objective": "Restore delivery without repeating an external side effect.",
+        "deliverables": ["root-cause report", "safe replay", "recovery evidence"],
+        "acceptance_criteria": [
+          {"criterion_id": "deduplication", "description": "The side effect occurs at most once.", "minimum_score": 1.0},
+          {"criterion_id": "audit", "description": "Replay reason and operator identity are durable.", "minimum_score": 0.9},
+          {"criterion_id": "recovery", "description": "The message reaches a terminal delivered state.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 1, "max_failed_attempts": 2},
+        "evidence_requirements": ["delivery receipt", "event log", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "software-schema-migration",
+      "workload": "software",
+      "title": "Execute a zero-downtime schema migration",
+      "prompt": "Migrate a synthetic order table from a single denormalized column to a normalized child table using an expand-and-contract plan: dual-write shim, deterministic backfill with checkpointing, row-count and checksum parity verification, and a rehearsed rollback that leaves no partial state. All data is generated by the provided seed script; no external systems are involved.",
+      "tags": ["migration", "expand-contract", "rollback", "difficulty:hard"],
+      "goal": {
+        "goal_id": "benchmark-software-schema-migration",
+        "project_id": "benchmark",
+        "title": "Execute a zero-downtime schema migration",
+        "objective": "Move data to the new schema with provable parity and a working rollback at every phase.",
+        "deliverables": ["migration scripts", "dual-write shim", "parity verification report", "rollback rehearsal log"],
+        "acceptance_criteria": [
+          {"criterion_id": "parity", "description": "Row counts and content checksums match between old and new representations at cutover.", "minimum_score": 1.0},
+          {"criterion_id": "reversibility", "description": "Rollback from each migration phase is demonstrated and leaves no orphaned or partial rows.", "minimum_score": 0.95},
+          {"criterion_id": "availability", "description": "Reads and writes keep succeeding throughout the migration, shown by an interleaved workload test.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["parity report", "rollback rehearsal log", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "software-perf-regression",
+      "workload": "software",
+      "title": "Fix a measured performance regression",
+      "prompt": "A synthetic report endpoint regressed from linear to quadratic time after a refactor. Reproduce the regression with a deterministic micro-benchmark on generated fixtures, isolate the offending change, restore linear behavior without changing output, and encode the performance budget as a repeatable test.",
+      "tags": ["performance", "benchmark", "profiling", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-software-perf-regression",
+        "project_id": "benchmark",
+        "title": "Fix a measured performance regression",
+        "objective": "Restore the documented performance envelope with evidence and a guarding test.",
+        "deliverables": ["reproduction benchmark", "fix patch", "before-and-after measurements", "budget-enforcing test"],
+        "acceptance_criteria": [
+          {"criterion_id": "reproduction", "description": "The regression is demonstrated with a deterministic benchmark before the fix.", "minimum_score": 0.9},
+          {"criterion_id": "restoration", "description": "Post-fix timings scale linearly across at least three input sizes while outputs stay identical.", "minimum_score": 0.9},
+          {"criterion_id": "guard", "description": "A repeatable test fails if the complexity budget is exceeded again.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["benchmark output", "test output", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-vertical-series",
+      "workload": "content",
+      "title": "Plan a vertical microdrama episode",
+      "prompt": "Create a production-ready 60–90 second vertical microdrama package with a hook, beat sheet, scene board, character continuity constraints, and platform-safe ending.",
+      "tags": ["vertical-video", "story", "production", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-content-vertical-series",
+        "project_id": "benchmark",
+        "title": "Plan a vertical microdrama episode",
+        "objective": "Deliver a coherent and shootable short-form episode package.",
+        "deliverables": ["logline", "beat sheet", "scene board", "continuity rules"],
+        "acceptance_criteria": [
+          {"criterion_id": "hook", "description": "The opening establishes conflict within the first beat.", "minimum_score": 0.85},
+          {"criterion_id": "shootability", "description": "Shots, duration, and transitions are production feasible.", "minimum_score": 0.85},
+          {"criterion_id": "continuity", "description": "Character, prop, and location anchors are explicit.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["review rubric", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-campaign-package",
+      "workload": "content",
+      "title": "Build a launch campaign package",
+      "prompt": "Produce a coherent product launch package: positioning, landing-page outline, three channel variants, CTA hypotheses, and a measurable experiment plan without inventing customer evidence.",
+      "tags": ["marketing", "copy", "experimentation", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-content-campaign-package",
+        "project_id": "benchmark",
+        "title": "Build a launch campaign package",
+        "objective": "Deliver channel-ready campaign assets tied to testable hypotheses.",
+        "deliverables": ["positioning", "landing outline", "channel variants", "experiment plan"],
+        "acceptance_criteria": [
+          {"criterion_id": "consistency", "description": "All assets use one defensible positioning.", "minimum_score": 0.9},
+          {"criterion_id": "evidence_hygiene", "description": "Claims distinguish facts, assumptions, and hypotheses.", "minimum_score": 0.95},
+          {"criterion_id": "measurement", "description": "Experiments define audience, metric, and decision rule.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["claim source map", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-continuity-qa",
+      "workload": "content",
+      "title": "Gate character and prop continuity",
+      "prompt": "Review a synthetic two-scene asset manifest for character identity, costume, prop, composition, and story continuity. Separate object-grounding evidence from judgments requiring stronger VLM or human review.",
+      "tags": ["quality", "continuity", "vlm", "difficulty:hard"],
+      "goal": {
+        "goal_id": "benchmark-content-continuity-qa",
+        "project_id": "benchmark",
+        "title": "Gate character and prop continuity",
+        "objective": "Produce scoped, grounded QA decisions without overstating detector evidence.",
+        "deliverables": ["quality decisions", "grounded findings", "review queue"],
+        "acceptance_criteria": [
+          {"criterion_id": "scope", "description": "Object evidence is not used to prove identity or aesthetics.", "minimum_score": 1.0},
+          {"criterion_id": "grounding", "description": "Findings retain artifact, class, confidence, and location evidence.", "minimum_score": 0.9},
+          {"criterion_id": "handoff", "description": "Unresolved axes enter a human or stronger-VLM review queue.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 1, "max_failed_attempts": 2},
+        "evidence_requirements": ["grounding report", "review queue", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-release-package",
+      "workload": "content",
+      "title": "Prepare a platform release package",
+      "prompt": "Package approved synthetic media metadata for a vertical-video release with rights, aspect, duration, captions, thumbnails, checksum, and delivery manifest gates.",
+      "tags": ["release", "rights", "delivery", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-content-release-package",
+        "project_id": "benchmark",
+        "title": "Prepare platform release package",
+        "objective": "Create a traceable, policy-compliant delivery package.",
+        "deliverables": ["delivery manifest", "rights checklist", "platform validation"],
+        "acceptance_criteria": [
+          {"criterion_id": "platform", "description": "Format, aspect, duration, and caption checks pass.", "minimum_score": 0.95},
+          {"criterion_id": "rights", "description": "Rights and consent state are explicit and non-placeholder.", "minimum_score": 1.0},
+          {"criterion_id": "traceability", "description": "Every delivered artifact has source and checksum evidence.", "minimum_score": 0.95}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 1, "max_failed_attempts": 2},
+        "evidence_requirements": ["delivery manifest", "checksum report"]
+      }
+    },
+    {
+      "case_id": "content-localization-pack",
+      "workload": "content",
+      "title": "Localize a campaign across two locales",
+      "prompt": "Adapt a synthetic launch campaign into two target locales using the supplied glossary and tone guide. Preserve claim boundaries exactly, keep terminology consistent with the glossary, adapt idioms and formality rather than translating literally, and queue untranslatable or legally sensitive phrases for human review instead of guessing.",
+      "tags": ["localization", "glossary", "tone", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-content-localization-pack",
+        "project_id": "benchmark",
+        "title": "Localize a campaign across two locales",
+        "objective": "Deliver locale-faithful campaign variants without drifting from approved claims or terminology.",
+        "deliverables": ["two locale variants", "glossary conformance report", "human review queue"],
+        "acceptance_criteria": [
+          {"criterion_id": "claim_fidelity", "description": "No locale variant strengthens, weakens, or adds product claims relative to the source.", "minimum_score": 0.95},
+          {"criterion_id": "terminology", "description": "Glossary terms are used consistently and deviations are justified per instance.", "minimum_score": 0.9},
+          {"criterion_id": "escalation", "description": "Untranslatable or sensitive phrases are queued with context rather than improvised.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["glossary conformance report", "review queue", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-incident-comms",
+      "workload": "content",
+      "title": "Draft a fact-bounded incident communication pack",
+      "prompt": "From a synthetic incident timeline with confirmed facts, unconfirmed reports, and open questions, draft a status-page notice, a customer email, and an internal FAQ. Every outbound statement must trace to a confirmed fact, unconfirmed items must be held back with a re-review time, and each artifact must carry an explicit approval chain before release.",
+      "tags": ["crisis", "communications", "approval", "difficulty:hard"],
+      "goal": {
+        "goal_id": "benchmark-content-incident-comms",
+        "project_id": "benchmark",
+        "title": "Draft fact-bounded incident communications",
+        "objective": "Produce releasable incident messaging that never outruns confirmed facts.",
+        "deliverables": ["status-page notice", "customer email", "internal FAQ", "hold-back list"],
+        "acceptance_criteria": [
+          {"criterion_id": "fact_boundary", "description": "Every outbound statement maps to a confirmed fact in the timeline; speculation is absent.", "minimum_score": 1.0},
+          {"criterion_id": "hold_back", "description": "Unconfirmed items are listed with owner and re-review time instead of being published.", "minimum_score": 0.95},
+          {"criterion_id": "approval", "description": "Each artifact names its required approvers and release precondition.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 1, "max_failed_attempts": 2},
+        "evidence_requirements": ["fact trace map", "hold-back list", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "research-investment-memo",
+      "workload": "research",
+      "title": "Draft an evidence-bound investment memo",
+      "prompt": "Using only a supplied synthetic source pack, write an investment memo that separates evidence, inference, and unknowns; includes counterarguments; and maps every material claim to a source.",
+      "tags": ["investment", "citations", "risk", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-research-investment-memo",
+        "project_id": "benchmark",
+        "title": "Draft evidence-bound investment memo",
+        "objective": "Deliver a decision-useful memo with complete claim provenance.",
+        "deliverables": ["investment memo", "claim-source map", "open questions"],
+        "acceptance_criteria": [
+          {"criterion_id": "provenance", "description": "Every material factual claim maps to supplied evidence.", "minimum_score": 0.95},
+          {"criterion_id": "uncertainty", "description": "Inference and unknowns are clearly labeled.", "minimum_score": 0.9},
+          {"criterion_id": "decision", "description": "Recommendation includes counterarguments and falsifiers.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["claim-source map", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "research-market-map",
+      "workload": "research",
+      "title": "Build a sourced market map",
+      "prompt": "Normalize a synthetic company dataset into a market taxonomy, explain inclusion rules, flag conflicting records, and produce a ranked review queue instead of silently resolving ambiguity.",
+      "tags": ["market-map", "normalization", "review", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-research-market-map",
+        "project_id": "benchmark",
+        "title": "Build sourced market map",
+        "objective": "Create a reproducible taxonomy and reviewable normalized dataset.",
+        "deliverables": ["taxonomy", "normalized table", "conflict review queue"],
+        "acceptance_criteria": [
+          {"criterion_id": "taxonomy", "description": "Categories have explicit inclusion and exclusion rules.", "minimum_score": 0.9},
+          {"criterion_id": "lineage", "description": "Normalized rows retain source identifiers.", "minimum_score": 0.95},
+          {"criterion_id": "conflicts", "description": "Conflicts and missing values are queued, not invented.", "minimum_score": 0.95}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["source lineage", "review queue"]
+      }
+    },
+    {
+      "case_id": "research-due-diligence",
+      "workload": "research",
+      "title": "Run a due-diligence risk review",
+      "prompt": "Review a synthetic diligence room, construct a risk register with severity and evidence strength, identify missing documents, and avoid legal or financial conclusions unsupported by the pack.",
+      "tags": ["diligence", "risk-register", "evidence", "difficulty:hard"],
+      "goal": {
+        "goal_id": "benchmark-research-due-diligence",
+        "project_id": "benchmark",
+        "title": "Run due-diligence risk review",
+        "objective": "Deliver a prioritized, evidence-scoped diligence risk register.",
+        "deliverables": ["risk register", "missing-document list", "decision questions"],
+        "acceptance_criteria": [
+          {"criterion_id": "risk", "description": "Risks include severity, likelihood, evidence, and owner.", "minimum_score": 0.9},
+          {"criterion_id": "scope", "description": "Unsupported conclusions are labeled for specialist review.", "minimum_score": 0.95},
+          {"criterion_id": "coverage", "description": "Missing and conflicting documents are explicit.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["risk-evidence map", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "research-executive-brief",
+      "workload": "research",
+      "title": "Produce an executive evidence brief",
+      "prompt": "Transform a synthetic mixed-quality research pack into a one-page executive brief, a detailed appendix, and a source-quality table. Preserve disagreements and prioritize decisions.",
+      "tags": ["executive", "synthesis", "source-quality", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-research-executive-brief",
+        "project_id": "benchmark",
+        "title": "Produce executive evidence brief",
+        "objective": "Deliver concise decisions without losing source quality or disagreement.",
+        "deliverables": ["one-page brief", "appendix", "source-quality table"],
+        "acceptance_criteria": [
+          {"criterion_id": "decision_focus", "description": "The brief leads with decisions and material uncertainty.", "minimum_score": 0.85},
+          {"criterion_id": "fidelity", "description": "The summary does not erase source disagreements.", "minimum_score": 0.95},
+          {"criterion_id": "traceability", "description": "Details and claims link to the appendix and sources.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["source-quality table", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "research-replication-audit",
+      "workload": "research",
+      "title": "Audit a quantitative study for reproducibility",
+      "prompt": "Given a synthetic study pack containing a methods memo, a raw dataset, and a results table, independently recompute every reported statistic, classify each claim as reproduced, discrepant, or uncomputable from the supplied data, grade discrepancy severity, and state exactly what additional material would resolve each uncomputable claim.",
+      "tags": ["replication", "statistics", "audit", "difficulty:hard"],
+      "goal": {
+        "goal_id": "benchmark-research-replication-audit",
+        "project_id": "benchmark",
+        "title": "Audit quantitative study reproducibility",
+        "objective": "Determine which reported results the supplied data actually supports, with recomputation evidence.",
+        "deliverables": ["recomputation notebook", "claim classification table", "severity-graded discrepancy list", "missing-material requests"],
+        "acceptance_criteria": [
+          {"criterion_id": "recomputation", "description": "Every recomputable statistic is independently recalculated with the method shown.", "minimum_score": 0.95},
+          {"criterion_id": "classification", "description": "Each reported claim is labeled reproduced, discrepant, or uncomputable with justification.", "minimum_score": 0.95},
+          {"criterion_id": "restraint", "description": "No conclusion about the study is stated beyond what recomputation supports.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["recomputation notebook", "classification table", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "research-competitor-teardown",
+      "workload": "research",
+      "title": "Build a confidence-labeled competitor teardown",
+      "prompt": "Using only a synthetic pack of product pages, pricing sheets, and changelogs for three fictional competitors, build a feature and pricing comparison matrix, label every cell with a confidence level tied to its source, mark gaps as unknown rather than inferring them, and finish with three positioning implications ranked by evidence strength.",
+      "tags": ["competitive-analysis", "pricing", "confidence", "difficulty:standard"],
+      "goal": {
+        "goal_id": "benchmark-research-competitor-teardown",
+        "project_id": "benchmark",
+        "title": "Build confidence-labeled competitor teardown",
+        "objective": "Deliver a comparison matrix whose every cell is source-backed and confidence-scored.",
+        "deliverables": ["comparison matrix", "cell-level source and confidence labels", "ranked positioning implications"],
+        "acceptance_criteria": [
+          {"criterion_id": "cell_provenance", "description": "Every populated matrix cell cites its source document and carries a confidence label.", "minimum_score": 0.95},
+          {"criterion_id": "gap_honesty", "description": "Cells without supporting evidence are marked unknown, not extrapolated.", "minimum_score": 0.95},
+          {"criterion_id": "implications", "description": "Positioning implications are ranked and each names the evidence it rests on.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["source-labeled matrix", "artifact digest"]
+      }
+    }
+  ]
+}
