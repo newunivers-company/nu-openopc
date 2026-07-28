@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import Any
+
+from scripts.verify_nu_release_manifest import DEFAULT_MANIFEST, load_manifest
 
 
 def verify(*, expected_llm: str, expected_resource: str) -> dict[str, Any]:
@@ -66,12 +69,17 @@ def verify(*, expected_llm: str, expected_resource: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected-llm", default="0.2.2")
-    parser.add_argument("--expected-resource", default="0.2.2")
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--expected-llm")
+    parser.add_argument("--expected-resource")
     args = parser.parse_args()
+    manifest = load_manifest(args.manifest)
+    packages = manifest["packages"]
     report = verify(
-        expected_llm=args.expected_llm,
-        expected_resource=args.expected_resource,
+        expected_llm=args.expected_llm or packages["nu-llm-routing-lib"]["version"],
+        expected_resource=(
+            args.expected_resource or packages["nu-resource-gen-lib"]["version"]
+        ),
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if report["compatible"] else 1
