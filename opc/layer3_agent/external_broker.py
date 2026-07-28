@@ -54,6 +54,7 @@ from opc.layer4_tools.collaboration_rpc import (
     OPC_COLLAB_RPC_PATH,
     OPC_COLLAB_RPC_PORT,
     OPC_COLLAB_RPC_TRANSPORT,
+    collaboration_rpc_transport_parent,
     start_collaboration_rpc_server,
 )
 
@@ -868,7 +869,15 @@ class ExternalAgentBroker:
                 return await dispatch_collaboration_tool_bound(tool_name, args, binding)
 
             try:
-                collab_rpc_server = await start_collaboration_rpc_server(_dispatch_collaboration_rpc)
+                collab_rpc_server = await start_collaboration_rpc_server(
+                    _dispatch_collaboration_rpc,
+                    # Root the FIFO inside the role workspace: external-agent
+                    # sandboxes only allow writes there, and a /tmp transport
+                    # fails every collaboration call with EROFS.
+                    transport_parent=collaboration_rpc_transport_parent(
+                        workspace_path
+                    ),
+                )
             except Exception as exc:
                 message = f"Company collaboration RPC setup failed: {exc}"
                 logger.warning(message)
