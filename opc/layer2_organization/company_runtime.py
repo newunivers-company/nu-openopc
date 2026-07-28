@@ -211,6 +211,11 @@ class CompanyRuntime:
         # two parallel team_instances with the same role name
         # (multi-branch) don't collide. Populated in bootstrap.
         self._home_team_instance_by_role = {}
+        # Consecutive store-CAS claim losses per work_item_id. Repeated
+        # losses on the same card indicate the dispatcher is operating on a
+        # stale projection (the claim-livelock signature from the 2026-07-28
+        # pilot) and must surface at WARNING, not drown at DEBUG.
+        self._claim_loss_counts: dict[str, int] = {}
 
     def create_state(self) -> CompanyRuntimeState:
         return CompanyRuntimeState()
@@ -1408,12 +1413,51 @@ class CompanyRuntime:
                             fresh_work_item = await get_work_item(work_item_id)
                         if fresh_work_item is not None:
                             work_item_map[work_item_id] = fresh_work_item
+                            # Patch the SHARED object in place, not just the
+                            # per-call map: the caller's work-item list feeds
+                            # the next tick's enqueue gate, and a stale copy
+                            # there (old phase, missing dispatch_hold/claims)
+                            # re-enqueues a non-dispatchable card every tick —
+                            # the claim livelock observed in the 2026-07-28
+                            # pilot (1,769 losses on one card at ~1/s).
+                            work_item.phase = fresh_work_item.phase
+                            work_item.metadata = dict(fresh_work_item.metadata or {})
+                            work_item.role_runtime_session_id = (
+                                fresh_work_item.role_runtime_session_id
+                            )
+                            work_item.claimed_by_role_runtime_session_id = (
+                                fresh_work_item.claimed_by_role_runtime_session_id
+                            )
+                            work_item.claimed_by_seat_id = (
+                                fresh_work_item.claimed_by_seat_id
+                            )
+                        losses = self._claim_loss_counts.get(work_item_id, 0) + 1
+                        self._claim_loss_counts[work_item_id] = losses
+                        if losses in {3, 10} or losses % 100 == 0:
+                            logger.warning(
+                                "WorkItem claim lost {} consecutive times — "
+                                "dispatcher projection is stale for {} "
+                                "(fresh phase={}, dispatch_hold={!r})",
+                                losses,
+                                work_item_id,
+                                getattr(
+                                    getattr(fresh_work_item, "phase", None),
+                                    "value",
+                                    None,
+                                ),
+                                str(
+                                    (getattr(fresh_work_item, "metadata", {}) or {}).get(
+                                        "dispatch_hold", ""
+                                    )
+                                ),
+                            )
                         _skip(
                             "atomic WorkItem claim lost to a phase/hold/owner update",
                             session=session_label,
                             work_item_id=work_item_id,
                         )
                         continue
+                    self._claim_loss_counts.pop(work_item_id, None)
                     self._claimed_work_item_ids.add(work_item_id)
                 if can_soft_wake and (
                     bool((task.metadata or {}).get("review_task", False))
