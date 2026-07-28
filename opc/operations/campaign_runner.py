@@ -466,6 +466,12 @@ CHECKPOINT_REPLIES: tuple[tuple[tuple[str, ...], str], ...] = (
             "Dispatched and confirmed",
             "currently running",
             "waiting on the",
+            # Interim runtime snapshots: the turn ended while work items are
+            # still suspended/blocked awaiting the next runtime step (e.g.
+            # the final decider's arbitration turn).
+            "checkpoint remains available to continue",
+            "Routed the latest user follow-up",
+            "Latest Runtime Snapshot",
         ),
         "continue",
     ),
@@ -513,7 +519,7 @@ class SubprocessExecutorConfig:
     # parses approve/auto replies); `session continue` is only for paused
     # company runtime checkpoints and rejects staffing replies.
     continue_command: tuple[str, ...] = ("opc", "session", "send")
-    max_continuations: int = 6
+    max_continuations: int = 12
     timeout_seconds: float = 3600.0
 
 

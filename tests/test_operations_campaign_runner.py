@@ -711,3 +711,21 @@ class JudgmentCommandContractTests(unittest.TestCase):
             case_id, mode, repetition = slot["slot_id"].split("/")
             derived = f"artifacts/{plan['campaign_id']}/{case_id}-r{repetition}/{mode}"
             self.assertEqual(derived, slot["artifact_directory"])
+
+
+class RuntimeSnapshotNudgeTests(unittest.TestCase):
+    def test_interim_runtime_snapshot_is_nudged(self) -> None:
+        from opc.operations.campaign_runner import (
+            checkpoint_reply_for,
+            classify_response,
+        )
+
+        snapshot = (
+            "Routed the latest user follow-up to `ceo::delivery::x`.\n"
+            "## Latest Runtime Snapshot (before follow-up)\n"
+            "- items blocked/awaiting_peer...\n"
+            "Remaining work items stay suspended and this checkpoint remains "
+            "available to continue."
+        )
+        self.assertEqual(classify_response(snapshot), "staffing_checkpoint")
+        self.assertEqual(checkpoint_reply_for(snapshot), "continue")
