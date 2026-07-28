@@ -66,6 +66,7 @@ logs/
 # Task/demo artifacts
 artifacts/
 /sessions/
+/outputs/
 
 # Temporary Node/MCP artifacts
 node_modules/

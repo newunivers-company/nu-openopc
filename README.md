@@ -132,6 +132,7 @@ Before any work begins, the right people must be in place. Given a goal, OpenOPC
 
 - 🌿 Drafts the org chart — deriving the roles and reporting structure the task demands.
 - 🎯 Fills each role — a recruiter agent chooses between reusing an existing employee (shaped by prior projects) and onboarding a fresh hire from the talent pool.
+- 🧩 Assembles role skills — a deterministic installed-catalog planner recommends content-addressed skills and reports uncovered capabilities before an operator assigns them.
 
 💡 Experienced employees carry accumulated context; fresh hires offer a clean slate when a role demands it.
 
@@ -179,15 +180,15 @@ Execution generates raw experience; Self-Grown turns it into lasting improvement
 - `Org -> Employees` hires talent into vacant roles.
 - `Team Roster -> Deploy` turns a hired employee into a visible office agent.
 - The Workspace composer selects the Task Mode execution agent.
-- The role inspector can set runtime policy and preferred external agent for Company Mode roles.
+- The role inspector can set runtime policy, preferred external agent, and installed `skill_refs` for Company Mode roles.
 - During execution, Workspace `Agents` and the Execution Progress panel show which role is active, which work item it owns, and which execution agent is doing the concrete work.
 </details>
 
 ## Outcome-Driven Operations
 
-OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events and an independently deployable fenced outbox worker, leases and bounded recovery, atomic goal settlement, plan-to-execution route contracts, explicit measured/unmeasured usage records, provider canaries and SLOs, an approval-gated NU resource pipeline, shadow-only outcome routing candidates, authenticated Codex/Claude/Grok subscription routing for text-only work, evidence-based staffing regret, and secretary Mission Control.
+OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events and an independently deployable fenced outbox worker, leases and bounded recovery, atomic goal settlement, plan-to-execution route contracts, explicit measured/unmeasured usage records, long-horizon provider readiness and failure drills, an approval-gated NU resource pipeline, quality-gated shadow experiments, authenticated Codex/Claude/Grok subscription routing for text-only work, immutable Self-Grown runtime snapshots, deterministic role-skill assembly, evidence-based staffing regret, and a digest-confirmed Mission Control action center.
 
-The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md). The executed local release evidence is in the [2026-07-23 validation report](docs/validation-2026-07-23.md).
+The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md). The current hardening evidence is in the [2026-07-28 validation report](docs/validation-2026-07-28.md); the [2026-07-27 implementation report](docs/validation-2026-07-27.md) and [2026-07-23 live-provider report](docs/validation-2026-07-23.md) remain available for provenance.
 
 ## Quick Start
 
@@ -449,7 +450,7 @@ Company Mode turns one brief into a runtime session plus role-owned work items.
 | `Comms` | Role inboxes, unread/read/sent messages, meetings, decisions, and recent communication failures. |
 | `Team` | Runtime cockpit: teams, seats, approvals, unread communication, run state, and stop controls for the current run. |
 
-The top-level `Mission Control` page is project-scoped and model-free. It shows durable run/gate health, approval and delivery queues, provider SLOs, subscription call quotas, ordered alerts, and recommended next actions. It refreshes on entry, every 30 seconds while visible, and on demand.
+The top-level `Mission Control` page is project-scoped and model-free. It shows durable run/gate health, approval and delivery queues, provider SLOs, subscription call quotas, ordered alerts, and recommended next actions. Allowlisted recovery actions use a separate plan/review/confirm flow with an expiring SHA-256 digest and durable operator receipt. The page refreshes on entry, every 30 seconds while visible, and on demand.
 
 To inspect the detailed workflow for a role, open a company-mode session and click a role/work item in the `Chat` progress card or `Agents` tab. The Execution Progress panel shows each work item, its status, activity sections, tool progress, handoffs, review targets, and execution turn metadata.
 
@@ -602,7 +603,7 @@ opc session create "Research sprint" -p demo --mode org --org hku_research_lab
 
 ## Configuration
 
-Run `opc init` once from the repo root. It creates `.opc/`, copies the template config from `config/`, creates memory/skills/log folders, and optionally creates the first project.
+Run `opc init` once from the repo root. It creates `.opc/`, copies the template config from `config/`, creates memory/skills/log folders, and optionally creates the first project. Re-running `opc init --yes` preserves every existing config file byte-for-byte and installs only missing top-level templates, which safely repairs workspaces created by older partial initializers.
 
 <details>
 <summary><b>Expand configuration — config files, LLM keys, external agents, channels, browser/MCP, troubleshooting</b></summary>
@@ -857,9 +858,9 @@ OpenOPC is moving quickly. The areas below reflect active development priorities
 
 | Area | Planned direction |
 |---|---|
-| **Role-level skills** | Role config already carries `skill_refs`, and the Org UI surfaces skill metadata today. The next step is letting users select which skills mount to which roles directly from the Org page — feeding into a broader self-evolving skill ecosystem. |
-| **Secretary settings** | The secretary will grow into a stronger configuration and memory steward: owning OPC system memory, analysing and comparing projects, and providing guided setup for OpenOPC YAML configuration. |
-| **Company-mode channels** | External channels will evolve beyond simple chat entrypoints into richer company-mode workflows — with role-aware notifications, structured approvals, and cross-platform collaboration. |
+| **Role-level skills** | Role assignment, deterministic goal-to-skill recommendations, content digests, and Native/external runtime mounting are implemented. Next: searchable marketplace selection, signed packages, and richer capability metadata. |
+| **Secretary settings** | The secretary now consumes deterministic Mission Control and read-only skill-assembly context without auto-executing operator actions. Next: cross-project comparison and guided YAML setup. |
+| **Company-mode channels** | Every configured channel supports model-free `/opc status`, `/opc skills`, and two-phase governed actions under its sender allowlist. Next: role-aware notifications and richer structured approval cards. |
 | **CLI parity** | The CLI is functional today, but the Office UI remains the more complete surface. Upcoming work targets org editing, company-mode inspection, failure recovery, and long-running runtime control from the terminal. |
 | **TUI** | A full terminal UI is under consideration once CLI parity matures. The Office UI remains the primary interface in the meantime. |
 | **Market and presets** | More architecture presets, recruitable talent packs, import/export workflows, and a package marketplace for sharing and discovering community-built components. |
