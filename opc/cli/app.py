@@ -1903,9 +1903,25 @@ def session_send(
     mode: str = typer.Option("task", "--mode", help="task or company"),
     company_profile: str = typer.Option("corporate", "--company-profile", help="Company profile"),
     agent: Optional[str] = typer.Option(None, "--agent", help="Preferred agent"),
+    respond_checkpoint: Optional[str] = typer.Option(
+        None,
+        "--respond-checkpoint",
+        help="Address this message to an explicit pending checkpoint id "
+        "(approval-type checkpoints only accept checkpoint-addressed replies)",
+    ),
+    reply_kind: Optional[str] = typer.Option(
+        None,
+        "--reply-kind",
+        help="Checkpoint reply kind (e.g. approve, feedback, ignore)",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.send(project_id=project or "default", task_id=task_id, content=message, mode=mode, company_profile=company_profile, preferred_agent=agent), json_output=json_output))
+    message_metadata: dict[str, Any] | None = None
+    if respond_checkpoint:
+        message_metadata = {"response_to_checkpoint_id": respond_checkpoint.strip()}
+        if reply_kind:
+            message_metadata["checkpoint_reply_kind"] = reply_kind.strip().lower()
+    asyncio.run(_run_service_command(project, lambda svc: svc.session.send(project_id=project or "default", task_id=task_id, content=message, mode=mode, company_profile=company_profile, preferred_agent=agent, message_metadata=message_metadata), json_output=json_output))
 
 
 @session_app.command("rename")

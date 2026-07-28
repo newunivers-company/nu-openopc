@@ -483,8 +483,20 @@ CHECKPOINT_REPLIES: tuple[tuple[tuple[str, ...], str], ...] = (
             "Organization Runtime Parked",
             "waiting on human input",
         ),
-        "approve",
+        # Approval-type checkpoints reject plain chat by design; the
+        # executor resolves them with explicit checkpoint-addressed replies.
+        "__answer_checkpoints__",
     ),
+)
+
+ANSWER_CHECKPOINTS = "__answer_checkpoints__"
+
+# Per-checkpoint-type scripted replies for parked benchmark runs. The
+# delivery self-evolution feedback is IGNORED on purpose: synthetic
+# benchmark runs must never feed employee evolution.
+CHECKPOINT_TYPE_REPLIES: tuple[tuple[str, str], ...] = (
+    ("company_delivery_feedback", "ignore"),
+    ("company_work_item_gate", "approve"),
 )
 BLOCKED_RESPONSE_MARKERS = (
     "Awaiting user input",
@@ -637,6 +649,7 @@ class SubprocessSlotExecutor:
         # A "successful" exec that returns a staffing checkpoint is not a
         # deliverable yet — answer it with the scripted protocol reply and
         # keep the run's real result instead.
+        answered_checkpoints: list[dict[str, str]] = []
         while (
             verdict["success"]
             and (reply := checkpoint_reply_for(verdict["response"])) is not None
@@ -644,6 +657,10 @@ class SubprocessSlotExecutor:
             and task_id
         ):
             continuations += 1
+            if reply == ANSWER_CHECKPOINTS:
+                answered = await self._answer_pending_checkpoints()
+                answered_checkpoints.extend(answered)
+                reply = "continue"
             continue_command = [
                 *self.config.continue_command,
                 task_id,
@@ -677,9 +694,68 @@ class SubprocessSlotExecutor:
                 "task_status": verdict["task_status"],
                 "failure_reason": reason,
                 "continuations": continuations,
+                "answered_checkpoints": answered_checkpoints,
                 "stderr_tail": spawn["stderr_tail"],
             },
         )
+
+    async def _answer_pending_checkpoints(self) -> list[dict[str, str]]:
+        """Resolve parked approval checkpoints with explicit-id replies.
+
+        Approval-type checkpoints intentionally refuse plain chat; each is
+        answered through ``session send --respond-checkpoint`` with the
+        scripted per-type reply from ``CHECKPOINT_TYPE_REPLIES``.
+        """
+
+        listing = await self._spawn(
+            ["opc", "runtime", "checkpoints", "-p", self.project_id, "--json"]
+        )
+        answered: list[dict[str, str]] = []
+        if listing.get("timed_out") or listing.get("exit_code") != 0:
+            return answered
+        text = str(listing.get("stdout", ""))
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return answered
+        try:
+            payload = json.loads(_ANSI_ESCAPES.sub("", text[start : end + 1]))
+        except json.JSONDecodeError:
+            return answered
+        replies = dict(CHECKPOINT_TYPE_REPLIES)
+        for checkpoint in payload.get("checkpoints", []) or []:
+            if str(checkpoint.get("status", "")).lower() != "pending":
+                continue
+            checkpoint_type = str(checkpoint.get("checkpoint_type", "") or "")
+            reply_kind = replies.get(checkpoint_type)
+            checkpoint_id = str(checkpoint.get("checkpoint_id", "") or "")
+            reply_task = str(checkpoint.get("task_id", "") or "")
+            if not reply_kind or not checkpoint_id or not reply_task:
+                continue
+            result = await self._spawn(
+                [
+                    "opc",
+                    "session",
+                    "send",
+                    reply_task,
+                    reply_kind,
+                    "--respond-checkpoint",
+                    checkpoint_id,
+                    "--reply-kind",
+                    reply_kind,
+                    "-p",
+                    self.project_id,
+                    "--json",
+                ]
+            )
+            answered.append(
+                {
+                    "checkpoint_id": checkpoint_id,
+                    "checkpoint_type": checkpoint_type,
+                    "reply_kind": reply_kind,
+                    "ok": str(bool(not result.get("timed_out") and result.get("exit_code") == 0)),
+                }
+            )
+        return answered
 
     async def _spawn(self, command: list[str]) -> dict[str, Any]:
         process = await asyncio.create_subprocess_exec(

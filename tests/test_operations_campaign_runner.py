@@ -745,4 +745,89 @@ class DeliveryGateProtocolTests(unittest.TestCase):
             "- Deliver final result to user: CEO Intake: awaiting_human"
         )
         self.assertEqual(classify_response(parked), "staffing_checkpoint")
-        self.assertEqual(checkpoint_reply_for(parked), "approve")
+        from opc.operations.campaign_runner import ANSWER_CHECKPOINTS
+
+        self.assertEqual(checkpoint_reply_for(parked), ANSWER_CHECKPOINTS)
+
+
+class ParkedCheckpointAnswerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parked_run_answers_checkpoints_by_explicit_id(self) -> None:
+        from opc.operations.campaign_runner import (
+            SubprocessExecutorConfig,
+            SubprocessSlotExecutor,
+        )
+
+        executor = SubprocessSlotExecutor(
+            project_id="benchmark-pilot", config=SubprocessExecutorConfig()
+        )
+        spawned: list[list[str]] = []
+        outputs = [
+            # 1) initial exec: parked awaiting human
+            json.dumps(
+                {
+                    "ok": True,
+                    "task_id": "t-company",
+                    "task_status": "waiting",
+                    "response": "## Organization Runtime Parked\n"
+                    "All remaining work items are waiting on human input.",
+                }
+            ),
+            # 2) runtime checkpoints listing
+            json.dumps(
+                {
+                    "ok": True,
+                    "checkpoints": [
+                        {
+                            "checkpoint_id": "cp-feedback",
+                            "checkpoint_type": "company_delivery_feedback",
+                            "status": "pending",
+                            "task_id": "t-delivery",
+                        },
+                        {
+                            "checkpoint_id": "cp-old",
+                            "checkpoint_type": "company_delivery_feedback",
+                            "status": "resolved",
+                            "task_id": "t-old",
+                        },
+                    ],
+                }
+            ),
+            # 3) checkpoint-addressed reply
+            json.dumps({"ok": True, "response": "ignored"}),
+            # 4) continue nudge -> final deliverable
+            json.dumps(
+                {
+                    "ok": True,
+                    "task_status": "done",
+                    "response": "# Final integrated deliverable",
+                }
+            ),
+        ]
+
+        async def fake_spawn(command: list[str]) -> dict[str, Any]:
+            spawned.append(command)
+            return {
+                "command": command,
+                "timed_out": False,
+                "exit_code": 0,
+                "stdout": outputs[len(spawned) - 1],
+                "stderr_tail": "",
+            }
+
+        executor._spawn = fake_spawn  # type: ignore[method-assign]
+        result = await executor({"mode": "company", "prompt": "Build"}, Path("."))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output_text, "# Final integrated deliverable")
+        self.assertEqual(spawned[1][:3], ["opc", "runtime", "checkpoints"])
+        reply_cmd = spawned[2]
+        self.assertEqual(reply_cmd[:3], ["opc", "session", "send"])
+        self.assertIn("t-delivery", reply_cmd)
+        self.assertIn("--respond-checkpoint", reply_cmd)
+        self.assertIn("cp-feedback", reply_cmd)
+        self.assertIn("--reply-kind", reply_cmd)
+        self.assertIn("ignore", reply_cmd)
+        answered = result.metadata["answered_checkpoints"]
+        self.assertEqual(len(answered), 1)
+        self.assertEqual(answered[0]["checkpoint_id"], "cp-feedback")
+        self.assertEqual(spawned[3][4], "continue")

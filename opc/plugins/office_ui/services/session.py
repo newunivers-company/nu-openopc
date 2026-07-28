@@ -688,6 +688,7 @@ class SessionService:
         preferred_agent: str | None = None,
         org_id: str | None = None,
         domains: list[str] | None = None,
+        message_metadata: dict[str, Any] | None = None,
     ) -> ServiceResult:
         engine = await self.context.engine_for_project(project_id)
         store = getattr(engine, "store", None)
@@ -777,7 +778,11 @@ class SessionService:
 
         execution_session_id = str(getattr(task, "session_id", "") or "").strip()
         origin_task_id = str(getattr(task, "id", "") or "").strip() or None
-        message_metadata: dict[str, Any] | None = None
+        # Caller-provided metadata (e.g. an explicit checkpoint-addressed
+        # reply from the CLI) must survive and win over the auto-resolved
+        # checkpoint routing below.
+        caller_metadata = dict(message_metadata or {})
+        message_metadata = None
         if company_target is not None:
             execution_session_id = str(
                 company_target.get("runtime_session_id", "") or ""
@@ -817,6 +822,8 @@ class SessionService:
                     ).strip(),
                 }
 
+        if caller_metadata:
+            message_metadata = {**(message_metadata or {}), **caller_metadata}
         response = await engine.process_message(
             str(content or "").strip(),
             project_id=project_id,
