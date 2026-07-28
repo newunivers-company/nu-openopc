@@ -49,6 +49,12 @@ from opc.operations.campaign_runner import (
     find_slot,
     verify_plan,
 )
+from opc.operations.judging import (
+    JudgmentRubric,
+    build_draft_prompt,
+    confirm_draft,
+    parse_draft_response,
+)
 from opc.operations.experiments import (
     ShadowQualityObservation,
     bind_shadow_observation_to_transport,
@@ -81,6 +87,9 @@ def register_operations_cli(app: typer.Typer) -> None:
     backup_app = typer.Typer(help="Create, inspect, and restore verified SQLite snapshots")
     benchmark_app = typer.Typer(help="Run versioned Task-versus-Company outcome benchmarks")
     skills_app = typer.Typer(help="Assemble installed skills for explicit role capabilities")
+    judge_app = typer.Typer(
+        help="LLM-drafted, human-confirmed judgment for benchmark scorecards"
+    )
 
     app.add_typer(ops_app, name="ops")
     ops_app.add_typer(goal_app, name="goal")
@@ -95,6 +104,132 @@ def register_operations_cli(app: typer.Typer) -> None:
     ops_app.add_typer(backup_app, name="backup")
     ops_app.add_typer(benchmark_app, name="benchmark")
     ops_app.add_typer(skills_app, name="skills")
+    ops_app.add_typer(judge_app, name="judge")
+
+    @judge_app.command("draft")
+    def judge_draft(
+        run_id: str = typer.Argument(...),
+        artifacts_dir: Path = typer.Option(..., "--artifacts", help="Slot artifact directory"),
+        output: Path = typer.Option(..., "--output", help="Draft judgment JSON path"),
+        emit_prompt: Optional[Path] = typer.Option(
+            None,
+            "--emit-prompt",
+            help="Write the draft prompt messages instead of calling an LLM",
+        ),
+        max_artifact_chars: int = typer.Option(24_000, "--max-artifact-chars", min=1_000),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Produce an LLM DRAFT of criterion scores. Drafts carry no authority."""
+
+        artifacts: dict[str, str] = {}
+        for path in sorted(Path(artifacts_dir).rglob("*")):
+            if not path.is_file() or path.name in {
+                "artifact-index.json",
+                "result-skeleton.json",
+            }:
+                continue
+            artifacts[str(path.relative_to(artifacts_dir))] = path.read_text(
+                encoding="utf-8", errors="replace"
+            )
+        if not artifacts:
+            raise ValueError(f"no artifacts found under {artifacts_dir}")
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            manifest = await service.repository.get_manifest(run_id)
+            if manifest is None:
+                raise KeyError(f"run manifest not found: {run_id}")
+            goal = await service.repository.get_goal(manifest.goal_id)
+            if goal is None:
+                raise KeyError(f"goal contract not found: {manifest.goal_id}")
+            rubric = JudgmentRubric.from_goal(goal.to_dict())
+            messages = build_draft_prompt(
+                rubric,
+                artifacts=artifacts,
+                max_artifact_chars=max_artifact_chars,
+            )
+            if emit_prompt is not None:
+                emit_prompt.parent.mkdir(parents=True, exist_ok=True)
+                emit_prompt.write_text(
+                    json.dumps(messages, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                return {
+                    "run_id": run_id,
+                    "rubric_digest": rubric.digest,
+                    "prompt_path": str(emit_prompt),
+                    "note": "prompt emitted; no LLM was called",
+                }
+            from opc.llm.provider import LLMProvider
+
+            opc_home = get_opc_home()
+            config_dir = opc_home / "config"
+            config = OPCConfig.load(config_dir) if config_dir.exists() else OPCConfig()
+            provider = LLMProvider(config.llm, opc_home=opc_home)
+            response = await provider.simple_chat(
+                messages[1]["content"], system=messages[0]["content"]
+            )
+            draft = parse_draft_response(
+                rubric,
+                run_id=run_id,
+                judge_model=config.llm.default_model,
+                response_text=response,
+            )
+            return draft.to_dict()
+
+        draft_payload = _run(project, action)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(draft_payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        _emit(draft_payload)
+
+    @judge_app.command("confirm")
+    def judge_confirm(
+        draft_path: Path = typer.Option(..., "--draft", help="Draft judgment JSON"),
+        operator: str = typer.Option(..., "--operator", help="Confirming human operator id"),
+        authority: str = typer.Option(
+            "human_confirmed",
+            "--authority",
+            help="human_confirmed or independent_judge",
+        ),
+        adjust_score: list[str] = typer.Option(
+            [],
+            "--adjust-score",
+            help="Override a draft score as CRITERION=SCORE; repeatable",
+        ),
+        skeleton: Optional[Path] = typer.Option(
+            None,
+            "--skeleton",
+            help="result-skeleton.json to copy evidence and metrics from",
+        ),
+        output: Path = typer.Option(..., "--output", help="evaluate-score result JSON"),
+    ) -> None:
+        """Confirm a reviewed draft into an ``evaluate score`` result payload."""
+
+        draft = _load_mapping(draft_path)
+        adjustments: dict[str, float] = {}
+        for item in adjust_score:
+            criterion_id, separator, raw = str(item).partition("=")
+            if not separator:
+                raise ValueError("--adjust-score must use CRITERION=SCORE format")
+            adjustments[criterion_id.strip()] = float(raw)
+        skeleton_payload = _load_mapping(skeleton) if skeleton is not None else {}
+        result = confirm_draft(
+            draft,
+            operator_id=operator,
+            authority=authority,
+            adjusted_scores=adjustments,
+            evidence=skeleton_payload.get("evidence", {}),
+        )
+        if skeleton_payload.get("metrics"):
+            result["metrics"] = skeleton_payload["metrics"]
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        _emit(result)
 
     @skills_app.command("recommend")
     def skills_recommend(
