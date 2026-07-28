@@ -239,3 +239,31 @@ def confirm_draft(
             },
         },
     }
+
+
+async def draft_for_goal(
+    chat: Any,
+    *,
+    goal: Mapping[str, Any],
+    artifacts: Mapping[str, str],
+    run_id: str,
+    judge_model: str,
+    max_artifact_chars: int = 24_000,
+) -> DraftJudgment:
+    """Produce one draft via an injected async ``chat(user, system) -> str``.
+
+    Shared by the single-run and campaign-batch CLI paths so both produce
+    identical, rubric-sealed drafts.
+    """
+
+    rubric = JudgmentRubric.from_goal(goal)
+    messages = build_draft_prompt(
+        rubric, artifacts=artifacts, max_artifact_chars=max_artifact_chars
+    )
+    response = await chat(messages[1]["content"], messages[0]["content"])
+    return parse_draft_response(
+        rubric,
+        run_id=run_id,
+        judge_model=judge_model,
+        response_text=str(response or ""),
+    )

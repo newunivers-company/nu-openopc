@@ -19,7 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from opc.operations.benchmarks import _canonical_digest
+from opc.operations.benchmarks import (
+    OutcomeBenchmarkSuite,
+    OutcomeObservation,
+    _canonical_digest,
+    campaign_progress,
+)
 from opc.operations.models import (
     GoalContract,
     RunManifest,
@@ -537,3 +542,106 @@ class SubprocessSlotExecutor:
                 "stderr_tail": stderr.decode("utf-8", errors="replace")[-2000:],
             },
         )
+
+
+async def pending_judgment_slots(
+    service: Any, plan: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Slots whose run completed but still lacks a scorecard (judgment work)."""
+
+    plan = verify_plan(plan)
+    pending: list[dict[str, Any]] = []
+    for slot in plan.get("slots", []) or []:
+        run_id = str(slot["run_id"])
+        manifest = await service.repository.get_manifest(run_id)
+        if manifest is None or manifest.status != RunStatus.COMPLETED:
+            continue
+        if await service.repository.get_scorecard(run_id) is None:
+            pending.append(dict(slot))
+    return pending
+
+
+async def campaign_status(
+    service: Any,
+    suite: "OutcomeBenchmarkSuite",
+    plan: Mapping[str, Any],
+    observations: Sequence["OutcomeObservation"],
+) -> dict[str, Any]:
+    """One view of a campaign: execution, judgment, and gate distance.
+
+    Combines the durable execution side (manifests/scorecards in the
+    repository) with the observation side (``campaign_progress``) so an
+    operator sees, per workload, what is run, what awaits judgment, and how
+    many trusted pairs remain before the gate — without chaining five
+    commands and files by hand.
+    """
+
+    plan = verify_plan(plan)
+    if str(plan.get("suite_digest", "")) != suite.digest:
+        raise ValueError("campaign plan does not match the provided suite")
+    progress = campaign_progress(
+        suite, observations, campaign_id=str(plan["campaign_id"])
+    )
+    execution: dict[str, dict[str, int]] = {
+        workload: {
+            "slots": 0,
+            "not_started": 0,
+            "completed": 0,
+            "failed": 0,
+            "in_flight": 0,
+            "awaiting_judgment": 0,
+        }
+        for workload in suite.workloads
+    }
+    awaiting: list[dict[str, Any]] = []
+    for slot in plan.get("slots", []) or []:
+        workload = str(slot["workload"])
+        stats = execution[workload]
+        stats["slots"] += 1
+        run_id = str(slot["run_id"])
+        manifest = await service.repository.get_manifest(run_id)
+        if manifest is None:
+            stats["not_started"] += 1
+            continue
+        if manifest.status == RunStatus.FAILED:
+            stats["failed"] += 1
+            continue
+        if manifest.status != RunStatus.COMPLETED:
+            stats["in_flight"] += 1
+            continue
+        stats["completed"] += 1
+        if await service.repository.get_scorecard(run_id) is None:
+            stats["awaiting_judgment"] += 1
+            awaiting.append(
+                {
+                    "slot_id": slot["slot_id"],
+                    "run_id": run_id,
+                    "workload": workload,
+                    "artifact_directory": slot["artifact_directory"],
+                }
+            )
+    workloads: dict[str, dict[str, Any]] = {}
+    for workload in suite.workloads:
+        observed = dict(progress["workloads"].get(workload, {}))
+        trusted = int(observed.get("trusted_pairs", 0) or 0)
+        minimum = int(
+            observed.get(
+                "minimum_trusted_pairs", suite.minimum_paired_samples_per_workload
+            )
+        )
+        workloads[workload] = {
+            **execution[workload],
+            **observed,
+            "trusted_pairs_remaining_to_gate": max(0, minimum - trusted),
+        }
+    return {
+        "schema_version": 1,
+        "campaign_id": plan.get("campaign_id", ""),
+        "plan_digest": plan.get("plan_digest", ""),
+        "suite_digest": suite.digest,
+        "workloads": workloads,
+        "awaiting_judgment": awaiting,
+        "observed_slots": progress["observed_slots"],
+        "trusted_pairs": progress["trusted_pairs"],
+        "promotion_eligible": progress["promotion_eligible"],
+    }

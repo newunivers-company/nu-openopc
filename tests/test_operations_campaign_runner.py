@@ -344,3 +344,112 @@ class ExecOutputContractTests(unittest.TestCase):
         verdict = evaluate_exec_output(2, self._payload())
         self.assertFalse(verdict["success"])
         self.assertIn("exit code 2", verdict["reason"])
+
+
+class CampaignStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.store = OPCStore(root / "tasks.db")
+        await self.store.initialize()
+        self.service = OperationsService(self.store, OperationsConfig())
+        self.suite = load_suite()
+        self.plan = build_campaign_plan(self.suite, campaign_id="status-campaign")
+        self.runner = CampaignSlotRunner(
+            self.service,
+            _FakeExecutor(),
+            project_id="default",
+            artifacts_root=root / "artifacts",
+        )
+
+    async def asyncTearDown(self) -> None:
+        await self.store.close()
+        self._tmp.cleanup()
+
+    async def test_status_combines_execution_judgment_and_gate_distance(self) -> None:
+        from opc.operations.campaign_runner import (
+            campaign_status,
+            pending_judgment_slots,
+        )
+
+        first = dict(self.plan["slots"][0])
+        second = dict(self.plan["slots"][1])
+        await self.runner.run_slot(self.plan, first["slot_id"])
+        await self.runner.run_slot(self.plan, second["slot_id"])
+        # Score only the first run: the second stays judgment work.
+        await self.service.evaluator.evaluate_run(
+            first["run_id"],
+            criterion_scores={
+                item["criterion_id"]: 0.95
+                for item in first["goal"]["acceptance_criteria"]
+            },
+            evidence={
+                item["criterion_id"]: ["output.md"]
+                for item in first["goal"]["acceptance_criteria"]
+            },
+            metrics=RunMetrics.from_dict({"duration_seconds": 5, "total_attempts": 1}),
+        )
+
+        pending = await pending_judgment_slots(self.service, self.plan)
+        self.assertEqual(
+            [slot["run_id"] for slot in pending], [second["run_id"]]
+        )
+
+        report = await campaign_status(self.service, self.suite, self.plan, [])
+        self.assertEqual(
+            [item["run_id"] for item in report["awaiting_judgment"]],
+            [second["run_id"]],
+        )
+        totals = {
+            key: sum(stats[key] for stats in report["workloads"].values())
+            for key in ("slots", "completed", "not_started", "awaiting_judgment")
+        }
+        self.assertEqual(totals["slots"], 72)
+        self.assertEqual(totals["completed"], 2)
+        self.assertEqual(totals["not_started"], 70)
+        self.assertEqual(totals["awaiting_judgment"], 1)
+        for stats in report["workloads"].values():
+            self.assertEqual(stats["trusted_pairs_remaining_to_gate"], 10)
+        self.assertFalse(report["promotion_eligible"])
+
+    async def test_status_rejects_mismatched_suite(self) -> None:
+        from opc.operations.campaign_runner import campaign_status
+
+        wrong = json.loads(json.dumps(self.plan))
+        wrong["suite_digest"] = "0" * 64
+        wrong.pop("plan_digest")
+        from opc.operations.benchmarks import _canonical_digest
+
+        wrong["plan_digest"] = _canonical_digest(wrong)
+        with self.assertRaises(ValueError):
+            await campaign_status(self.service, self.suite, wrong, [])
+
+
+class DraftForGoalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_helper_produces_sealed_draft(self) -> None:
+        from opc.operations.judging import draft_for_goal
+
+        goal = {
+            "goal_id": "g1",
+            "acceptance_criteria": [
+                {"criterion_id": "quality", "description": "good", "minimum_score": 0.8}
+            ],
+        }
+        captured: dict[str, str] = {}
+
+        async def chat(user: str, system: str) -> str:
+            captured["user"] = user
+            captured["system"] = system
+            return '{"criterion_scores": {"quality": 0.9}, "criterion_notes": {"quality": "solid"}}'
+
+        draft = await draft_for_goal(
+            chat,
+            goal=goal,
+            artifacts={"output.md": "deliverable"},
+            run_id="run-1",
+            judge_model="m-1",
+        )
+        self.assertEqual(draft.criterion_scores["quality"], 0.9)
+        self.assertEqual(draft.authority, "llm_draft")
+        self.assertIn("deliverable", captured["user"])
+        self.assertIn("DRAFT", captured["system"])

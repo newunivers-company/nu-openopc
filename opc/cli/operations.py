@@ -52,13 +52,16 @@ from opc.operations.campaign_runner import (
     SubprocessExecutorConfig,
     SubprocessSlotExecutor,
     build_slot_command,
+    campaign_status,
     find_slot,
+    pending_judgment_slots,
     verify_plan,
 )
 from opc.operations.judging import (
     JudgmentRubric,
     build_draft_prompt,
     confirm_draft,
+    draft_for_goal,
     parse_draft_response,
 )
 from opc.operations.experiments import (
@@ -528,6 +531,36 @@ def register_operations_cli(app: typer.Typer) -> None:
         if report["failed"]:
             raise typer.Exit(code=1)
 
+    @benchmark_app.command("campaign-status")
+    def benchmark_campaign_status(
+        plan_path: Path = typer.Option(..., "--plan", help="Sealed campaign plan JSON"),
+        observations: Optional[Path] = typer.Option(None, "--observations"),
+        suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """One view of a campaign: execution, judgment backlog, gate distance."""
+
+        plan = verify_plan(_load_mapping(plan_path))
+        suite = load_suite(suite_path)
+        rows = (
+            load_observations(observations)
+            if observations is not None and observations.exists()
+            else []
+        )
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            return await campaign_status(service, suite, plan, rows)
+
+        report = _run(project, action)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
     @benchmark_app.command("shadow-gate")
     def benchmark_shadow_gate(
         observations: Path = typer.Option(..., "--observations"),
@@ -752,6 +785,126 @@ def register_operations_cli(app: typer.Typer) -> None:
                 model=model,
             )
             return row.to_dict()
+
+        _emit(_run(project, action))
+
+    @judge_app.command("draft-campaign")
+    def judge_draft_campaign(
+        plan_path: Path = typer.Option(..., "--plan", help="Sealed campaign plan JSON"),
+        artifacts_root: Path = typer.Option(
+            Path("outputs/benchmark"), "--artifacts-root"
+        ),
+        output_dir: Path = typer.Option(..., "--output-dir", help="Draft JSONs directory"),
+        emit_prompts: bool = typer.Option(
+            False,
+            "--emit-prompts",
+            help="Write draft prompts per run instead of calling an LLM",
+        ),
+        max_artifact_chars: int = typer.Option(24_000, "--max-artifact-chars", min=1_000),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Draft every completed-but-unscored run of a campaign in one pass.
+
+        Humans still confirm each draft individually; this only batches the
+        LLM pre-screening step so judgment sessions start from drafts.
+        """
+
+        plan = verify_plan(_load_mapping(plan_path))
+
+        def _slot_artifacts(slot: Mapping[str, Any]) -> dict[str, str]:
+            directory = artifacts_root / str(slot["artifact_directory"])
+            artifacts: dict[str, str] = {}
+            if directory.exists():
+                for path in sorted(directory.rglob("*")):
+                    if not path.is_file() or path.name in {
+                        "artifact-index.json",
+                        "result-skeleton.json",
+                    }:
+                        continue
+                    artifacts[str(path.relative_to(directory))] = path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+            return artifacts
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            pending = await pending_judgment_slots(service, plan)
+            drafted: list[dict[str, Any]] = []
+            failures: list[dict[str, str]] = []
+            output_dir.mkdir(parents=True, exist_ok=True)
+            chat = None
+            judge_model = ""
+            if not emit_prompts and pending:
+                from opc.llm.provider import LLMProvider
+
+                opc_home = get_opc_home()
+                config_dir = opc_home / "config"
+                config = (
+                    OPCConfig.load(config_dir) if config_dir.exists() else OPCConfig()
+                )
+                provider = LLMProvider(config.llm, opc_home=opc_home)
+                judge_model = config.llm.default_model
+
+                async def chat(user: str, system: str) -> str:  # noqa: F811
+                    return await provider.simple_chat(user, system=system)
+
+            for slot in pending:
+                run_id = str(slot["run_id"])
+                try:
+                    goal = await service.repository.get_goal(
+                        str(slot["goal"]["goal_id"])
+                    )
+                    if goal is None:
+                        raise KeyError("goal contract not found")
+                    artifacts = _slot_artifacts(slot)
+                    if not artifacts:
+                        raise ValueError("no artifacts found for slot")
+                    if emit_prompts:
+                        rubric = JudgmentRubric.from_goal(goal.to_dict())
+                        prompt_path = output_dir / f"{run_id}.prompt.json"
+                        prompt_path.write_text(
+                            json.dumps(
+                                build_draft_prompt(
+                                    rubric,
+                                    artifacts=artifacts,
+                                    max_artifact_chars=max_artifact_chars,
+                                ),
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                        drafted.append(
+                            {"run_id": run_id, "prompt_path": str(prompt_path)}
+                        )
+                        continue
+                    draft = await draft_for_goal(
+                        chat,
+                        goal=goal.to_dict(),
+                        artifacts=artifacts,
+                        run_id=run_id,
+                        judge_model=judge_model,
+                        max_artifact_chars=max_artifact_chars,
+                    )
+                    draft_path = output_dir / f"{run_id}.draft.json"
+                    draft_path.write_text(
+                        json.dumps(
+                            draft.to_dict(),
+                            ensure_ascii=False,
+                            indent=2,
+                            sort_keys=True,
+                        ),
+                        encoding="utf-8",
+                    )
+                    drafted.append({"run_id": run_id, "draft_path": str(draft_path)})
+                except Exception as exc:  # noqa: BLE001 - one slot must not stop the batch
+                    failures.append(
+                        {"run_id": run_id, "error": f"{type(exc).__name__}: {exc}"[:500]}
+                    )
+            return {
+                "pending": len(pending),
+                "drafted": drafted,
+                "failed": failures,
+            }
 
         _emit(_run(project, action))
 
