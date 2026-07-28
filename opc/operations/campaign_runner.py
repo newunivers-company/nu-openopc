@@ -239,6 +239,7 @@ class CampaignBudget:
     max_slots: int | None = None
     max_failures: int = 3
     max_cost_usd: float | None = None
+    max_wall_clock_seconds: float | None = None
 
     def validate(self) -> None:
         if self.max_slots is not None and self.max_slots < 1:
@@ -247,6 +248,11 @@ class CampaignBudget:
             raise ValueError("max_failures must be non-negative")
         if self.max_cost_usd is not None and self.max_cost_usd <= 0:
             raise ValueError("max_cost_usd must be positive when set")
+        if (
+            self.max_wall_clock_seconds is not None
+            and self.max_wall_clock_seconds <= 0
+        ):
+            raise ValueError("max_wall_clock_seconds must be positive when set")
 
 
 class CampaignRunner:
@@ -263,10 +269,15 @@ class CampaignRunner:
         workloads: Iterable[str] | None = None,
         modes: Iterable[str] | None = None,
         stop_on_failure: bool = False,
+        clock: Callable[[], float] | None = None,
     ) -> dict[str, Any]:
         plan = verify_plan(plan)
         budget = budget or CampaignBudget()
         budget.validate()
+        import time as _time
+
+        tick = clock or _time.monotonic
+        started_at = tick()
         workload_filter = {str(item) for item in workloads} if workloads else None
         mode_filter = {str(item) for item in modes} if modes else None
 
@@ -284,6 +295,12 @@ class CampaignRunner:
                 continue
             if budget.max_slots is not None and executed >= budget.max_slots:
                 halted_reason = "max_slots budget reached"
+                break
+            if (
+                budget.max_wall_clock_seconds is not None
+                and tick() - started_at >= budget.max_wall_clock_seconds
+            ):
+                halted_reason = "max_wall_clock budget reached"
                 break
             result = await self.slot_runner.run_slot(plan, str(slot["slot_id"]))
             results.append(result)

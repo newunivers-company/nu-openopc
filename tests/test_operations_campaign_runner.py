@@ -658,3 +658,56 @@ class DispatchAckNudgeTests(unittest.TestCase):
             classify_response("# Final integrated deliverable with tests"),
             "deliverable",
         )
+
+
+class WallClockBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.store = OPCStore(root / "tasks.db")
+        await self.store.initialize()
+        self.service = OperationsService(self.store, OperationsConfig())
+        self.plan = build_campaign_plan(load_suite(), campaign_id="clock-campaign")
+        self.artifacts_root = root / "artifacts"
+
+    async def asyncTearDown(self) -> None:
+        await self.store.close()
+        self._tmp.cleanup()
+
+    async def test_wall_clock_budget_halts_before_new_slots(self) -> None:
+        campaign = CampaignRunner(
+            CampaignSlotRunner(
+                self.service,
+                _FakeExecutor(),
+                project_id="default",
+                artifacts_root=self.artifacts_root,
+            )
+        )
+        # Fake clock: each call advances 30 minutes.
+        ticks = iter(range(0, 100_000, 1800))
+
+        report = await campaign.run_campaign(
+            self.plan,
+            budget=CampaignBudget(
+                max_slots=100, max_wall_clock_seconds=3600.0
+            ),
+            clock=lambda: float(next(ticks)),
+        )
+        self.assertEqual(report["halted_reason"], "max_wall_clock budget reached")
+        self.assertLessEqual(report["executed"], 2)
+
+    async def test_invalid_wall_clock_budget_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            CampaignBudget(max_wall_clock_seconds=0).validate()
+
+
+class JudgmentCommandContractTests(unittest.TestCase):
+    """The UI's copyable judge-draft command derives the artifact directory
+    from slot_id + campaign_id; that derivation must match the plan layout."""
+
+    def test_ui_command_path_matches_plan_artifact_directory(self) -> None:
+        plan = build_campaign_plan(load_suite(), campaign_id="ui-contract")
+        for slot in plan["slots"]:
+            case_id, mode, repetition = slot["slot_id"].split("/")
+            derived = f"artifacts/{plan['campaign_id']}/{case_id}-r{repetition}/{mode}"
+            self.assertEqual(derived, slot["artifact_directory"])

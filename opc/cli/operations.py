@@ -180,7 +180,7 @@ def register_operations_cli(app: typer.Typer) -> None:
             draft = parse_draft_response(
                 rubric,
                 run_id=run_id,
-                judge_model=config.llm.default_model,
+                judge_model=_served_judge_model(provider, config.llm.default_model),
                 response_text=response,
             )
             return draft.to_dict()
@@ -483,6 +483,13 @@ def register_operations_cli(app: typer.Typer) -> None:
             help="Halt when MEASURED usage cost reaches this ceiling "
             "(subscription CLI calls are unmeasured and governed by call quotas)",
         ),
+        max_hours: Optional[float] = typer.Option(
+            None,
+            "--max-hours",
+            min=0.01,
+            help="Halt before starting a new slot once this wall-clock "
+            "budget is exhausted (unattended overnight guard)",
+        ),
         workload: list[str] = typer.Option([], "--workload"),
         mode: list[str] = typer.Option([], "--mode"),
         stop_on_failure: bool = typer.Option(False, "--stop-on-failure"),
@@ -514,6 +521,9 @@ def register_operations_cli(app: typer.Typer) -> None:
                     max_slots=max_slots,
                     max_failures=max_failures,
                     max_cost_usd=max_cost_usd,
+                    max_wall_clock_seconds=(
+                        max_hours * 3600.0 if max_hours is not None else None
+                    ),
                 ),
                 workloads=workload or None,
                 modes=mode or None,
@@ -916,6 +926,7 @@ def register_operations_cli(app: typer.Typer) -> None:
                         judge_model=judge_model,
                         max_artifact_chars=max_artifact_chars,
                     )
+                    draft.judge_model = _served_judge_model(provider, judge_model)
                     draft_path = output_dir / f"{run_id}.draft.json"
                     draft_path.write_text(
                         json.dumps(
@@ -1986,6 +1997,23 @@ def _clean_project_id(value: str) -> str:
     if project in {".", ".."} or Path(project).name != project or "/" in project or "\\" in project:
         raise ValueError(f"invalid project id: {project!r}")
     return project
+
+
+def _served_judge_model(provider: Any, fallback: str) -> str:
+    """Label drafts with the provider/model that actually served the call.
+
+    The configured default model name is only nominal once NU routing serves
+    the turn; the audit trail should record the real transport.
+    """
+
+    target = getattr(provider, "_last_route_target", None)
+    if target is not None:
+        provider_name = str(getattr(target, "provider", "") or "")
+        model = str(getattr(target, "model", "") or "")
+        label = ":".join(part for part in (provider_name, model) if part)
+        if label:
+            return label
+    return fallback
 
 
 def _load_mapping(path: Path | None) -> dict[str, Any]:
