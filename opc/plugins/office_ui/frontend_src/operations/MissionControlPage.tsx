@@ -50,6 +50,20 @@ function formatTimestamp(value?: string): string {
   }).format(timestamp)
 }
 
+function judgeDraftCommand(entry: {
+  run_id: string
+  benchmark_slot_id?: string
+  benchmark_campaign_id?: string
+}): string {
+  const slot = entry.benchmark_slot_id ?? ''
+  const campaign = entry.benchmark_campaign_id ?? ''
+  if (!slot || !campaign) return ''
+  const [caseId, mode, repetition] = slot.split('/')
+  if (!caseId || !mode || !repetition) return ''
+  const artifactDir = `outputs/benchmark/artifacts/${campaign}/${caseId}-r${repetition}/${mode}`
+  return `opc ops judge draft ${entry.run_id} --artifacts ${artifactDir} --output ${entry.run_id}.draft.json`
+}
+
 function healthSummary(alerts: MissionControlAlert[]): { label: string; tone: string } {
   if (alerts.some(alert => alert.severity === 'critical')) return { label: 'Action required', tone: 'critical' }
   if (alerts.some(alert => alert.severity === 'high')) return { label: 'Attention needed', tone: 'warning' }
@@ -429,19 +443,36 @@ export function MissionControlPage({
             </div>
             {judgmentQueue.length > 0 ? (
               <ul className="mc-judgment-list">
-                {judgmentQueue.map(entry => (
-                  <li key={entry.run_id}>
-                    <div className="mc-judgment-main">
-                      <code>{entry.run_id}</code>
-                      {entry.benchmark_slot_id && (
-                        <span className="mc-judgment-slot">{entry.benchmark_slot_id}</span>
+                {judgmentQueue.map(entry => {
+                  const draftCommand = judgeDraftCommand(entry)
+                  return (
+                    <li key={entry.run_id}>
+                      <div className="mc-judgment-main">
+                        <code>{entry.run_id}</code>
+                        {entry.benchmark_slot_id && (
+                          <span className="mc-judgment-slot">{entry.benchmark_slot_id}</span>
+                        )}
+                      </div>
+                      {entry.completed_at && (
+                        <span className="mc-judgment-time">{formatTimestamp(entry.completed_at)}</span>
                       )}
-                    </div>
-                    {entry.completed_at && (
-                      <span className="mc-judgment-time">{formatTimestamp(entry.completed_at)}</span>
-                    )}
-                  </li>
-                ))}
+                      {draftCommand && (
+                        <div className="mc-judgment-command">
+                          <code>{draftCommand}</code>
+                          <button
+                            type="button"
+                            className="mc-action-btn"
+                            onClick={() => {
+                              void navigator.clipboard?.writeText(draftCommand)
+                            }}
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      )}
+                    </li>
+                  )
+                })}
               </ul>
             ) : (
               <div className="mc-empty mc-empty--compact">

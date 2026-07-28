@@ -251,3 +251,43 @@ describe('MissionControlPage governed action flow', () => {
     expect(screen.getByText('No runs awaiting judgment')).toBeInTheDocument()
   })
 })
+
+describe('MissionControlPage judgment queue draft commands', () => {
+  it('renders a copyable judge draft command when slot and campaign are known', () => {
+    renderPage({
+      data: {
+        available: true,
+        project_id: 'demo',
+        alerts: [],
+        judgment_queue: [
+          {
+            run_id: 'benchmark-pilot-software-race-fix-r1-company',
+            goal_id: 'g1',
+            benchmark_slot_id: 'software-race-fix/company/1',
+            benchmark_campaign_id: 'pilot-2026q3',
+          },
+        ],
+      },
+    })
+    const command = screen.getByText(
+      /opc ops judge draft benchmark-pilot-software-race-fix-r1-company/,
+    )
+    expect(command).toHaveTextContent(
+      'outputs/benchmark/artifacts/pilot-2026q3/software-race-fix-r1/company',
+    )
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
+  })
+
+  it('omits the command when the run is not a benchmark slot', () => {
+    renderPage({
+      data: {
+        available: true,
+        project_id: 'demo',
+        alerts: [],
+        judgment_queue: [{ run_id: 'adhoc-run', goal_id: 'g2' }],
+      },
+    })
+    expect(screen.getByText('adhoc-run')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull()
+  })
+})

@@ -1724,6 +1724,8 @@ html, body, #root {
 .mc-judgment-main code { color: var(--text); font-size: 10px; overflow-wrap: anywhere; }
 .mc-judgment-slot { color: var(--text-dim); font-size: 9px; letter-spacing: 0.06em; text-transform: uppercase; }
 .mc-judgment-time { color: var(--text-dim); font-size: 9px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mc-judgment-command { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.mc-judgment-command code { font-size: 9px; color: var(--text-dim); overflow-wrap: anywhere; }
 
 .mc-empty { display: grid; justify-items: center; gap: 6px; padding: 54px 24px; text-align: center; }
 .mc-empty--compact { padding: 30px 20px; }

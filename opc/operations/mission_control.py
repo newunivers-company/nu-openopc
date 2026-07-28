@@ -265,6 +265,9 @@ class MissionControlService:
                 "goal_id": run.goal_id,
                 "completed_at": run.completed_at.isoformat() if run.completed_at else "",
                 "benchmark_slot_id": str(run.metadata.get("benchmark_slot_id", "") or ""),
+                "benchmark_campaign_id": str(
+                    run.metadata.get("benchmark_campaign_id", "") or ""
+                ),
             }
             for run in judgment_candidates[:20]
         ]

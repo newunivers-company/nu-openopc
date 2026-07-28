@@ -147,6 +147,7 @@ export interface MissionControlPayload {
     goal_id: string
     completed_at?: string
     benchmark_slot_id?: string
+    benchmark_campaign_id?: string
   }>
   alerts?: MissionControlAlert[]
   recommendations?: string[]

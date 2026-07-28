@@ -150,5 +150,44 @@ class ConfirmDraftTests(unittest.TestCase):
             )
 
 
+class AgreementTests(unittest.TestCase):
+    def test_perfect_agreement_has_kappa_one(self) -> None:
+        from opc.operations.judging import cohens_kappa
+
+        self.assertEqual(cohens_kappa([True, False, True], [True, False, True]), 1.0)
+
+    def test_known_kappa_value(self) -> None:
+        from opc.operations.judging import cohens_kappa
+
+        # 3/4 observed agreement; pA(T)=0.5, pB(T)=0.75 -> pe = 0.5
+        kappa = cohens_kappa(
+            [True, True, False, False], [True, True, True, False]
+        )
+        self.assertAlmostEqual(kappa, 0.5)
+
+    def test_judgment_agreement_reports_disagreements_and_deltas(self) -> None:
+        from opc.operations.judging import judgment_agreement
+
+        minimums = {"correctness": 0.9, "evidence": 0.85}
+        report = judgment_agreement(
+            {"criterion_scores": {"correctness": 0.95, "evidence": 0.9}},
+            {"criterion_scores": {"correctness": 0.92, "evidence": 0.7}},
+            minimum_scores=minimums,
+        )
+        self.assertEqual(report["disagreements"], ["evidence"])
+        self.assertEqual(report["pass_fail_agreement_rate"], 0.5)
+        self.assertAlmostEqual(report["max_abs_score_delta"], 0.2)
+
+    def test_agreement_requires_shared_criteria(self) -> None:
+        from opc.operations.judging import judgment_agreement
+
+        with self.assertRaises(ValueError):
+            judgment_agreement(
+                {"criterion_scores": {"a": 1.0}},
+                {"criterion_scores": {"b": 1.0}},
+                minimum_scores={"c": 0.5},
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

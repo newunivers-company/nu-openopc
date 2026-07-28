@@ -267,3 +267,69 @@ async def draft_for_goal(
         judge_model=judge_model,
         response_text=str(response or ""),
     )
+
+
+def cohens_kappa(labels_a: list[Any], labels_b: list[Any]) -> float:
+    """Cohen's kappa over two aligned categorical label sequences."""
+
+    if len(labels_a) != len(labels_b):
+        raise ValueError("label sequences must be the same length")
+    if not labels_a:
+        raise ValueError("kappa requires at least one label")
+    total = len(labels_a)
+    observed = sum(1 for a, b in zip(labels_a, labels_b) if a == b) / total
+    categories = set(labels_a) | set(labels_b)
+    expected = sum(
+        (labels_a.count(category) / total) * (labels_b.count(category) / total)
+        for category in categories
+    )
+    if expected >= 1.0:
+        return 1.0 if observed >= 1.0 else 0.0
+    return (observed - expected) / (1.0 - expected)
+
+
+def judgment_agreement(
+    result_a: Mapping[str, Any],
+    result_b: Mapping[str, Any],
+    *,
+    minimum_scores: Mapping[str, float],
+) -> dict[str, Any]:
+    """Inter-judge agreement over two confirmed results for the same run.
+
+    Labels each criterion pass/fail against its rubric minimum per judge,
+    then reports raw agreement, Cohen's kappa, and score deltas — evidence
+    for how trustworthy the ``independent_judge`` authority actually is.
+    """
+
+    scores_a = dict(result_a.get("criterion_scores", {}) or {})
+    scores_b = dict(result_b.get("criterion_scores", {}) or {})
+    criteria = sorted(set(minimum_scores) & set(scores_a) & set(scores_b))
+    if not criteria:
+        raise ValueError("no shared criteria between the two results and the rubric")
+    labels_a = [
+        float(scores_a[criterion]) >= float(minimum_scores[criterion])
+        for criterion in criteria
+    ]
+    labels_b = [
+        float(scores_b[criterion]) >= float(minimum_scores[criterion])
+        for criterion in criteria
+    ]
+    deltas = [
+        abs(float(scores_a[criterion]) - float(scores_b[criterion]))
+        for criterion in criteria
+    ]
+    disagreements = [
+        criterion
+        for criterion, a, b in zip(criteria, labels_a, labels_b)
+        if a != b
+    ]
+    return {
+        "criteria": criteria,
+        "pass_fail_agreement_rate": round(
+            sum(1 for a, b in zip(labels_a, labels_b) if a == b) / len(criteria), 6
+        ),
+        "cohens_kappa": round(cohens_kappa(labels_a, labels_b), 6),
+        "mean_abs_score_delta": round(sum(deltas) / len(deltas), 6),
+        "max_abs_score_delta": round(max(deltas), 6),
+        "disagreements": disagreements,
+    }

@@ -788,6 +788,37 @@ def register_operations_cli(app: typer.Typer) -> None:
 
         _emit(_run(project, action))
 
+    @judge_app.command("agreement")
+    def judge_agreement(
+        result_a: Path = typer.Option(..., "--result-a", help="First confirmed result JSON"),
+        result_b: Path = typer.Option(..., "--result-b", help="Second confirmed result JSON"),
+        goal_contract: Path = typer.Option(
+            ..., "--goal-contract", help="GoalContract JSON providing criterion minimums"
+        ),
+        output: Optional[Path] = typer.Option(None, "--output"),
+    ) -> None:
+        """Measure inter-judge agreement (Cohen's kappa) for one run."""
+
+        from opc.operations.judging import judgment_agreement
+
+        goal = _load_mapping(goal_contract)
+        minimums = {
+            str(item["criterion_id"]): float(item.get("minimum_score", 0.0) or 0.0)
+            for item in goal.get("acceptance_criteria", []) or []
+        }
+        report = judgment_agreement(
+            _load_mapping(result_a),
+            _load_mapping(result_b),
+            minimum_scores=minimums,
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
     @judge_app.command("draft-campaign")
     def judge_draft_campaign(
         plan_path: Path = typer.Option(..., "--plan", help="Sealed campaign plan JSON"),
