@@ -761,6 +761,36 @@ def _load_config_template(source: Any) -> OPCConfig:
         return OPCConfig.load(tmp_path)
 
 
+def _materialize_missing_config_templates(
+    source: Any,
+    target: Path,
+) -> list[str]:
+    """Install only absent runtime config files, preserving every existing byte."""
+
+    config = _load_config_template(source)
+    config.llm.api_key = ""
+    target.mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged = Path(tmpdir) / "config"
+        config.save(staged)
+        for name in (
+            "system_config.yaml",
+            "llm_config.yaml",
+            "agent_config.yaml",
+            "channel_config.yaml",
+        ):
+            destination = target / name
+            if destination.exists():
+                continue
+            candidate = staged / name
+            if not candidate.is_file():
+                continue
+            destination.write_bytes(candidate.read_bytes())
+            created.append(name)
+    return created
+
+
 def _opc_config_initialized(opc_home: Path) -> bool:
     config_dir = opc_home / "config"
     if not config_dir.exists():
@@ -928,6 +958,16 @@ def init(
             console.print("[warning]Init cancelled. Existing config was left unchanged.[/warning]")
             raise typer.Exit(1)
         console.print(f"[info]Existing config preserved: {opc_home / 'config'}[/info]")
+        if template_dir is not None:
+            created = _materialize_missing_config_templates(
+                template_dir,
+                opc_home / "config",
+            )
+            if created:
+                console.print(
+                    "[info]Installed missing config templates: "
+                    f"{', '.join(created)}[/info]"
+                )
         config = OPCConfig.load(opc_home / "config")
     elif template_dir is not None:
         # Use repo config template (same setup as maintainers, keys left for user to set)

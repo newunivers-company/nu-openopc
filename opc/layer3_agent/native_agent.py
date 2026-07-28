@@ -389,14 +389,42 @@ class NativeAgent:
     async def _build_native_prompt_bundle(self, task: Task) -> NativePromptBundle:
         override = str(task.metadata.get("_runtime_system_prompt_override", "") or "").strip()
         if override:
-            task.metadata["runtime_prompt_profile"] = "override"
-            return NativePromptBundle(
+            bundle = NativePromptBundle(
                 profile_name="override",
                 stable_system_prompt=override,
                 runtime_policy_messages=[],
             )
-        bundle = self.prompt_profiles.build_prompt_bundle(task)
+        else:
+            bundle = self.prompt_profiles.build_prompt_bundle(task)
         task.metadata["runtime_prompt_profile"] = bundle.profile_name
+        execution_mode = str(task.metadata.get("execution_mode", "") or "").strip() or None
+        role_skill_builder = getattr(self.skills, "build_role_skill_pack", None)
+        role_skill_pack = (
+            role_skill_builder(
+                list(self.role.skill_refs or []),
+                project_id=task.project_id,
+                execution_mode=execution_mode,
+                role_id=self.role.role_id,
+            )
+            if callable(role_skill_builder)
+            else {"content": "", "skills": [], "missing": []}
+        )
+        if role_skill_pack["content"]:
+            bundle.runtime_policy_messages.append(
+                {"role": "system", "content": role_skill_pack["content"]}
+            )
+        task.metadata["role_skill_versions"] = {
+            item["name"]: item["content_digest"]
+            for item in role_skill_pack["skills"]
+        }
+        task.metadata["missing_role_skill_refs"] = role_skill_pack["missing"]
+        pinned_messages = [
+            dict(item)
+            for item in task.metadata.get("_operations_learning_runtime_messages", []) or []
+            if isinstance(item, dict) and str(item.get("content", "") or "").strip()
+        ]
+        if pinned_messages:
+            bundle.runtime_policy_messages.extend(pinned_messages)
         return bundle
 
     async def _build_system_prompt(self, task: Task) -> str:

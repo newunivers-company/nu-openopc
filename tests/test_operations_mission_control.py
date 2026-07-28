@@ -316,11 +316,20 @@ class SecretaryMissionContextTests(unittest.IsolatedAsyncioTestCase):
             ),
             policies=SimpleNamespace(summarize_policies=lambda project_id=None: "none"),
             mission_control=_FakeMission(),
+            operator_actions=SimpleNamespace(),
+            skill_assembly=SimpleNamespace(
+                recommend=lambda **kwargs: {
+                    "goal": kwargs["goal"],
+                    "roles": [{"role_id": "qa"}],
+                    "mutations_applied": False,
+                }
+            ),
+            role_provider=lambda: [{"role_id": "qa"}],
         )
 
         prompt = json.loads(
             await secretary._build_prompt(
-                "status",
+                "status and skill readiness",
                 project_id="alpha",
                 session_id="secretary-session",
             )
@@ -329,6 +338,10 @@ class SecretaryMissionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prompt["mission_control"]["project_id"], "alpha")
         self.assertEqual(prompt["mission_control"]["alerts"][0]["severity"], "critical")
+        self.assertEqual(prompt["skill_assembly_preview"]["roles"][0]["role_id"], "qa")
+        self.assertFalse(
+            prompt["operator_action_policy"]["automatic_execution_allowed"]
+        )
         self.assertEqual(brief, "brief:alpha")
 
 

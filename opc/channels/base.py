@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from opc.channels.session import ChannelSessionMapping
+from opc.channels.company_commands import parse_company_command
 from opc.core.models import SystemMessage, UserMessage
 from opc.layer0_interaction.message_bus import MessageBus
 
@@ -107,6 +108,9 @@ class BaseChannel(ABC):
         metadata.setdefault("reply_to", str(normalized.get("reply_to", "") or ""))
         metadata.setdefault("thread_id", str(normalized.get("thread_id", "") or ""))
         metadata["attachments"] = list(attachments or [])
+        command = parse_company_command(str(normalized.get("content", "") or ""))
+        if command is not None:
+            metadata["company_command"] = command.to_dict()
         return metadata
 
     def map_session(

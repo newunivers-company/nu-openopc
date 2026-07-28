@@ -356,6 +356,70 @@ class CliInitProjectTests(unittest.TestCase):
             self.assertTrue((opc_home / "memory" / "projects" / "new_proj.md").is_file())
             self.assertTrue((workplace_root / "new_proj").is_dir())
 
+    def test_init_existing_partial_config_installs_only_missing_templates(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            opc_home = root / "project" / ".opc"
+            config_dir = opc_home / "config"
+            workplace_root = root / "workplace"
+            package_root = root / "site" / "opc"
+            template = package_root / "config_templates"
+            template.mkdir(parents=True)
+            config_dir.mkdir(parents=True)
+            approval = config_dir / "approval_allowlist.yaml"
+            approval.write_text("version: keep-me\n", encoding="utf-8")
+            (template / "llm_config.yaml").write_text(
+                "llm:\n"
+                "  default_model: packaged/model\n"
+                "  api_key: must-not-copy\n"
+                "  nu_routing:\n"
+                "    enabled: true\n",
+                encoding="utf-8",
+            )
+            (template / "system_config.yaml").write_text(
+                "system: {}\nautonomy: {}\ncapabilities: {}\n",
+                encoding="utf-8",
+            )
+            (template / "agent_config.yaml").write_text(
+                "external_agents:\n  preferred_order: []\n",
+                encoding="utf-8",
+            )
+            (template / "channel_config.yaml").write_text(
+                "channels: {}\n",
+                encoding="utf-8",
+            )
+
+            with patch("opc.core.config.get_opc_home", return_value=opc_home), patch(
+                "opc.core.config.get_project_workplace",
+                side_effect=lambda project_id: workplace_root / str(project_id),
+            ), patch(
+                "opc.cli.app.importlib_resources.files",
+                return_value=package_root,
+            ):
+                result = runner.invoke(
+                    app,
+                    [
+                        "init",
+                        "--yes",
+                        "--no-external-agent-preflight",
+                        "--no-trust-external-agents",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("Installed missing config templates", result.output)
+            self.assertEqual(approval.read_text(encoding="utf-8"), "version: keep-me\n")
+            saved = yaml.safe_load(
+                (config_dir / "llm_config.yaml").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["llm"]["default_model"], "packaged/model")
+            self.assertEqual(saved["llm"]["api_key"], "")
+            self.assertTrue(saved["llm"]["nu_routing"]["enabled"])
+            self.assertTrue((config_dir / "system_config.yaml").is_file())
+            self.assertTrue((config_dir / "agent_config.yaml").is_file())
+            self.assertTrue((config_dir / "channel_config.yaml").is_file())
+
 
 class CliExternalProgressDisplayTests(unittest.TestCase):
     def test_progress_callback_shows_external_status_approval_and_denial(self) -> None:

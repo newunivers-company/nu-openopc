@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from loguru import logger
 
@@ -30,6 +30,9 @@ class SecretaryService:
         skills: SkillLibrary,
         policies: SecretaryPolicyManager,
         mission_control: Any | None = None,
+        operator_actions: Any | None = None,
+        skill_assembly: Any | None = None,
+        role_provider: Callable[[], list[dict[str, Any]]] | None = None,
     ) -> None:
         self.llm = llm
         self.store = store
@@ -38,6 +41,9 @@ class SecretaryService:
         self.skills = skills
         self.policies = policies
         self.mission_control = mission_control
+        self.operator_actions = operator_actions
+        self.skill_assembly = skill_assembly
+        self.role_provider = role_provider
         self.skill_importer = ExternalSkillImporter(skill_library=skills, policies=policies)
 
     async def handle_message(
@@ -129,6 +135,21 @@ class SecretaryService:
                 )
             except Exception:
                 logger.opt(exception=True).warning("Secretary could not load Mission Control context")
+        skill_assembly_preview: dict[str, Any] = {}
+        if (
+            self.skill_assembly is not None
+            and any(token in content.lower() for token in ("skill", "skills", "스킬", "역량"))
+        ):
+            try:
+                skill_assembly_preview = self.skill_assembly.recommend(
+                    goal=content,
+                    roles=self.role_provider() if self.role_provider else [],
+                    project_id=project_id or "default",
+                )
+            except Exception:
+                logger.opt(exception=True).warning(
+                    "Secretary could not build deterministic skill assembly context"
+                )
         context = {
             "project_id": project_id or "default",
             "user_message": content,
@@ -143,6 +164,18 @@ class SecretaryService:
             "recent_structured_events": event_lines,
             "available_skill_names": skill_names[:80],
             "mission_control": mission_control,
+            "skill_assembly_preview": skill_assembly_preview,
+            "operator_action_policy": {
+                "available": self.operator_actions is not None,
+                "two_phase_confirmation_required": True,
+                "automatic_execution_allowed": False,
+                "allowed_kinds": [
+                    "recover_run",
+                    "replay_dead_letter",
+                    "rollback_learning_asset",
+                    "retire_learning_asset",
+                ],
+            },
         }
         return json.dumps(context, ensure_ascii=False)
 
@@ -153,6 +186,8 @@ class SecretaryService:
             "Important constraints:\n"
             "- Use the mission_control payload as the factual source for operating status, alerts, approvals, budgets, and next actions.\n"
             "- Surface critical and high alerts before lower-priority suggestions when the user asks for status or priorities.\n"
+            "- Treat skill_assembly_preview as a read-only installed-catalog recommendation; never claim it changed a role.\n"
+            "- Never execute operator actions from generated JSON. Direct the user to Mission Control or the explicit `/opc action` two-phase command.\n"
             "- Do not create memory notes, authorization rules, workspace guardrails, skill injection rules, or preferences.\n"
             "- Use actions only for explicit skill imports.\n"
             "- Return strict JSON only.\n\n"

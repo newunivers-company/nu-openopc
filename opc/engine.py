@@ -71,6 +71,11 @@ from opc.database.store import OPCStore
 from opc.llm.provider import LLMProvider
 from opc.layer0_interaction.message_bus import MessageBus
 from opc.channels import ChannelManager
+from opc.channels.company_commands import (
+    CompanyCommand,
+    execute_company_command,
+    parse_company_command,
+)
 from opc.layer1_perception.context_assembler import ContextAssembler, ExternalContextLayers
 from opc.layer1_perception.context_loader import ContextLoader
 from opc.layer2_organization.org_engine import (
@@ -652,6 +657,8 @@ class OPCEngine:
         self.secretary_policies = SecretaryPolicyManager(self.opc_home)
         self.skills = SkillLibrary(self.opc_home)
         self.skills.load_all(self.project_id)
+        if self.operations is not None:
+            self.operations.bind_skill_library(self.skills)
 
         # Layer 3: External Agents
         self.adapter_registry = AdapterRegistry(self.config.agents)
@@ -707,6 +714,26 @@ class OPCEngine:
             mission_control=(
                 self.operations.mission_control if self.operations is not None else None
             ),
+            operator_actions=(
+                self.operations.operator_actions if self.operations is not None else None
+            ),
+            skill_assembly=(
+                self.operations.skill_assembly if self.operations is not None else None
+            ),
+            role_provider=lambda: [
+                {
+                    "role_id": str(getattr(role, "id", "") or ""),
+                    "name": str(getattr(role, "name", "") or ""),
+                    "responsibility": str(
+                        getattr(role, "responsibility", "") or ""
+                    ),
+                    "capabilities": list(
+                        getattr(role, "capabilities", []) or []
+                    ),
+                    "skill_refs": list(getattr(role, "skill_refs", []) or []),
+                }
+                for role in list(getattr(self.config.org, "roles", []) or [])
+            ],
         )
         self.company_runtime_spec_builder = CompanyRuntimeSpecBuilder(self.org_engine, self.llm)
         self.company_recruiter = CompanyRecruiter(
@@ -1989,6 +2016,35 @@ class OPCEngine:
             return f"ui-turn:{ui_message_id}"
         return f"engine-turn:{message.session_id}:{uuid.uuid4().hex}"
 
+    async def _maybe_handle_company_command(
+        self,
+        message: UserMessage,
+    ) -> str | None:
+        raw = message.metadata.get("company_command")
+        command = (
+            CompanyCommand.from_dict(raw)
+            if isinstance(raw, dict)
+            else parse_company_command(message.content)
+        )
+        if command is None:
+            return None
+        roles = [
+            {
+                "role_id": str(getattr(role, "id", "") or ""),
+                "name": str(getattr(role, "name", "") or ""),
+                "responsibility": str(getattr(role, "responsibility", "") or ""),
+                "capabilities": list(getattr(role, "capabilities", []) or []),
+                "skill_refs": list(getattr(role, "skill_refs", []) or []),
+            }
+            for role in list(getattr(self.config.org, "roles", []) or [])
+        ]
+        return await execute_company_command(
+            command,
+            operations=self.operations,
+            project_id=self.project_id or "default",
+            roles=roles,
+        )
+
     async def _handle_message(self, message: UserMessage) -> SystemMessage:
         """Core message handler — branches on user-selected mode (project / company)."""
         assert self.context_loader
@@ -2041,6 +2097,18 @@ class OPCEngine:
                 content=message.content,
                 project_id=self.project_id or "default",
                 metadata=user_turn_metadata,
+            )
+
+        company_command_reply = await self._maybe_handle_company_command(message)
+        if company_command_reply is not None:
+            await _record_early_reply(company_command_reply)
+            return SystemMessage(
+                channel=message.channel,
+                user_id=message.user_id,
+                session_id=message.session_id,
+                content=company_command_reply,
+                message_type="reply",
+                metadata=response_metadata,
             )
 
         resumed = await self._maybe_resume_checkpoint(
@@ -9630,6 +9698,29 @@ class OPCEngine:
             role = self.org_engine.get_role_for_work_item(task.assigned_to, task.tags)
         else:
             role = self.org_engine.get_role_for_domain(task.tags)
+        operations_run_id = str(
+            task.metadata.get("operations_run_id")
+            or ""
+        ).strip()
+        if self.operations is not None and operations_run_id:
+            employee_assignment = dict(task.metadata.get("employee_assignment", {}) or {})
+            activation = await self.operations.learning_activations.render_for_run(
+                operations_run_id,
+                role_id=str(getattr(role, "role_id", "") or ""),
+                employee_id=str(
+                    task.metadata.get("employee_id")
+                    or employee_assignment.get("employee_id")
+                    or ""
+                ),
+            )
+            task.metadata = {
+                **dict(task.metadata),
+                "_operations_learning_runtime_messages": activation[
+                    "runtime_policy_messages"
+                ],
+                "operations_learning_snapshot_digest": activation["snapshot_digest"],
+                "operations_learning_asset_ids": activation["asset_ids"],
+            }
 
         agent = NativeAgent(
             role=role,
@@ -10091,6 +10182,28 @@ class OPCEngine:
                 )
                 or ""
             ).strip()
+            role_skill_refs = (
+                self.org_engine.get_role_skill_refs(str(role_id or ""))
+                if self.org_engine is not None and role_id
+                else []
+            )
+            role_skill_pack = self.skills.build_role_skill_pack(
+                role_skill_refs,
+                project_id=task.project_id,
+                execution_mode=execution_mode,
+                role_id=str(role_id or ""),
+            )
+            if role_skill_pack["content"]:
+                skills_summary = "\n\n".join(
+                    part
+                    for part in (role_skill_pack["content"], skills_summary)
+                    if part
+                )
+            task.metadata["role_skill_versions"] = {
+                item["name"]: item["content_digest"]
+                for item in role_skill_pack["skills"]
+            }
+            task.metadata["missing_role_skill_refs"] = role_skill_pack["missing"]
             memory_paths_context = self._build_external_memory_paths_context(
                 task,
                 role_id=str(role_id or ""),
