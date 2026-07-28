@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,8 @@ RESULT_SKELETON_NAME = "result-skeleton.json"
 OUTPUT_ARTIFACT_NAME = "output.md"
 
 SlotExecutor = Callable[[Mapping[str, Any], Path], Awaitable["SlotExecution"]]
+
+_ANSI_ESCAPES = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 @dataclass
@@ -456,7 +459,7 @@ def evaluate_exec_output(returncode: int | None, stdout: str) -> dict[str, Any]:
     if returncode != 0:
         verdict["reason"] = f"exit code {returncode}"
         return verdict
-    text = str(stdout or "").strip()
+    text = _ANSI_ESCAPES.sub("", str(stdout or "")).strip()
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         verdict["reason"] = "stdout contains no JSON payload"

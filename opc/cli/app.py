@@ -1397,9 +1397,23 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _print_json(payload: Any) -> None:
+    """Emit machine-readable JSON without rich console wrapping.
+
+    ``console.print`` hard-wraps long lines at the terminal width, which
+    inserts raw newlines inside JSON string values and corrupts the payload
+    for any consumer of ``--json`` output (CI, the benchmark harness).
+    """
+
+    sys.stdout.write(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe) + "\n"
+    )
+    sys.stdout.flush()
+
+
 def _emit_payload(payload: dict[str, Any], *, json_output: bool = False) -> None:
     if json_output:
-        console.print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe))
+        _print_json(payload)
         return
     if not payload:
         console.print("[success]OK[/success]")
@@ -1431,7 +1445,7 @@ async def _run_service_command(
             result = await operation(services)
         except ServiceError as exc:
             if json_output:
-                console.print(json.dumps({"ok": False, **exc.to_payload()}, ensure_ascii=False, indent=2))
+                _print_json({"ok": False, **exc.to_payload()})
             else:
                 console.print(f"[error]{escape(exc.message)}[/error]")
             raise typer.Exit(code=1) from exc
@@ -1737,7 +1751,7 @@ async def _exec_message(
                     payload=final_payload,
                 )
             elif json_output:
-                console.print(json.dumps(final_payload, ensure_ascii=False, indent=2, default=_json_safe))
+                _print_json(final_payload)
             elif response:
                 _print_response(response, no_markdown=no_markdown)
             else:
@@ -1749,7 +1763,7 @@ async def _exec_message(
         if stream_json:
             _print_exec_event(event_state, "error", project_id=project_id, payload=payload)
         elif json_output:
-            console.print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe))
+            _print_json(payload)
         else:
             console.print(f"[error]{escape(exc.message)}[/error]")
         raise typer.Exit(code=1) from exc
@@ -1758,7 +1772,7 @@ async def _exec_message(
         if stream_json:
             _print_exec_event(event_state, "error", project_id=project_id, payload=payload)
         elif json_output:
-            console.print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe))
+            _print_json(payload)
         else:
             console.print(f"[error]{escape(str(exc))}[/error]")
         raise typer.Exit(code=2) from exc

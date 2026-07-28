@@ -453,3 +453,17 @@ class DraftForGoalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(draft.authority, "llm_draft")
         self.assertIn("deliverable", captured["user"])
         self.assertIn("DRAFT", captured["system"])
+
+
+class ExecOutputRobustnessTests(unittest.TestCase):
+    def test_ansi_escapes_are_stripped_before_parsing(self) -> None:
+        from opc.operations.campaign_runner import evaluate_exec_output
+
+        stdout = (
+            "\x1b[32mINFO\x1b[0m startup noise\n"
+            '{"ok": true, "task_id": "t1", "session_id": "s1",'
+            ' "task_status": "done", "response": "# Long deliverable"}'
+        )
+        verdict = evaluate_exec_output(0, stdout)
+        self.assertTrue(verdict["success"])
+        self.assertEqual(verdict["response"], "# Long deliverable")
