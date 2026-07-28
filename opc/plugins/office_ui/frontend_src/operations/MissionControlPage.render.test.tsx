@@ -171,4 +171,51 @@ describe('MissionControlPage governed action flow', () => {
     renderPage({ data: { available: true, project_id: 'demo', alerts: [] } })
     expect(screen.getByText('No active alerts')).toBeInTheDocument()
   })
+
+  it('renders provider capacity with readiness verdicts and recommendations', () => {
+    renderPage({
+      data: {
+        available: true,
+        project_id: 'demo',
+        alerts: [],
+        provider_slo: {
+          claude: {
+            samples: 48,
+            availability: 1,
+            p95_latency_ms: 420,
+            target_met: true,
+            production_ready: true,
+          },
+          codex: {
+            samples: 3,
+            availability: 0.5,
+            p95_latency_ms: 900,
+            target_met: false,
+            production_ready: false,
+            blockers: ['observation window below 24h'],
+          },
+        },
+        provider_call_quotas: {
+          claude: {
+            enabled: true,
+            allowed: true,
+            used: 40,
+            remaining: 160,
+            limit: 200,
+            window_seconds: 86_400,
+          },
+        },
+        recommendations: ['Continue the codex readiness campaign.'],
+      },
+    })
+
+    expect(screen.getByRole('heading', { name: 'Provider capacity' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'claude' })).toBeInTheDocument()
+    expect(screen.getByText('Production ready')).toBeInTheDocument()
+    expect(screen.getByText('Evidence pending')).toBeInTheDocument()
+    expect(screen.getByText('observation window below 24h')).toBeInTheDocument()
+    expect(screen.getByText('40 / 200')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Recommended next' })).toBeInTheDocument()
+    expect(screen.getByText('Continue the codex readiness campaign.')).toBeInTheDocument()
+  })
 })

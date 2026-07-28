@@ -173,4 +173,9 @@ assert.match(
   'session_detail ACK must persist pagination state under its detail policy',
 )
 
+// Mission Control page wiring (moved from MissionControlPage.test.tsx when its
+// component assertions were replaced by MissionControlPage.render.test.tsx).
+assert.match(src, /activePage === 'operations'/, 'App must expose the Mission Control page')
+assert.match(src, /30_000/, 'Mission Control must refresh periodically while visible')
+
 console.log('App.test.tsx: OK (org handlers + snapshot boundary + runtime displayTool/draft contract)')
