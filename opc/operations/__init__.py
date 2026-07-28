@@ -29,6 +29,13 @@ from opc.operations.models import (
     StaffingCandidate,
     StaffingDecision,
 )
+from opc.operations.campaign_runner import (
+    CampaignBudget,
+    CampaignRunner,
+    CampaignSlotRunner,
+    SlotExecution,
+    SubprocessSlotExecutor,
+)
 from opc.operations.capabilities import UnifiedCapabilityBroker
 from opc.operations.canary import ProviderCanaryService
 from opc.operations.durable import DurableRunKernel
@@ -72,6 +79,11 @@ __all__ = [
     "RunStatus",
     "StaffingCandidate",
     "StaffingDecision",
+    "CampaignBudget",
+    "CampaignRunner",
+    "CampaignSlotRunner",
+    "SlotExecution",
+    "SubprocessSlotExecutor",
     "DurableRunKernel",
     "LearningAssetManager",
     "LearningActivationResolver",

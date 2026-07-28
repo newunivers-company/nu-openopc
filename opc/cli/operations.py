@@ -39,6 +39,16 @@ from opc.operations.benchmarks import (
     load_suite,
     observation_from_run,
 )
+from opc.operations.campaign_runner import (
+    CampaignBudget,
+    CampaignRunner,
+    CampaignSlotRunner,
+    SubprocessExecutorConfig,
+    SubprocessSlotExecutor,
+    build_slot_command,
+    find_slot,
+    verify_plan,
+)
 from opc.operations.experiments import (
     ShadowQualityObservation,
     bind_shadow_observation_to_transport,
@@ -263,6 +273,110 @@ def register_operations_cli(app: typer.Typer) -> None:
                 json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
             )
         _emit(row)
+
+    @benchmark_app.command("run-slot")
+    def benchmark_run_slot(
+        slot_id: str = typer.Argument(...),
+        plan_path: Path = typer.Option(..., "--plan", help="Sealed campaign plan JSON"),
+        artifacts_root: Path = typer.Option(
+            Path("outputs/benchmark"), "--artifacts-root"
+        ),
+        force: bool = typer.Option(False, "--force", help="Re-run an existing run_id"),
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="Show the executor command without running"
+        ),
+        timeout_seconds: float = typer.Option(3600.0, "--timeout-seconds", min=1),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Execute one campaign slot end to end and emit its scoring skeleton."""
+
+        plan = verify_plan(_load_mapping(plan_path))
+        if dry_run:
+            slot = find_slot(plan, slot_id)
+            _emit(
+                {
+                    "dry_run": True,
+                    "slot_id": slot_id,
+                    "run_id": slot["run_id"],
+                    "command": build_slot_command(slot, project_id=project),
+                    "artifact_directory": str(
+                        artifacts_root / slot["artifact_directory"]
+                    ),
+                }
+            )
+            return
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            runner = CampaignSlotRunner(
+                service,
+                SubprocessSlotExecutor(
+                    project_id=project,
+                    config=SubprocessExecutorConfig(timeout_seconds=timeout_seconds),
+                ),
+                project_id=project,
+                artifacts_root=artifacts_root,
+            )
+            result = await runner.run_slot(plan, slot_id, force=force)
+            return result.to_dict()
+
+        result = _run(project, action)
+        _emit(result)
+        if result["status"] == "failed":
+            raise typer.Exit(code=1)
+
+    @benchmark_app.command("run-campaign")
+    def benchmark_run_campaign(
+        plan_path: Path = typer.Option(..., "--plan", help="Sealed campaign plan JSON"),
+        artifacts_root: Path = typer.Option(
+            Path("outputs/benchmark"), "--artifacts-root"
+        ),
+        max_slots: Optional[int] = typer.Option(None, "--max-slots", min=1),
+        max_failures: int = typer.Option(3, "--max-failures", min=0),
+        workload: list[str] = typer.Option([], "--workload"),
+        mode: list[str] = typer.Option([], "--mode"),
+        stop_on_failure: bool = typer.Option(False, "--stop-on-failure"),
+        timeout_seconds: float = typer.Option(3600.0, "--timeout-seconds", min=1),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Drive campaign slots in sequence with budget ceilings; resumable."""
+
+        plan = verify_plan(_load_mapping(plan_path))
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            campaign = CampaignRunner(
+                CampaignSlotRunner(
+                    service,
+                    SubprocessSlotExecutor(
+                        project_id=project,
+                        config=SubprocessExecutorConfig(
+                            timeout_seconds=timeout_seconds
+                        ),
+                    ),
+                    project_id=project,
+                    artifacts_root=artifacts_root,
+                )
+            )
+            return await campaign.run_campaign(
+                plan,
+                budget=CampaignBudget(
+                    max_slots=max_slots, max_failures=max_failures
+                ),
+                workloads=workload or None,
+                modes=mode or None,
+                stop_on_failure=stop_on_failure,
+            )
+
+        report = _run(project, action)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+        if report["failed"]:
+            raise typer.Exit(code=1)
 
     @benchmark_app.command("shadow-gate")
     def benchmark_shadow_gate(
