@@ -82,6 +82,21 @@ system:
       slo_availability_target: 0.95
       slo_p95_latency_target_ms: 30000
       canary_expected_model: ''
+      # Production readiness is intentionally stricter than the short SLO
+      # view: 24 hours, four dense six-hour buckets, fresh samples, bounded
+      # gaps, and fresh independently evidenced failure drills.
+      readiness_min_observation_seconds: 86400
+      readiness_time_bucket_seconds: 21600
+      readiness_min_time_buckets: 4
+      readiness_min_samples_per_bucket: 1
+      readiness_max_sample_age_seconds: 1800
+      readiness_max_gap_seconds: 28800
+      readiness_failure_drill_max_age_seconds: 2592000
+      readiness_required_failure_scenarios:
+      - credential_expiry
+      - transport_timeout
+      - quota_exhaustion
+      - model_drift
   native_runtime:
     enabled: true
     stream_llm: true

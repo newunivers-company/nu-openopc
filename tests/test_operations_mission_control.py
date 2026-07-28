@@ -28,6 +28,8 @@ from opc.operations.models import (
     RunMetrics,
     RunScorecard,
     RunStatus,
+    CapabilityKind,
+    ProviderCanaryResult,
     utc_now,
 )
 from opc.operations.repository import OperationsRepository
@@ -207,6 +209,45 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
             if item.kind == "subscription_call_quota"
         )
         self.assertEqual(alert.severity, "critical")
+
+    async def test_snapshot_surfaces_incomplete_provider_readiness_evidence(self) -> None:
+        now = utc_now()
+        await self.repository.save_provider_canary_result(
+            ProviderCanaryResult(
+                project_id="default",
+                capability_kind=CapabilityKind.LLM,
+                provider="codex",
+                model="subscription-model",
+                success=True,
+                available=True,
+                credential_ready=True,
+                transport_ready=True,
+                latency_ms=25.0,
+                checked_at=now,
+            )
+        )
+        mission = MissionControlService(
+            self.repository,
+            self.kernel,
+            provider_config=ProviderOperationsConfig(
+                slo_min_samples=1,
+                slo_trend_window_samples=1,
+                readiness_min_observation_seconds=3600,
+                readiness_min_time_buckets=2,
+                readiness_required_failure_scenarios=["transport_timeout"],
+            ),
+        )
+
+        snapshot = await mission.snapshot(project_id="default", now=now)
+
+        readiness = snapshot.provider_slo["codex"]
+        self.assertTrue(readiness["target_met"])
+        self.assertFalse(readiness["production_ready"])
+        self.assertIn("transport_timeout", readiness["missing_failure_scenarios"])
+        alert = next(
+            item for item in snapshot.alerts if item.kind == "provider_readiness"
+        )
+        self.assertEqual(alert.severity, "medium")
 
     async def test_operations_tools_expose_mission_and_force_dry_run_routes(self) -> None:
         service = OperationsService(

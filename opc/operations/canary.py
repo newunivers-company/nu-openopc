@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import re
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 from opc.operations.capabilities import CapabilityExecutor, UnifiedCapabilityBroker
-from opc.operations.models import CapabilityRequest, ProviderCanaryResult
+from opc.operations.models import CapabilityKind, CapabilityRequest, ProviderCanaryResult
 from opc.operations.repository import OperationsRepository
+
+
+_CAMPAIGN_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
 
 def summarize_provider_slo(
@@ -25,7 +32,11 @@ def summarize_provider_slo(
     sample_target = max(1, int(minimum_samples))
     trend_window = max(1, int(trend_window_samples))
     grouped: dict[str, list[ProviderCanaryResult]] = defaultdict(list)
+    # Controlled failure drills prove fallback/alert behavior and must not
+    # lower the production availability denominator.
     for row in rows:
+        if row.mode not in {"status", "live"}:
+            continue
         grouped[row.provider].append(row)
     summaries: dict[str, dict[str, Any]] = {}
     for name, values in sorted(grouped.items()):
@@ -80,6 +91,304 @@ def summarize_provider_slo(
     return summaries
 
 
+def summarize_provider_readiness(
+    rows: list[ProviderCanaryResult],
+    *,
+    availability_target: float = 0.95,
+    p95_latency_target_ms: float = 30_000.0,
+    minimum_samples: int = 30,
+    trend_window_samples: int = 10,
+    minimum_observation_seconds: int = 86_400,
+    time_bucket_seconds: int = 21_600,
+    minimum_time_buckets: int = 4,
+    minimum_samples_per_bucket: int = 1,
+    maximum_sample_age_seconds: int = 1_800,
+    maximum_gap_seconds: int = 28_800,
+    failure_drill_max_age_seconds: int = 2_592_000,
+    required_failure_scenarios: list[str] | tuple[str, ...] = (),
+    now: datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Add observation-window and controlled-failure evidence to the SLO gate."""
+
+    operational = [row for row in rows if row.mode in {"status", "live"}]
+    base = summarize_provider_slo(
+        operational,
+        availability_target=availability_target,
+        p95_latency_target_ms=p95_latency_target_ms,
+        minimum_samples=minimum_samples,
+        trend_window_samples=trend_window_samples,
+    )
+    providers = sorted({row.provider for row in rows if row.provider})
+    required = tuple(
+        dict.fromkeys(
+            str(item).strip()
+            for item in required_failure_scenarios
+            if str(item).strip()
+        )
+    )
+    result: dict[str, dict[str, Any]] = {}
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        raise ValueError("readiness now must include a timezone")
+    for provider in providers:
+        provider_operational = [
+            row for row in operational if row.provider == provider
+        ]
+        timestamps = sorted(row.checked_at for row in provider_operational)
+        observation_seconds = (
+            max(0.0, (timestamps[-1] - timestamps[0]).total_seconds())
+            if len(timestamps) >= 2
+            else 0.0
+        )
+        bucket_size = max(60, int(time_bucket_seconds))
+        bucket_counts: dict[int, int] = {}
+        for item in provider_operational:
+            bucket = int(item.checked_at.timestamp() // bucket_size)
+            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        sample_floor = max(1, int(minimum_samples_per_bucket))
+        covered_buckets = {
+            bucket: count
+            for bucket, count in bucket_counts.items()
+            if count >= sample_floor
+        }
+        gaps = [
+            max(0.0, (later - earlier).total_seconds())
+            for earlier, later in zip(timestamps, timestamps[1:])
+        ]
+        largest_gap_seconds = max(gaps, default=0.0)
+        latest_sample_age_seconds = (
+            max(0.0, (current - timestamps[-1]).total_seconds())
+            if timestamps
+            else float("inf")
+        )
+        future_sample_count = sum(
+            item.checked_at > current for item in provider_operational
+        )
+        drills = [
+            row
+            for row in rows
+            if row.provider == provider and row.mode == "drill"
+        ]
+        drill_age_limit = max(60, int(failure_drill_max_age_seconds))
+        verified_scenarios = {
+            str(row.metadata.get("drill_scenario", "") or "")
+            for row in drills
+            if _verified_failure_drill(row)
+            and row.checked_at <= current
+            and (current - row.checked_at).total_seconds() <= drill_age_limit
+        }
+        missing_drills = [
+            item for item in required if item not in verified_scenarios
+        ]
+        slo = dict(
+            base.get(
+                provider,
+                {
+                    "samples": 0,
+                    "sample_target": max(1, int(minimum_samples)),
+                    "sample_target_met": False,
+                    "attainment_state": "insufficient_samples",
+                    "target_met": False,
+                    "promotion_ready": False,
+                    "trend": {"ready": False, "state": "insufficient_samples"},
+                },
+            )
+        )
+        observation_target_met = observation_seconds >= max(
+            0,
+            int(minimum_observation_seconds),
+        )
+        time_bucket_target_met = len(covered_buckets) >= max(
+            1,
+            int(minimum_time_buckets),
+        )
+        freshness_target_met = bool(
+            timestamps
+            and future_sample_count == 0
+            and latest_sample_age_seconds
+            <= max(0, int(maximum_sample_age_seconds))
+        )
+        gap_target_met = bool(
+            timestamps
+            and largest_gap_seconds <= max(60, int(maximum_gap_seconds))
+        )
+        drill_target_met = not missing_drills
+        production_ready = bool(
+            slo.get("promotion_ready")
+            and observation_target_met
+            and time_bucket_target_met
+            and freshness_target_met
+            and gap_target_met
+            and drill_target_met
+        )
+        blockers = [
+            message
+            for condition, message in (
+                (
+                    not slo.get("promotion_ready"),
+                    "provider SLO/trend evidence is not promotion-ready",
+                ),
+                (
+                    not observation_target_met,
+                    "minimum observation span is not met",
+                ),
+                (
+                    not time_bucket_target_met,
+                    "minimum dense time-bucket coverage is not met",
+                ),
+                (
+                    not freshness_target_met,
+                    "latest canary sample is stale or future-dated",
+                ),
+                (
+                    not gap_target_met,
+                    "maximum gap between canary samples is exceeded",
+                ),
+                (
+                    not drill_target_met,
+                    "required fresh failure drills are missing",
+                ),
+            )
+            if condition
+        ]
+        result[provider] = {
+            **slo,
+            "observation_seconds": round(observation_seconds, 3),
+            "minimum_observation_seconds": max(
+                0,
+                int(minimum_observation_seconds),
+            ),
+            "observation_target_met": observation_target_met,
+            "time_buckets": len(bucket_counts),
+            "dense_time_buckets": len(covered_buckets),
+            "minimum_time_buckets": max(1, int(minimum_time_buckets)),
+            "minimum_samples_per_bucket": sample_floor,
+            "time_bucket_sample_counts": {
+                str(bucket): count
+                for bucket, count in sorted(bucket_counts.items())
+            },
+            "time_bucket_seconds": bucket_size,
+            "time_bucket_target_met": time_bucket_target_met,
+            "latest_sample_age_seconds": (
+                round(latest_sample_age_seconds, 3)
+                if timestamps
+                else None
+            ),
+            "maximum_sample_age_seconds": max(
+                0,
+                int(maximum_sample_age_seconds),
+            ),
+            "freshness_target_met": freshness_target_met,
+            "largest_gap_seconds": round(largest_gap_seconds, 3),
+            "maximum_gap_seconds": max(60, int(maximum_gap_seconds)),
+            "gap_target_met": gap_target_met,
+            "future_sample_count": future_sample_count,
+            "verified_failure_scenarios": sorted(verified_scenarios),
+            "required_failure_scenarios": list(required),
+            "missing_failure_scenarios": missing_drills,
+            "failure_drill_max_age_seconds": drill_age_limit,
+            "failure_drill_target_met": drill_target_met,
+            "production_ready": production_ready,
+            "readiness_state": "ready" if production_ready else "pending_evidence",
+            "blockers": blockers,
+        }
+    return result
+
+
+def build_readiness_campaign_plan(
+    *,
+    campaign_id: str,
+    provider: str,
+    start_at: datetime,
+    model: str = "",
+    interval_seconds: float = 300.0,
+    observation_seconds: int = 86_400,
+    time_bucket_seconds: int = 21_600,
+    minimum_time_buckets: int = 4,
+    maximum_sample_age_seconds: int = 1_800,
+    maximum_gap_seconds: int = 28_800,
+    failure_drill_max_age_seconds: int = 2_592_000,
+    required_failure_scenarios: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Create an auditable schedule without executing failure injection."""
+
+    campaign = str(campaign_id or "").strip()
+    selected_provider = str(provider or "").strip()
+    if not _CAMPAIGN_ID.fullmatch(campaign):
+        raise ValueError("readiness campaign_id has invalid characters")
+    if not selected_provider:
+        raise ValueError("readiness campaign provider is required")
+    if start_at.tzinfo is None:
+        raise ValueError("readiness campaign start_at must include a timezone")
+    interval = max(1.0, float(interval_seconds))
+    duration = max(0, int(observation_seconds))
+    end_at = start_at + timedelta(seconds=duration)
+    scenarios = list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in required_failure_scenarios
+            if str(item).strip()
+        )
+    )
+    report: dict[str, Any] = {
+        "schema_version": 1,
+        "campaign_id": campaign,
+        "provider": selected_provider,
+        "model": str(model or "").strip(),
+        "start_at": start_at.isoformat(),
+        "end_at": end_at.isoformat(),
+        "status_canary": {
+            "generation_allowed": False,
+            "interval_seconds": interval,
+            "minimum_observation_seconds": duration,
+            "expected_minimum_samples": (
+                int(duration // interval) + 1
+            ),
+            "time_bucket_seconds": max(60, int(time_bucket_seconds)),
+            "minimum_time_buckets": max(1, int(minimum_time_buckets)),
+            "maximum_sample_age_seconds": max(
+                0,
+                int(maximum_sample_age_seconds),
+            ),
+            "maximum_gap_seconds": max(60, int(maximum_gap_seconds)),
+        },
+        "failure_drills": [
+            {
+                "scenario": scenario,
+                "maximum_evidence_age_seconds": max(
+                    60,
+                    int(failure_drill_max_age_seconds),
+                ),
+                "requires_explicit_operator_coordination": True,
+                "result_contract": {
+                    "actual_injection": True,
+                    "expected_failure_observed": True,
+                    "fallback_verified": True,
+                    "alert_verified": True,
+                    "recovery_verified": True,
+                    "authority": "human_confirmed_or_independent_observer",
+                    "evidence": ["durable artifact URI required"],
+                },
+            }
+            for scenario in scenarios
+        ],
+        "automatic_failure_injection": False,
+        "operator_note": (
+            "This plan schedules status-only observation. Failure drills are "
+            "never injected automatically and require coordinated, scoped execution."
+        ),
+    }
+    report["plan_digest"] = hashlib.sha256(
+        json.dumps(
+            report,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return report
+
+
 class ProviderCanaryService:
     def __init__(
         self,
@@ -118,7 +427,11 @@ class ProviderCanaryService:
                 transport_ready=transport_ready,
                 latency_ms=(time.monotonic() - started) * 1000,
                 expected_model=expected_model,
-                model_drift=bool(expected_model and route.model != expected_model),
+                model_drift=bool(
+                    expected_model
+                    and route.model
+                    and route.model != expected_model
+                ),
                 error_category=_error_category(error),
                 error=error[:4000],
                 metadata={
@@ -198,6 +511,61 @@ class ProviderCanaryService:
             )
         return await self.repository.save_provider_canary_result(result)
 
+    async def record_failure_drill(
+        self,
+        *,
+        project_id: str,
+        provider: str,
+        scenario: str,
+        result: Mapping[str, Any],
+        model: str = "",
+    ) -> ProviderCanaryResult:
+        """Persist an independently evidenced, controlled failure exercise."""
+
+        drill = str(scenario or "").strip()
+        authority = str(result.get("authority", "") or "").strip()
+        evidence = [
+            str(item).strip()
+            for item in result.get("evidence", []) or []
+            if str(item).strip()
+        ]
+        checks = {
+            "actual_injection": bool(result.get("actual_injection", False)),
+            "expected_failure_observed": bool(
+                result.get("expected_failure_observed", False)
+            ),
+            "fallback_verified": bool(result.get("fallback_verified", False)),
+            "alert_verified": bool(result.get("alert_verified", False)),
+            "recovery_verified": bool(result.get("recovery_verified", False)),
+        }
+        if not drill or not str(provider or "").strip():
+            raise ValueError("failure drill provider and scenario are required")
+        if authority not in {"human_confirmed", "independent_observer"}:
+            raise ValueError("failure drill requires independent authority")
+        if not evidence:
+            raise ValueError("failure drill requires durable evidence")
+        passed = all(checks.values())
+        row = ProviderCanaryResult(
+            project_id=project_id,
+            capability_kind=CapabilityKind.LLM,
+            provider=str(provider).strip(),
+            model=str(model or "").strip(),
+            mode="drill",
+            success=passed,
+            available=True,
+            credential_ready=True,
+            transport_ready=True,
+            error_category="" if passed else drill,
+            error="" if passed else "controlled failure drill did not verify all required behavior",
+            metadata={
+                "drill_scenario": drill,
+                "authority": authority,
+                "evidence": evidence,
+                **checks,
+            },
+        )
+        return await self.repository.save_provider_canary_result(row)
+
     async def slo_summary(
         self,
         *,
@@ -227,6 +595,50 @@ class ProviderCanaryService:
             "p95_latency_target_ms": p95_latency_target_ms,
             "sample_count": len(rows),
             "providers": summaries,
+        }
+
+    async def readiness_summary(
+        self,
+        *,
+        project_id: str = "default",
+        provider: str | None = None,
+        limit: int = 5000,
+        availability_target: float = 0.95,
+        p95_latency_target_ms: float = 30_000.0,
+        minimum_samples: int = 30,
+        trend_window_samples: int = 10,
+        minimum_observation_seconds: int = 86_400,
+        time_bucket_seconds: int = 21_600,
+        minimum_time_buckets: int = 4,
+        minimum_samples_per_bucket: int = 1,
+        maximum_sample_age_seconds: int = 1_800,
+        maximum_gap_seconds: int = 28_800,
+        failure_drill_max_age_seconds: int = 2_592_000,
+        required_failure_scenarios: list[str] | tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        rows = await self.repository.list_provider_canary_results(
+            project_id=project_id,
+            provider=provider,
+            limit=limit,
+        )
+        return {
+            "project_id": project_id,
+            "sample_count": len(rows),
+            "providers": summarize_provider_readiness(
+                rows,
+                availability_target=availability_target,
+                p95_latency_target_ms=p95_latency_target_ms,
+                minimum_samples=minimum_samples,
+                trend_window_samples=trend_window_samples,
+                minimum_observation_seconds=minimum_observation_seconds,
+                time_bucket_seconds=time_bucket_seconds,
+                minimum_time_buckets=minimum_time_buckets,
+                minimum_samples_per_bucket=minimum_samples_per_bucket,
+                maximum_sample_age_seconds=maximum_sample_age_seconds,
+                maximum_gap_seconds=maximum_gap_seconds,
+                failure_drill_max_age_seconds=failure_drill_max_age_seconds,
+                required_failure_scenarios=required_failure_scenarios,
+            ),
         }
 
 
@@ -326,6 +738,21 @@ def _percentile(values: list[float], fraction: float) -> float:
         return 0.0
     index = max(0, min(len(values) - 1, int((len(values) - 1) * fraction + 0.999999)))
     return float(values[index])
+
+
+def _verified_failure_drill(row: ProviderCanaryResult) -> bool:
+    metadata = dict(row.metadata or {})
+    return bool(
+        row.success
+        and metadata.get("actual_injection") is True
+        and metadata.get("expected_failure_observed") is True
+        and metadata.get("fallback_verified") is True
+        and metadata.get("alert_verified") is True
+        and metadata.get("recovery_verified") is True
+        and str(metadata.get("authority", "") or "")
+        in {"human_confirmed", "independent_observer"}
+        and list(metadata.get("evidence", []) or [])
+    )
 
 
 def _trend_summary(

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import tempfile
 from pathlib import Path
 import unittest
 
 from opc.core.config import OperationsConfig, ProviderOperationsConfig
 from opc.database.store import OPCStore
-from opc.operations.canary import ProviderCanaryScheduler, ProviderCanaryService
+from opc.operations.canary import (
+    ProviderCanaryScheduler,
+    ProviderCanaryService,
+    build_readiness_campaign_plan,
+    summarize_provider_readiness,
+    summarize_provider_slo,
+)
 from opc.operations.models import (
     CapabilityKind,
     CapabilityRequest,
@@ -263,6 +270,201 @@ class ProviderCanaryTests(unittest.IsolatedAsyncioTestCase):
 
         await operations.stop_provider_monitoring()
         self.assertEqual(router.stopped, 1)
+
+    async def test_failure_drills_do_not_inflate_or_reduce_slo_samples(self) -> None:
+        operational = ProviderCanaryResult(
+            project_id="default",
+            capability_kind=CapabilityKind.LLM,
+            provider="codex",
+            mode="status",
+            success=True,
+            latency_ms=10,
+        )
+        drill = ProviderCanaryResult(
+            project_id="default",
+            capability_kind=CapabilityKind.LLM,
+            provider="codex",
+            mode="drill",
+            success=False,
+            latency_ms=5000,
+        )
+
+        summary = summarize_provider_slo([drill, operational])
+
+        self.assertEqual(summary["codex"]["samples"], 1)
+        self.assertEqual(summary["codex"]["availability"], 1.0)
+
+    async def test_production_readiness_requires_time_coverage_and_verified_drills(self) -> None:
+        start = datetime.now(timezone.utc) - timedelta(hours=42)
+        for index in range(8):
+            await self.repository.save_provider_canary_result(
+                ProviderCanaryResult(
+                    project_id="default",
+                    capability_kind=CapabilityKind.LLM,
+                    provider="codex",
+                    mode="status",
+                    success=True,
+                    latency_ms=10 + index,
+                    checked_at=start + timedelta(hours=index * 6),
+                )
+            )
+        scenarios = (
+            "credential_expiry",
+            "transport_timeout",
+            "quota_exhaustion",
+            "model_drift",
+        )
+        for scenario in scenarios:
+            row = await self.service.record_failure_drill(
+                project_id="default",
+                provider="codex",
+                scenario=scenario,
+                result={
+                    "actual_injection": True,
+                    "expected_failure_observed": True,
+                    "fallback_verified": True,
+                    "alert_verified": True,
+                    "recovery_verified": True,
+                    "authority": "independent_observer",
+                    "evidence": [f"artifact://drill/{scenario}"],
+                },
+            )
+            self.assertTrue(row.success)
+
+        summary = await self.service.readiness_summary(
+            project_id="default",
+            provider="codex",
+            minimum_samples=4,
+            trend_window_samples=2,
+            minimum_observation_seconds=24 * 3600,
+            time_bucket_seconds=6 * 3600,
+            minimum_time_buckets=4,
+            required_failure_scenarios=scenarios,
+        )
+
+        codex = summary["providers"]["codex"]
+        self.assertTrue(codex["promotion_ready"])
+        self.assertTrue(codex["observation_target_met"])
+        self.assertTrue(codex["time_bucket_target_met"])
+        self.assertTrue(codex["freshness_target_met"])
+        self.assertTrue(codex["gap_target_met"])
+        self.assertTrue(codex["failure_drill_target_met"])
+        self.assertTrue(codex["production_ready"])
+        self.assertEqual(codex["missing_failure_scenarios"], [])
+        self.assertEqual(codex["blockers"], [])
+
+    async def test_failure_drill_without_independent_evidence_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "independent authority"):
+            await self.service.record_failure_drill(
+                project_id="default",
+                provider="codex",
+                scenario="transport_timeout",
+                result={
+                    "actual_injection": True,
+                    "expected_failure_observed": True,
+                    "fallback_verified": True,
+                    "alert_verified": True,
+                    "recovery_verified": True,
+                    "authority": "simulation",
+                    "evidence": ["artifact://simulation"],
+                },
+            )
+
+    async def test_readiness_rejects_stale_samples_large_gaps_and_old_drills(self) -> None:
+        current = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        rows = [
+            ProviderCanaryResult(
+                project_id="default",
+                capability_kind=CapabilityKind.LLM,
+                provider="codex",
+                mode="status",
+                success=True,
+                latency_ms=10,
+                checked_at=checked_at,
+            )
+            for checked_at in (
+                current - timedelta(hours=30),
+                current - timedelta(hours=24),
+                current - timedelta(hours=1),
+            )
+        ]
+        rows.append(
+            ProviderCanaryResult(
+                project_id="default",
+                capability_kind=CapabilityKind.LLM,
+                provider="codex",
+                mode="drill",
+                success=True,
+                latency_ms=0,
+                checked_at=current - timedelta(days=31),
+                metadata={
+                    "drill_scenario": "credential_expiry",
+                    "authority": "independent_observer",
+                    "evidence": ["artifact://old-drill"],
+                    "actual_injection": True,
+                    "expected_failure_observed": True,
+                    "fallback_verified": True,
+                    "alert_verified": True,
+                    "recovery_verified": True,
+                },
+            )
+        )
+
+        readiness = summarize_provider_readiness(
+            rows,
+            minimum_samples=2,
+            trend_window_samples=1,
+            minimum_observation_seconds=24 * 3600,
+            time_bucket_seconds=6 * 3600,
+            minimum_time_buckets=3,
+            maximum_sample_age_seconds=1800,
+            maximum_gap_seconds=8 * 3600,
+            failure_drill_max_age_seconds=30 * 24 * 3600,
+            required_failure_scenarios=["credential_expiry"],
+            now=current,
+        )["codex"]
+
+        self.assertFalse(readiness["freshness_target_met"])
+        self.assertFalse(readiness["gap_target_met"])
+        self.assertEqual(
+            readiness["missing_failure_scenarios"],
+            ["credential_expiry"],
+        )
+        self.assertFalse(readiness["production_ready"])
+        self.assertIn(
+            "latest canary sample is stale or future-dated",
+            readiness["blockers"],
+        )
+
+    async def test_readiness_campaign_plan_is_status_only_and_deterministic(self) -> None:
+        start = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        arguments = {
+            "campaign_id": "codex-2026q3",
+            "provider": "codex",
+            "model": "gpt-5.6-sol",
+            "start_at": start,
+            "interval_seconds": 300,
+            "observation_seconds": 86_400,
+            "time_bucket_seconds": 21_600,
+            "minimum_time_buckets": 4,
+            "required_failure_scenarios": [
+                "credential_expiry",
+                "transport_timeout",
+            ],
+        }
+
+        first = build_readiness_campaign_plan(**arguments)
+        second = build_readiness_campaign_plan(**arguments)
+
+        self.assertEqual(first, second)
+        self.assertFalse(first["status_canary"]["generation_allowed"])
+        self.assertEqual(
+            first["status_canary"]["expected_minimum_samples"],
+            289,
+        )
+        self.assertFalse(first["automatic_failure_injection"])
+        self.assertEqual(len(first["failure_drills"]), 2)
+        self.assertEqual(len(first["plan_digest"]), 64)
 
 
 if __name__ == "__main__":

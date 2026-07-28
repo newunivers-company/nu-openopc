@@ -164,6 +164,27 @@ class OperationsConfigTests(unittest.TestCase):
         self.assertEqual(
             config.system.operations.providers.subscription_call_limit, 200
         )
+        self.assertEqual(
+            config.system.operations.providers.readiness_min_observation_seconds,
+            86_400,
+        )
+        self.assertEqual(
+            config.system.operations.providers.readiness_max_sample_age_seconds,
+            1_800,
+        )
+        self.assertEqual(
+            config.system.operations.providers.readiness_max_gap_seconds,
+            28_800,
+        )
+        self.assertEqual(
+            config.system.operations.providers.readiness_required_failure_scenarios,
+            [
+                "credential_expiry",
+                "transport_timeout",
+                "quota_exhaustion",
+                "model_drift",
+            ],
+        )
 
     def test_ci_regression_script_fails_for_regressed_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

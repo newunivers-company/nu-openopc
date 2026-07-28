@@ -1072,6 +1072,45 @@ class ProviderOperationsConfig(BaseModel):
         default=30_000.0, ge=1.0, le=3_600_000.0
     )
     canary_expected_model: str = ""
+    readiness_min_observation_seconds: int = Field(
+        default=86_400,
+        ge=0,
+        le=31_536_000,
+    )
+    readiness_time_bucket_seconds: int = Field(
+        default=21_600,
+        ge=60,
+        le=604_800,
+    )
+    readiness_min_time_buckets: int = Field(default=4, ge=1, le=10_000)
+    readiness_min_samples_per_bucket: int = Field(
+        default=1,
+        ge=1,
+        le=10_000,
+    )
+    readiness_max_sample_age_seconds: int = Field(
+        default=1_800,
+        ge=0,
+        le=2_592_000,
+    )
+    readiness_max_gap_seconds: int = Field(
+        default=28_800,
+        ge=60,
+        le=2_592_000,
+    )
+    readiness_failure_drill_max_age_seconds: int = Field(
+        default=2_592_000,
+        ge=60,
+        le=31_536_000,
+    )
+    readiness_required_failure_scenarios: list[str] = Field(
+        default_factory=lambda: [
+            "credential_expiry",
+            "transport_timeout",
+            "quota_exhaustion",
+            "model_drift",
+        ]
+    )
 
 
 class OperationsConfig(BaseModel):

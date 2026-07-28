@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from statistics import fmean
 from typing import Any
 
-from opc.operations.canary import summarize_provider_slo
+from opc.operations.canary import summarize_provider_readiness
 from opc.operations.durable import DurableRunKernel
 from opc.operations.models import (
     GateStatus,
@@ -98,12 +98,75 @@ class MissionControlService:
         trend_window_samples = int(
             getattr(self.provider_config, "slo_trend_window_samples", 3)
         )
-        provider_slo = summarize_provider_slo(
+        provider_slo = summarize_provider_readiness(
             canary_results,
             availability_target=availability_target,
             p95_latency_target_ms=latency_target,
             minimum_samples=minimum_slo_samples,
             trend_window_samples=trend_window_samples,
+            minimum_observation_seconds=int(
+                getattr(
+                    self.provider_config,
+                    "readiness_min_observation_seconds",
+                    86_400,
+                )
+            ),
+            time_bucket_seconds=int(
+                getattr(
+                    self.provider_config,
+                    "readiness_time_bucket_seconds",
+                    21_600,
+                )
+            ),
+            minimum_time_buckets=int(
+                getattr(
+                    self.provider_config,
+                    "readiness_min_time_buckets",
+                    4,
+                )
+            ),
+            minimum_samples_per_bucket=int(
+                getattr(
+                    self.provider_config,
+                    "readiness_min_samples_per_bucket",
+                    1,
+                )
+            ),
+            maximum_sample_age_seconds=int(
+                getattr(
+                    self.provider_config,
+                    "readiness_max_sample_age_seconds",
+                    1_800,
+                )
+            ),
+            maximum_gap_seconds=int(
+                getattr(
+                    self.provider_config,
+                    "readiness_max_gap_seconds",
+                    28_800,
+                )
+            ),
+            failure_drill_max_age_seconds=int(
+                getattr(
+                    self.provider_config,
+                    "readiness_failure_drill_max_age_seconds",
+                    2_592_000,
+                )
+            ),
+            required_failure_scenarios=list(
+                getattr(
+                    self.provider_config,
+                    "readiness_required_failure_scenarios",
+                    [
+                        "credential_expiry",
+                        "transport_timeout",
+                        "quota_exhaustion",
+                        "model_drift",
+                    ],
+                )
+                or []
+            ),
+            now=timestamp,
         )
         quota_limit = int(
             getattr(self.provider_config, "subscription_call_limit", 0)
@@ -318,6 +381,23 @@ class MissionControlService:
                             f"(target {latency_target:.1f}ms)."
                         ),
                         action=f"Demote {provider} from primary routing until its canary recovers.",
+                    )
+                )
+            elif not slo["production_ready"]:
+                blockers = list(slo.get("blockers", []) or [])
+                alerts.append(
+                    MissionAlert(
+                        severity="medium",
+                        kind="provider_readiness",
+                        title=f"Provider {provider} still needs promotion evidence",
+                        detail=(
+                            "; ".join(str(item) for item in blockers[:3])
+                            or "Production-readiness evidence is incomplete."
+                        ),
+                        action=(
+                            f"Continue the governed readiness campaign for {provider}; "
+                            "collect fresh status canaries and verified failure drills."
+                        ),
                     )
                 )
 
