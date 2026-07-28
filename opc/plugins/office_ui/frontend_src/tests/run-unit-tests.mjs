@@ -17,7 +17,11 @@ function collect(directory) {
       continue
     }
     const extension = extname(entry.name)
-    if ((extension === '.ts' || extension === '.tsx') && entry.name.includes('.test.')) {
+    if (
+      (extension === '.ts' || extension === '.tsx') &&
+      entry.name.includes('.test.') &&
+      !entry.name.includes('.render.test.')
+    ) {
       files.push(path)
     }
   }
