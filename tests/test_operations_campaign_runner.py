@@ -638,3 +638,23 @@ class ForcedRerunTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             await runner.run_slot(self.plan, slot["slot_id"], force=True)
+
+
+class DispatchAckNudgeTests(unittest.TestCase):
+    def test_dispatch_acknowledgement_is_nudged_not_accepted(self) -> None:
+        from opc.operations.campaign_runner import (
+            checkpoint_reply_for,
+            classify_response,
+        )
+
+        ack = (
+            "Dispatched and confirmed:\n- CTO WorkItem `abc` — implementation; "
+            "currently running.\nThe runtime will reactivate the CEO seat when "
+            "results require review or final delivery."
+        )
+        self.assertEqual(classify_response(ack), "staffing_checkpoint")
+        self.assertEqual(checkpoint_reply_for(ack), "continue")
+        self.assertEqual(
+            classify_response("# Final integrated deliverable with tests"),
+            "deliverable",
+        )

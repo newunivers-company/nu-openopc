@@ -440,6 +440,18 @@ CHECKPOINT_REPLIES: tuple[tuple[tuple[str, ...], str], ...] = (
         ),
         "approve",
     ),
+    # Company mode can end a turn with a dispatch acknowledgement while its
+    # work items keep running in the durable runtime. Nudging the session
+    # resumes the runtime and eventually yields the integrated delivery.
+    (
+        (
+            "runtime will reactivate",
+            "Dispatched and confirmed",
+            "currently running",
+            "waiting on the",
+        ),
+        "continue",
+    ),
 )
 BLOCKED_RESPONSE_MARKERS = (
     "Awaiting user input",
@@ -484,7 +496,7 @@ class SubprocessExecutorConfig:
     # parses approve/auto replies); `session continue` is only for paused
     # company runtime checkpoints and rejects staffing replies.
     continue_command: tuple[str, ...] = ("opc", "session", "send")
-    max_continuations: int = 3
+    max_continuations: int = 6
     timeout_seconds: float = 3600.0
 
 
