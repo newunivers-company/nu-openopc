@@ -142,6 +142,12 @@ export interface MissionControlPayload {
   unmeasured_usage_events?: number
   provider_slo?: Record<string, MissionControlProviderSlo>
   provider_call_quotas?: Record<string, MissionControlProviderQuota>
+  judgment_queue?: Array<{
+    run_id: string
+    goal_id: string
+    completed_at?: string
+    benchmark_slot_id?: string
+  }>
   alerts?: MissionControlAlert[]
   recommendations?: string[]
   generated_at?: string

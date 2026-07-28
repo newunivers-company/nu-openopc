@@ -170,6 +170,36 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("overdue_goal", kinds)
         self.assertEqual(snapshot.alerts[0].severity, "critical")
 
+    async def test_snapshot_queues_completed_runs_without_scorecards_for_judgment(self) -> None:
+        now = await self._seed_risky_portfolio()
+        await self.repository.save_manifest(
+            RunManifest(
+                run_id="run-awaiting-judgment",
+                goal_id="goal-risk",
+                status=RunStatus.COMPLETED,
+                started_at=now - timedelta(seconds=40),
+                completed_at=now - timedelta(seconds=1),
+                metadata={"benchmark_slot_id": "slot-7"},
+            )
+        )
+
+        snapshot = await self.mission.snapshot(project_id="default", now=now)
+
+        queued_ids = [entry["run_id"] for entry in snapshot.judgment_queue]
+        self.assertIn("run-awaiting-judgment", queued_ids)
+        self.assertNotIn("run-failed-gate", queued_ids)  # already has a scorecard
+        self.assertNotIn("run-unscored", queued_ids)  # failed, not completed
+        entry = next(
+            item
+            for item in snapshot.judgment_queue
+            if item["run_id"] == "run-awaiting-judgment"
+        )
+        self.assertEqual(entry["goal_id"], "goal-risk")
+        self.assertEqual(entry["benchmark_slot_id"], "slot-7")
+        self.assertEqual(entry["completed_at"], (now - timedelta(seconds=1)).isoformat())
+        self.assertLessEqual(len(snapshot.judgment_queue), 20)
+        self.assertEqual(snapshot.to_dict()["judgment_queue"], snapshot.judgment_queue)
+
     async def test_daily_brief_is_deterministic_and_actionable(self) -> None:
         now = await self._seed_risky_portfolio()
         brief = await self.mission.daily_brief(project_id="default", now=now)

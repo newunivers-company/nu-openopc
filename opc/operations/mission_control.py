@@ -250,6 +250,24 @@ class MissionControlService:
             )
 
         scorecard_run_ids = {item.run_id for item in scorecards}
+        judgment_candidates = sorted(
+            (
+                run
+                for run in manifests
+                if run.status == RunStatus.COMPLETED and run.run_id not in scorecard_run_ids
+            ),
+            key=lambda run: run.completed_at or run.updated_at,
+            reverse=True,
+        )
+        judgment_queue = [
+            {
+                "run_id": run.run_id,
+                "goal_id": run.goal_id,
+                "completed_at": run.completed_at.isoformat() if run.completed_at else "",
+                "benchmark_slot_id": str(run.metadata.get("benchmark_slot_id", "") or ""),
+            }
+            for run in judgment_candidates[:20]
+        ]
         for run in manifests:
             if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED} and run.run_id not in scorecard_run_ids:
                 alerts.append(
@@ -451,6 +469,7 @@ class MissionControlService:
             unmeasured_usage_events=unmeasured_usage_events,
             provider_slo=provider_slo,
             provider_call_quotas=provider_call_quotas,
+            judgment_queue=judgment_queue,
             alerts=alerts,
             recommendations=recommendations,
             generated_at=timestamp,

@@ -218,4 +218,36 @@ describe('MissionControlPage governed action flow', () => {
     expect(screen.getByRole('heading', { name: 'Recommended next' })).toBeInTheDocument()
     expect(screen.getByText('Continue the codex readiness campaign.')).toBeInTheDocument()
   })
+
+  it('lists runs awaiting judgment with run id and benchmark slot', () => {
+    renderPage({
+      data: {
+        available: true,
+        project_id: 'demo',
+        alerts: [],
+        judgment_queue: [
+          {
+            run_id: 'run-judge-1',
+            goal_id: 'goal-1',
+            completed_at: '2026-07-28T10:00:00Z',
+            benchmark_slot_id: 'slot-7',
+          },
+          { run_id: 'run-judge-2', goal_id: 'goal-1' },
+        ],
+      },
+    })
+
+    expect(screen.getByRole('heading', { name: 'Judgment queue' })).toBeInTheDocument()
+    expect(screen.getByText('run-judge-1')).toBeInTheDocument()
+    expect(screen.getByText('slot-7')).toBeInTheDocument()
+    expect(screen.getByText('run-judge-2')).toBeInTheDocument()
+    expect(screen.queryByText('No runs awaiting judgment')).toBeNull()
+  })
+
+  it('shows the judgment queue empty state when every completed run is scored', () => {
+    renderPage({
+      data: { available: true, project_id: 'demo', alerts: [], judgment_queue: [] },
+    })
+    expect(screen.getByText('No runs awaiting judgment')).toBeInTheDocument()
+  })
 })

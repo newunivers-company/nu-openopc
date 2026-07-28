@@ -291,6 +291,7 @@ export function MissionControlPage({
     ...Object.keys(providerSlo),
     ...Object.keys(providerQuotas),
   ])).sort()
+  const judgmentQueue = (data.judgment_queue ?? []).slice(0, 20)
 
   return (
     <main className="mission-control-page" aria-busy={loading}>
@@ -414,6 +415,38 @@ export function MissionControlPage({
               <div className="mc-empty mc-empty--compact">
                 <strong>No intervention recommended</strong>
                 <span>Continue monitoring current execution and provider health.</span>
+              </div>
+            )}
+          </section>
+
+          <section className="mc-section" aria-labelledby="mc-judgment-title">
+            <div className="mc-section-heading">
+              <div>
+                <span className="mc-section-index">04</span>
+                <h2 id="mc-judgment-title">Judgment queue</h2>
+              </div>
+              <span>{judgmentQueue.length} waiting</span>
+            </div>
+            {judgmentQueue.length > 0 ? (
+              <ul className="mc-judgment-list">
+                {judgmentQueue.map(entry => (
+                  <li key={entry.run_id}>
+                    <div className="mc-judgment-main">
+                      <code>{entry.run_id}</code>
+                      {entry.benchmark_slot_id && (
+                        <span className="mc-judgment-slot">{entry.benchmark_slot_id}</span>
+                      )}
+                    </div>
+                    {entry.completed_at && (
+                      <span className="mc-judgment-time">{formatTimestamp(entry.completed_at)}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="mc-empty mc-empty--compact">
+                <strong>No runs awaiting judgment</strong>
+                <span>Every completed run has a persisted scorecard.</span>
               </div>
             )}
           </section>
