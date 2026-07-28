@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import defaultdict
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -704,6 +705,16 @@ def _paired_report(
         and quality_ci["lower"] >= -suite.maximum_quality_regression
         and quality_ci["mean"] >= suite.minimum_quality_improvement
     )
+    # Repetitions of the same case are correlated, so the per-pair CI above
+    # can be over-confident. Cluster deltas by case (mean per case, then CI
+    # over case means) and report it alongside; the gate stays on the
+    # per-pair CI so existing gate semantics are unchanged.
+    per_case: dict[str, list[float]] = defaultdict(list)
+    for (baseline, candidate), delta in zip(pairs, quality_deltas):
+        per_case[baseline.case_id].append(delta)
+    case_means = [fmean(values) for _, values in sorted(per_case.items())]
+    case_clustered = _mean_confidence_interval(case_means)
+    case_clustered["cases"] = len(case_means)
     success_delta = candidate_success - baseline_success
     return {
         "paired_samples": len(pairs),
@@ -715,6 +726,7 @@ def _paired_report(
         ),
         "mean_total_score_delta": round(fmean(score_deltas), 6) if score_deltas else 0.0,
         "quality_delta": quality_ci,
+        "quality_delta_case_clustered": case_clustered,
         "quality_gate_passed": quality_gate,
         "mean_duration_seconds_delta": (
             round(fmean(duration_deltas), 6) if duration_deltas else 0.0

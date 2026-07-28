@@ -259,3 +259,29 @@ def test_campaign_progress_separates_missing_foreign_and_trusted_slots() -> None
     assert report["missing_slot_count"] == 70
     assert report["foreign_run_ids"] == [foreign.run_id]
     assert report["status"] == "collecting"
+
+
+def test_case_clustered_ci_reports_per_case_means_without_changing_gate() -> None:
+    suite = load_suite()
+    rows = [
+        _observation(
+            case_id=case.case_id,
+            mode=mode,
+            repetition=repetition,
+            score=0.82 if mode == "task" else 0.91,
+        )
+        for case in suite.cases
+        for mode in ("task", "company")
+        for repetition in range(1, suite.repetitions + 1)
+    ]
+
+    report = evaluate_outcomes(suite, rows)
+
+    for workload_report in report["workloads"].values():
+        clustered = workload_report["quality_delta_case_clustered"]
+        assert clustered["cases"] == 4
+        assert clustered["lower"] <= clustered["mean"] <= clustered["upper"]
+        # Gate semantics stay on the per-pair CI, unchanged.
+        assert workload_report["quality_gate_passed"] is True
+    overall = report["overall"]["quality_delta_case_clustered"]
+    assert overall["cases"] == 12
