@@ -65,6 +65,7 @@ logs/
 
 # Task/demo artifacts
 artifacts/
+.artifacts/
 /sessions/
 /outputs/
 

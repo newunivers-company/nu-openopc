@@ -484,12 +484,35 @@ class CampaignStatusTests(unittest.IsolatedAsyncioTestCase):
             [
                 "confirm_independent_judgments",
                 "record_trusted_observations",
-                "run_next_complete_pairs",
+                "hold_batch_expansion",
             ],
+        )
+        self.assertEqual(report["batch_expansion"]["phase"], "blocked")
+        self.assertEqual(report["batch_expansion"]["next_pair_budget"], 0)
+        self.assertIn(
+            "awaiting_judgment", report["batch_expansion"]["blockers"]
+        )
+        self.assertEqual(
+            report["batch_expansion"]["missing_canary_workloads"],
+            ["content", "research", "software"],
         )
         for stats in report["workloads"].values():
             self.assertEqual(stats["trusted_pairs_remaining_to_gate"], 10)
         self.assertFalse(report["promotion_eligible"])
+
+    async def test_status_allows_only_one_pair_for_initial_canary_collection(
+        self,
+    ) -> None:
+        from opc.operations.campaign_runner import campaign_status
+
+        report = await campaign_status(self.service, self.suite, self.plan, [])
+
+        self.assertEqual(report["batch_expansion"]["phase"], "canary_collection")
+        self.assertFalse(report["batch_expansion"]["expansion_ready"])
+        self.assertEqual(report["batch_expansion"]["next_pair_budget"], 1)
+        self.assertEqual(
+            report["next_actions"][0]["action"], "run_workload_canaries"
+        )
 
     async def test_status_rejects_mismatched_suite(self) -> None:
         from opc.operations.campaign_runner import campaign_status

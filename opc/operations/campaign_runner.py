@@ -12,15 +12,19 @@ observations, so the ``actual_run`` + human-authority gate contract in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import os
 import re
+import signal
 import shutil
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from opc.core.config import get_project_workplace
 from opc.operations.benchmarks import (
     OutcomeBenchmarkSuite,
     OutcomeObservation,
@@ -38,6 +42,33 @@ from opc.operations.models import (
 ARTIFACT_INDEX_NAME = "artifact-index.json"
 RESULT_SKELETON_NAME = "result-skeleton.json"
 OUTPUT_ARTIFACT_NAME = "output.md"
+WORKSPACE_ARTIFACT_PREFIX = "workspace"
+
+_WORKSPACE_EXCLUDED_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".opc",
+    ".opc-comms",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
+_WORKSPACE_EXCLUDED_NAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    "credentials.json",
+    "secrets.json",
+}
+_WORKSPACE_SECRET_SUFFIXES = {
+    ".key",
+    ".p12",
+    ".pfx",
+    ".pem",
+}
 
 SlotExecutor = Callable[[Mapping[str, Any], Path], Awaitable["SlotExecution"]]
 
@@ -75,6 +106,130 @@ class SlotRunResult:
             "result_skeleton_path": self.result_skeleton_path,
             "error": self.error,
         }
+
+
+@dataclass(frozen=True)
+class WorkspaceSnapshotPolicy:
+    """Bounded, text-only evidence capture from an isolated slot workplace."""
+
+    max_files: int = 200
+    max_file_bytes: int = 1_000_000
+    max_total_bytes: int = 10_000_000
+
+
+def collect_workspace_artifacts(
+    workspace_root: Path,
+    *,
+    policy: WorkspaceSnapshotPolicy | None = None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Collect reviewable deliverables without copying runtime state or secrets."""
+
+    policy = policy or WorkspaceSnapshotPolicy()
+    root = Path(workspace_root).resolve()
+    artifacts: dict[str, str] = {}
+    skipped: list[dict[str, str]] = []
+    total_bytes = 0
+    if not root.is_dir():
+        return {}, {
+            "workspace_root": str(root),
+            "captured_files": 0,
+            "captured_bytes": 0,
+            "skipped": [{"path": "", "reason": "workspace_missing"}],
+            "complete": False,
+        }
+
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if any(part in _WORKSPACE_EXCLUDED_DIRS for part in relative.parts):
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        normalized_name = path.name.lower()
+        if (
+            normalized_name in _WORKSPACE_EXCLUDED_NAMES
+            or path.suffix.lower() in _WORKSPACE_SECRET_SUFFIXES
+            or normalized_name.startswith(".env.")
+        ):
+            skipped.append({"path": str(relative), "reason": "secret_name"})
+            continue
+        if len(artifacts) >= policy.max_files:
+            skipped.append({"path": str(relative), "reason": "file_limit"})
+            break
+        size = path.stat().st_size
+        if size > policy.max_file_bytes:
+            skipped.append({"path": str(relative), "reason": "file_too_large"})
+            continue
+        if total_bytes + size > policy.max_total_bytes:
+            skipped.append({"path": str(relative), "reason": "total_size_limit"})
+            break
+        data = path.read_bytes()
+        if b"\x00" in data:
+            skipped.append({"path": str(relative), "reason": "binary"})
+            continue
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped.append({"path": str(relative), "reason": "non_utf8"})
+            continue
+        artifacts[f"{WORKSPACE_ARTIFACT_PREFIX}/{relative.as_posix()}"] = content
+        total_bytes += len(data)
+
+    return artifacts, {
+        "workspace_root": str(root),
+        "captured_files": len(artifacts),
+        "captured_bytes": total_bytes,
+        "skipped": skipped[:50],
+        "complete": not any(
+            item["reason"] in {"file_limit", "total_size_limit"} for item in skipped
+        ),
+    }
+
+
+def refresh_workspace_artifacts(
+    artifact_dir: Path,
+    workspace_root: Path,
+    *,
+    policy: WorkspaceSnapshotPolicy | None = None,
+) -> dict[str, Any]:
+    """Backfill a completed unscored slot with its isolated workspace evidence."""
+
+    artifact_dir = Path(artifact_dir)
+    skeleton_path = artifact_dir / RESULT_SKELETON_NAME
+    if not skeleton_path.is_file():
+        raise FileNotFoundError(f"result skeleton not found: {skeleton_path}")
+    skeleton = json.loads(skeleton_path.read_text(encoding="utf-8"))
+    artifacts, snapshot = collect_workspace_artifacts(workspace_root, policy=policy)
+    if not artifacts:
+        raise ValueError("workspace snapshot produced no reviewable artifacts")
+    for name, content in sorted(artifacts.items()):
+        target = artifact_dir / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    digest = write_artifact_index(artifact_dir)
+    index = json.loads(
+        (artifact_dir / ARTIFACT_INDEX_NAME).read_text(encoding="utf-8")
+    )
+    paths = [str(item["path"]) for item in index["files"]]
+    skeleton["artifact_digest"] = digest
+    skeleton["evidence"] = {
+        str(key): list(paths) for key in dict(skeleton.get("evidence", {}))
+    }
+    metadata = dict(skeleton.get("metadata", {}) or {})
+    executor = dict(metadata.get("executor", {}) or {})
+    executor["workspace_snapshot"] = snapshot
+    metadata["executor"] = executor
+    skeleton["metadata"] = metadata
+    skeleton_path.write_text(
+        json.dumps(skeleton, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return {
+        "artifact_directory": str(artifact_dir),
+        "artifact_digest": digest,
+        "result_skeleton_path": str(skeleton_path),
+        "workspace_snapshot": snapshot,
+    }
 
 
 def verify_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -433,7 +588,10 @@ def write_artifact_index(artifact_dir: Path) -> str:
 
     entries: list[dict[str, Any]] = []
     for path in sorted(artifact_dir.rglob("*")):
-        if not path.is_file() or path.name == ARTIFACT_INDEX_NAME:
+        if not path.is_file() or path.name in {
+            ARTIFACT_INDEX_NAME,
+            RESULT_SKELETON_NAME,
+        }:
             continue
         data = path.read_bytes()
         entries.append(
@@ -620,7 +778,10 @@ class SubprocessExecutorConfig:
     # company runtime checkpoints and rejects staffing replies.
     continue_command: tuple[str, ...] = ("opc", "session", "send")
     max_continuations: int = 12
+    max_process_invocations: int = 48
+    max_external_agent_calls: int = 24
     timeout_seconds: float = 3600.0
+    termination_grace_seconds: float = 5.0
     isolate_slot_projects: bool = True
 
 
@@ -638,6 +799,14 @@ def subprocess_executor_preflight(
         task_agent = ""
     blockers: list[str] = []
     warnings: list[str] = []
+    if config.timeout_seconds <= 0:
+        blockers.append("Slot timeout must be positive.")
+    if config.max_continuations < 0:
+        blockers.append("Continuation budget must be non-negative.")
+    if config.max_process_invocations < 1:
+        blockers.append("Process invocation budget must be positive.")
+    if config.max_external_agent_calls < 1:
+        blockers.append("External-agent call budget must be positive.")
     if not task_agent:
         blockers.append("Task executor command does not pin an --agent.")
     elif task_agent == "native":
@@ -782,10 +951,19 @@ class SubprocessSlotExecutor:
     ) -> None:
         self.project_id = project_id
         self.config = config or SubprocessExecutorConfig()
+        self._slot_started_monotonic = 0.0
+        self._slot_deadline_monotonic = 0.0
+        self._process_invocations = 0
 
     async def __call__(
         self, slot: Mapping[str, Any], artifact_dir: Path
     ) -> SlotExecution:
+        loop = asyncio.get_running_loop()
+        self._slot_started_monotonic = loop.time()
+        self._slot_deadline_monotonic = (
+            self._slot_started_monotonic + self.config.timeout_seconds
+        )
+        self._process_invocations = 0
         execution_project_id = (
             slot_execution_project_id(self.project_id, slot)
             if self.config.isolate_slot_projects
@@ -794,9 +972,13 @@ class SubprocessSlotExecutor:
         command = build_slot_command(
             slot, project_id=execution_project_id, config=self.config
         )
-        spawn = await self._spawn(command)
-        if spawn.get("timed_out"):
-            return SlotExecution(success=False, metadata=spawn)
+        spawn = await self._invoke(command)
+        if spawn.get("timed_out") or spawn.get("budget_exhausted"):
+            return self._finalize_execution(
+                execution_project_id=execution_project_id,
+                success=False,
+                metadata={**spawn, "command": command, "continuations": 0},
+            )
         verdict = evaluate_exec_output(spawn["exit_code"], spawn["stdout"])
         continuations = 0
         task_id = str(verdict["task_id"])
@@ -825,11 +1007,17 @@ class SubprocessSlotExecutor:
                 execution_project_id,
                 "--json",
             ]
-            spawn = await self._spawn(continue_command)
-            if spawn.get("timed_out"):
-                return SlotExecution(
+            spawn = await self._invoke(continue_command)
+            if spawn.get("timed_out") or spawn.get("budget_exhausted"):
+                return self._finalize_execution(
+                    execution_project_id=execution_project_id,
                     success=False,
-                    metadata={**spawn, "continuations": continuations},
+                    metadata={
+                        **spawn,
+                        "command": command,
+                        "continuations": continuations,
+                        "answered_checkpoints": answered_checkpoints,
+                    },
                 )
             verdict = evaluate_exec_output(spawn["exit_code"], spawn["stdout"])
             verdict["task_id"] = verdict["task_id"] or task_id
@@ -839,7 +1027,8 @@ class SubprocessSlotExecutor:
         if success and kind != "deliverable":
             success = False
             reason = f"run ended with a {kind} response, not a deliverable"
-        return SlotExecution(
+        return self._finalize_execution(
+            execution_project_id=execution_project_id,
             success=success,
             output_text=str(verdict["response"]) if success else "",
             metadata={
@@ -866,7 +1055,7 @@ class SubprocessSlotExecutor:
         scripted per-type reply from ``CHECKPOINT_TYPE_REPLIES``.
         """
 
-        listing = await self._spawn(
+        listing = await self._invoke(
             [
                 "opc",
                 "runtime",
@@ -897,7 +1086,7 @@ class SubprocessSlotExecutor:
             reply_task = str(checkpoint.get("task_id", "") or "")
             if not reply_kind or not checkpoint_id or not reply_task:
                 continue
-            result = await self._spawn(
+            result = await self._invoke(
                 [
                     "opc",
                     "session",
@@ -923,26 +1112,121 @@ class SubprocessSlotExecutor:
             )
         return answered
 
+    async def _invoke(self, command: list[str]) -> dict[str, Any]:
+        if self._process_invocations >= self.config.max_process_invocations:
+            return {
+                "command": command,
+                "timed_out": False,
+                "budget_exhausted": True,
+                "exit_code": None,
+                "stdout": "",
+                "stderr_tail": "",
+                "error": "process invocation budget exhausted",
+            }
+        if self._remaining_seconds() <= 0:
+            return {
+                "command": command,
+                "timed_out": True,
+                "deadline_exceeded": True,
+                "exit_code": None,
+                "stdout": "",
+                "stderr_tail": "",
+                "error": (
+                    f"slot deadline exceeded after {self.config.timeout_seconds}s"
+                ),
+            }
+        self._process_invocations += 1
+        return await self._spawn(command)
+
+    def _remaining_seconds(self) -> float:
+        if self._slot_deadline_monotonic <= 0:
+            return self.config.timeout_seconds
+        return max(
+            0.0,
+            self._slot_deadline_monotonic - asyncio.get_running_loop().time(),
+        )
+
+    def _finalize_execution(
+        self,
+        *,
+        execution_project_id: str,
+        success: bool,
+        metadata: Mapping[str, Any],
+        output_text: str = "",
+    ) -> SlotExecution:
+        workspace = get_project_workplace(execution_project_id)
+        artifacts, snapshot = collect_workspace_artifacts(workspace)
+        permits_dir = workspace / ".opc" / "benchmark_external_call_budget"
+        external_agent_calls = (
+            len(list(permits_dir.glob("call-*.json"))) if permits_dir.is_dir() else 0
+        )
+        raw_log_dir = workspace / ".opc" / "external_logs"
+        raw_external_logs = (
+            len(list(raw_log_dir.glob("*.log"))) if raw_log_dir.is_dir() else 0
+        )
+        elapsed = max(
+            0.0,
+            asyncio.get_running_loop().time() - self._slot_started_monotonic,
+        )
+        return SlotExecution(
+            success=success,
+            output_text=output_text,
+            artifacts=artifacts,
+            metadata={
+                **dict(metadata),
+                "failure_reason": (
+                    ""
+                    if success
+                    else str(
+                        metadata.get("failure_reason")
+                        or metadata.get("error")
+                        or "executor reported failure"
+                    )
+                ),
+                "process_invocations": self._process_invocations,
+                "process_invocation_limit": self.config.max_process_invocations,
+                "external_agent_calls": external_agent_calls,
+                "external_agent_call_limit": self.config.max_external_agent_calls,
+                "raw_external_log_count": raw_external_logs,
+                "slot_timeout_seconds": self.config.timeout_seconds,
+                "slot_elapsed_seconds": elapsed,
+                "deadline_exceeded": bool(
+                    metadata.get("deadline_exceeded")
+                    or metadata.get("timed_out")
+                ),
+                "workspace_snapshot": snapshot,
+            },
+        )
+
     async def _spawn(self, command: list[str]) -> dict[str, Any]:
+        environment = os.environ.copy()
+        environment["OPC_BENCHMARK_EXTERNAL_CALL_LIMIT"] = str(
+            self.config.max_external_agent_calls
+        )
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=environment,
+            start_new_session=os.name == "posix",
         )
+        timeout = self._remaining_seconds()
         try:
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self.config.timeout_seconds
+                process.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            await self._terminate_process_tree(process)
             return {
                 "command": command,
                 "timed_out": True,
+                "deadline_exceeded": True,
                 "exit_code": None,
                 "stdout": "",
                 "stderr_tail": "",
-                "error": f"timed out after {self.config.timeout_seconds}s",
+                "error": (
+                    f"slot deadline exceeded after {self.config.timeout_seconds}s"
+                ),
             }
         return {
             "command": command,
@@ -951,6 +1235,35 @@ class SubprocessSlotExecutor:
             "stdout": stdout.decode("utf-8", errors="replace"),
             "stderr_tail": stderr.decode("utf-8", errors="replace")[-2000:],
         }
+
+    async def _terminate_process_tree(
+        self, process: asyncio.subprocess.Process
+    ) -> None:
+        if process.returncode is not None:
+            return
+        if os.name == "posix":
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGTERM)
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+        try:
+            await asyncio.wait_for(
+                process.wait(), timeout=self.config.termination_grace_seconds
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+        if os.name == "posix":
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                process.wait(), timeout=self.config.termination_grace_seconds
+            )
 
 
 async def pending_judgment_slots(
@@ -1088,6 +1401,11 @@ async def campaign_status(
         }
     )
     preflight = dict(plan.get("execution_preflight", {}) or {})
+    expansion_gate = _campaign_expansion_gate(
+        totals=totals,
+        preflight=preflight,
+        workloads=workloads,
+    )
     next_actions = _campaign_next_actions(
         totals=totals,
         preflight=preflight,
@@ -1095,6 +1413,7 @@ async def campaign_status(
             int(stats["trusted_pairs_remaining_to_gate"])
             for stats in workloads.values()
         ),
+        expansion_gate=expansion_gate,
     )
     return {
         "schema_version": 1,
@@ -1106,10 +1425,71 @@ async def campaign_status(
         "awaiting_judgment": awaiting,
         "awaiting_observation": awaiting_observation,
         "attention_summary": totals,
+        "batch_expansion": expansion_gate,
         "next_actions": next_actions,
         "observed_slots": progress["observed_slots"],
         "trusted_pairs": progress["trusted_pairs"],
         "promotion_eligible": progress["promotion_eligible"],
+    }
+
+
+def _campaign_expansion_gate(
+    *,
+    totals: Mapping[str, int],
+    preflight: Mapping[str, Any],
+    workloads: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Permit only canaries or one bounded expansion pair at a time.
+
+    A full campaign must not keep consuming slots while failed execution,
+    unreviewed scorecards, or ledger defects are outstanding. Before the first
+    expansion, every workload also needs at least one trusted paired canary.
+    This gate is intentionally separate from product promotion: even a ready
+    expansion gate authorizes only the next bounded pair.
+    """
+
+    blockers: list[str] = []
+    if preflight and not bool(preflight.get("execution_ready", False)):
+        blockers.append("execution_preflight")
+    attention_fields = (
+        "failed",
+        "in_flight",
+        "awaiting_judgment",
+        "awaiting_observation",
+        "untrusted_observations",
+        "duplicate_observations",
+        "foreign_observations",
+    )
+    blockers.extend(
+        field for field in attention_fields if int(totals.get(field, 0) or 0) > 0
+    )
+    missing_canary_workloads = sorted(
+        workload
+        for workload, stats in workloads.items()
+        if int(stats.get("trusted_pairs", 0) or 0) < 1
+    )
+    canary_complete = not missing_canary_workloads
+    expansion_ready = not blockers and canary_complete
+    if blockers:
+        phase = "blocked"
+        next_pair_budget = 0
+    elif not canary_complete:
+        phase = "canary_collection"
+        next_pair_budget = 1
+    else:
+        phase = "bounded_expansion"
+        next_pair_budget = 1
+    if int(totals.get("not_started", 0) or 0) <= 0:
+        next_pair_budget = 0
+    return {
+        "phase": phase,
+        "expansion_ready": expansion_ready,
+        "next_pair_budget": next_pair_budget,
+        "maximum_pairs_per_batch": 1,
+        "trusted_canary_pairs_required_per_workload": 1,
+        "missing_canary_workloads": missing_canary_workloads,
+        "blockers": blockers,
+        "promotion_authority": False,
     }
 
 
@@ -1118,6 +1498,7 @@ def _campaign_next_actions(
     totals: Mapping[str, int],
     preflight: Mapping[str, Any],
     trusted_pairs_remaining: int,
+    expansion_gate: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     """Build a deterministic, operator-oriented campaign action queue."""
 
@@ -1194,13 +1575,40 @@ def _campaign_next_actions(
                 "reason": "Rows from another suite or campaign must stay out of this ledger.",
             }
         )
-    if totals["not_started"]:
+    if totals["not_started"] and int(expansion_gate.get("next_pair_budget", 0) or 0) < 1:
         actions.append(
             {
                 "priority": "medium",
-                "action": "run_next_complete_pairs",
+                "action": "hold_batch_expansion",
                 "count": totals["not_started"],
-                "reason": "Use pair budgets so Task and Company evidence stays balanced.",
+                "reason": (
+                    "Resolve execution, judgment, and observation blockers "
+                    "before consuming another pair."
+                ),
+            }
+        )
+    elif totals["not_started"] and expansion_gate.get("missing_canary_workloads"):
+        actions.append(
+            {
+                "priority": "medium",
+                "action": "run_workload_canaries",
+                "count": len(expansion_gate["missing_canary_workloads"]),
+                "reason": (
+                    "Collect one trusted paired canary for every workload, "
+                    "one pair per batch."
+                ),
+            }
+        )
+    elif totals["not_started"]:
+        actions.append(
+            {
+                "priority": "medium",
+                "action": "run_next_bounded_pair",
+                "count": totals["not_started"],
+                "reason": (
+                    "Expansion is ready for one complete pair; reassess the "
+                    "gate after it settles."
+                ),
             }
         )
     if trusted_pairs_remaining:

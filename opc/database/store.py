@@ -100,6 +100,10 @@ from opc.layer2_organization.work_item_runtime_invariants import (
     validate_work_item_runtime_projection,
 )
 
+_SQLITE_LOCK_RETRY_ATTEMPTS = 2
+_SQLITE_LOCK_RETRY_BASE_DELAY_SECONDS = 0.25
+_SQLITE_LOCK_ERROR_MARKERS = ("database is locked", "database table is locked")
+
 
 def _json_dumps(value: Any) -> str:
     def _default(obj: Any) -> Any:
@@ -197,7 +201,28 @@ class _SQLiteConnectionAdapter:
 
     async def _call(self, fn, *args):
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._executor, partial(fn, *args))
+        attempts = _SQLITE_LOCK_RETRY_ATTEMPTS + 1
+        for attempt in range(attempts):
+            try:
+                return await loop.run_in_executor(self._executor, partial(fn, *args))
+            except sqlite3.OperationalError as exc:
+                locked = any(
+                    marker in str(exc).strip().lower()
+                    for marker in _SQLITE_LOCK_ERROR_MARKERS
+                )
+                if not locked or attempt + 1 >= attempts:
+                    raise
+                delay = _SQLITE_LOCK_RETRY_BASE_DELAY_SECONDS * (2**attempt)
+                logger.warning(
+                    "Transient sqlite lock for {}; retrying in {:.2f}s "
+                    "(attempt {}/{})",
+                    self._db_path,
+                    delay,
+                    attempt + 2,
+                    attempts,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("sqlite call retry loop exhausted unexpectedly")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

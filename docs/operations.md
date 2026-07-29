@@ -15,7 +15,12 @@ OpenOPC's operating kernel turns the Self-Built → Self-Run → Self-Grown visi
 
 All records live in the existing project-scoped database at `.opc/projects/<project>/tasks.db`. Cross-project writes are rejected.
 
-The current hardening evidence and remaining promotion gates are recorded in [the 2026-07-28 validation report](validation-2026-07-28.md). The [2026-07-27 implementation report](validation-2026-07-27.md) and earlier [2026-07-23 live-provider report](validation-2026-07-23.md) remain available for provenance.
+The current hardening evidence and remaining promotion gates are recorded in
+[the 2026-07-30 validation report](validation-2026-07-30.md). The
+[2026-07-28 report](validation-2026-07-28.md),
+[2026-07-27 implementation report](validation-2026-07-27.md), and earlier
+[2026-07-23 live-provider report](validation-2026-07-23.md) remain available
+for provenance.
 
 ## Quick operating loop
 
@@ -212,6 +217,12 @@ zero.
 
 A stale worker cannot write with a fencing token after another owner takes over its expired lease. Dead-letter replay is intentionally not automatic: repair the consumer and replay with an explicit reason. Replay resets the delivery attempt budget and appends an `outbox.replayed` audit event in the same transaction.
 
+Project-store SQLite calls wait up to the configured busy timeout and retry only
+the two recognized transient lock errors with bounded backoff. Other
+`OperationalError` failures are never retried or hidden. This covers short
+cross-process result-commit races without turning persistent corruption,
+missing tables, or invalid SQL into a long retry loop.
+
 When the OpenOPC engine is running, the configured outbox dispatcher claims pending deliveries in bounded batches, publishes them to the internal event bus, and acknowledges them with the claim's fencing token. Handler failures are retried with the durable backoff policy and move to `dead_letter` after the configured attempt limit. Shutdown stops the dispatcher before closing the store. Set `system.operations.durable.outbox_dispatcher_enabled: false` only when a separate process owns delivery.
 
 For an independently deployed consumer, use a stable consumer ID. Delivery receipts survive worker restarts and prevent a successfully acknowledged message from being handled twice by that consumer:
@@ -377,7 +388,9 @@ uv run opc ops benchmark validate --require-execution-ready
 uv run opc ops benchmark plan --campaign-id openopc-2026q3-v1 \
   --output campaign-plan.json
 uv run opc ops benchmark run-campaign --plan campaign-plan.json \
-  --max-pairs 1 --max-hours 4 --task-agent codex --project benchmark
+  --max-pairs 1 --max-hours 4 --timeout-seconds 2700 \
+  --max-process-invocations 48 --max-external-agent-calls 32 \
+  --task-agent codex --project benchmark
 uv run opc ops benchmark campaign-status --plan campaign-plan.json \
   --observations observations.jsonl --project benchmark
 uv run opc ops benchmark progress --campaign-id openopc-2026q3-v1 \
@@ -411,6 +424,42 @@ untrusted slots instead of silently counting them. `campaign-status` also emits
 an ordered `next_actions` queue for input blockers, failed slots, pending
 judgments, duplicate/foreign/untrusted rows, scored-but-unrecorded observations,
 in-flight work, and remaining trusted-pair distance.
+
+The prompt seen by both arms contains the complete acceptance contract:
+deliverables, criterion descriptions and minima, required evidence, sealed
+fixtures, and network policy. A successful executor response is not sufficient
+evidence by itself. The slot runner copies a bounded text-only snapshot from the
+isolated workspace into `workspace/`, excludes runtime state, caches, secrets,
+binaries, and oversized files, then binds every captured path into the artifact
+index and result skeleton. An older completed, unscored slot can be repaired
+without re-execution:
+
+```bash
+uv run opc ops benchmark refresh-artifacts <slot-id> \
+  --plan campaign-plan.json --project benchmark
+```
+
+Refresh is rejected for incomplete or already-scored runs. The artifact index
+does not hash itself or the mutable score skeleton, avoiding recursive digest
+drift.
+
+`--timeout-seconds` is one absolute slot deadline shared by initial execution,
+checkpoint discovery, replies, and continuations; it is not reset for each
+subprocess. `--max-process-invocations` bounds all harness subprocesses and
+`--max-external-agent-calls` is enforced inside the broker with atomic,
+workspace-local permits. Concurrent Company roles cannot exceed the limit, and
+failed, cancelled, or timed-out calls remain charged conservatively. On deadline
+expiry the harness terminates the entire POSIX process group with TERM followed
+by bounded KILL fallback. Result metadata records deadline state, elapsed time,
+process and external-call utilization, raw-log count, and snapshot coverage.
+
+Campaign expansion is independently fail-closed. `campaign-status` reports
+`batch_expansion.phase`, blockers, missing workload canaries, and
+`next_pair_budget`. A first canary may consume one pair. Any failed/in-flight
+slot, pending judgment, missing observation, or untrusted/duplicate/foreign row
+sets the budget to zero. Only after every workload has at least one trusted
+paired canary can the next bounded pair run, and the gate is reassessed after
+each pair. Expansion readiness never grants product or promotion authority.
 
 Promotion requires completed actual runs, a passing scorecard, durable evidence,
 a SHA-256 artifact digest, trusted human or independent-judge authority, unique

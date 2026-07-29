@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional, TypeVar
 
 import typer
 
-from opc.core.config import OPCConfig, get_opc_home
+from opc.core.config import OPCConfig, get_opc_home, get_project_workplace
 from opc.database.store import OPCStore
 from opc.integrations.nu_llm_routing import NULlmRoutingBridge
 from opc.integrations.nu_resource_gen import NUResourceGenBridge
@@ -56,6 +56,7 @@ from opc.operations.campaign_runner import (
     campaign_status,
     find_slot,
     pending_judgment_slots,
+    refresh_workspace_artifacts,
     slot_execution_project_id,
     subprocess_executor_preflight,
     verify_plan,
@@ -473,6 +474,15 @@ def register_operations_cli(app: typer.Typer) -> None:
             False, "--dry-run", help="Show the executor command without running"
         ),
         timeout_seconds: float = typer.Option(3600.0, "--timeout-seconds", min=1),
+        max_continuations: int = typer.Option(
+            12, "--max-continuations", min=0
+        ),
+        max_process_invocations: int = typer.Option(
+            48, "--max-process-invocations", min=1
+        ),
+        max_external_agent_calls: int = typer.Option(
+            24, "--max-external-agent-calls", min=1
+        ),
         task_agent: str = typer.Option(
             "native",
             "--task-agent",
@@ -486,6 +496,9 @@ def register_operations_cli(app: typer.Typer) -> None:
         executor_config = _benchmark_executor_config(
             task_agent=task_agent,
             timeout_seconds=timeout_seconds,
+            max_continuations=max_continuations,
+            max_process_invocations=max_process_invocations,
+            max_external_agent_calls=max_external_agent_calls,
         )
         if dry_run:
             slot = find_slot(plan, slot_id)
@@ -504,6 +517,12 @@ def register_operations_cli(app: typer.Typer) -> None:
                     "artifact_directory": str(
                         artifacts_root / slot["artifact_directory"]
                     ),
+                    "budgets": {
+                        "slot_timeout_seconds": timeout_seconds,
+                        "max_continuations": max_continuations,
+                        "max_process_invocations": max_process_invocations,
+                        "max_external_agent_calls": max_external_agent_calls,
+                    },
                 }
             )
             return
@@ -536,6 +555,55 @@ def register_operations_cli(app: typer.Typer) -> None:
         _emit(result)
         if result["status"] == "failed":
             raise typer.Exit(code=1)
+
+    @benchmark_app.command("refresh-artifacts")
+    def benchmark_refresh_artifacts(
+        slot_id: str = typer.Argument(...),
+        plan_path: Path = typer.Option(..., "--plan", help="Sealed campaign plan JSON"),
+        artifacts_root: Path = typer.Option(
+            Path("outputs/benchmark"), "--artifacts-root"
+        ),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Backfill an unscored completed slot with isolated workspace files."""
+
+        plan = verify_plan(_load_mapping(plan_path))
+        slot = find_slot(plan, slot_id)
+        artifact_dir = artifacts_root / str(slot["artifact_directory"])
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            run_id = str(slot["run_id"])
+            manifest = await service.repository.get_manifest(run_id)
+            if manifest is None or manifest.status != RunStatus.COMPLETED:
+                raise ValueError("artifact refresh requires a completed run")
+            if await service.repository.get_scorecard(run_id) is not None:
+                raise ValueError("artifact refresh is forbidden after scoring")
+            skeleton = _load_mapping(artifact_dir / "result-skeleton.json")
+            executor = dict(
+                dict(skeleton.get("metadata", {}) or {}).get("executor", {}) or {}
+            )
+            execution_project_id = str(
+                executor.get("execution_project_id", "")
+                or slot_execution_project_id(project, slot)
+            )
+            report = refresh_workspace_artifacts(
+                artifact_dir,
+                get_project_workplace(execution_project_id),
+            )
+            manifest.metadata = {
+                **dict(manifest.metadata),
+                "benchmark_artifact_digest": report["artifact_digest"],
+                "benchmark_workspace_snapshot": report["workspace_snapshot"],
+            }
+            await service.repository.save_manifest(manifest)
+            return {
+                "slot_id": slot_id,
+                "run_id": run_id,
+                "execution_project_id": execution_project_id,
+                **report,
+            }
+
+        _emit(_run(project, action, run_startup_maintenance=False))
 
     @benchmark_app.command("run-campaign")
     def benchmark_run_campaign(
@@ -570,6 +638,15 @@ def register_operations_cli(app: typer.Typer) -> None:
         mode: list[str] = typer.Option([], "--mode"),
         stop_on_failure: bool = typer.Option(False, "--stop-on-failure"),
         timeout_seconds: float = typer.Option(3600.0, "--timeout-seconds", min=1),
+        max_continuations: int = typer.Option(
+            12, "--max-continuations", min=0
+        ),
+        max_process_invocations: int = typer.Option(
+            48, "--max-process-invocations", min=1
+        ),
+        max_external_agent_calls: int = typer.Option(
+            24, "--max-external-agent-calls", min=1
+        ),
         task_agent: str = typer.Option(
             "native",
             "--task-agent",
@@ -584,6 +661,9 @@ def register_operations_cli(app: typer.Typer) -> None:
         executor_config = _benchmark_executor_config(
             task_agent=task_agent,
             timeout_seconds=timeout_seconds,
+            max_continuations=max_continuations,
+            max_process_invocations=max_process_invocations,
+            max_external_agent_calls=max_external_agent_calls,
         )
 
         async def action(service: OperationsService) -> dict[str, Any]:
@@ -2197,6 +2277,9 @@ def _benchmark_executor_config(
     *,
     task_agent: str,
     timeout_seconds: float,
+    max_continuations: int,
+    max_process_invocations: int,
+    max_external_agent_calls: int,
 ) -> SubprocessExecutorConfig:
     normalized_agent = str(task_agent or "").strip().lower()
     allowed_agents = {
@@ -2213,6 +2296,9 @@ def _benchmark_executor_config(
     return SubprocessExecutorConfig(
         task_args=("--mode", "task", "--agent", normalized_agent),
         timeout_seconds=timeout_seconds,
+        max_continuations=max_continuations,
+        max_process_invocations=max_process_invocations,
+        max_external_agent_calls=max_external_agent_calls,
     )
 
 

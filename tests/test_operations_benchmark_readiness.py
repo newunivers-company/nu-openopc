@@ -70,6 +70,11 @@ def test_plan_seals_fixture_content_and_digests_into_both_arms() -> None:
     assert plan["execution_preflight"]["execution_ready"] is True
     assert {item["mode"] for item in slots} == {"task", "company"}
     assert len({item["prompt"] for item in slots}) == 1
+    assert "## Acceptance contract" in slots[0]["prompt"]
+    assert "### Deliverables" in slots[0]["prompt"]
+    assert "### Acceptance criteria" in slots[0]["prompt"]
+    assert "Failures remain conservatively accounted and expire by policy." in slots[0]["prompt"]
+    assert "### Required evidence" in slots[0]["prompt"]
     assert "## Sealed benchmark inputs" in slots[0]["prompt"]
     assert slots[0]["input_contract_digest"] == case.input_contract.digest
     assert slots[0]["input_artifact_digests"] == {

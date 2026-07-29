@@ -396,18 +396,40 @@ def suite_execution_readiness(
 
 
 def render_benchmark_prompt(case: OutcomeBenchmarkCase) -> str:
-    """Bind sealed inline fixtures to the prompt seen by both benchmark arms."""
+    """Bind the full sealed execution contract seen by both benchmark arms."""
 
     contract = case.input_contract
-    if contract is None or contract.kind == "self_contained":
-        return case.prompt
     sections = [
         case.prompt,
+        "",
+        "## Acceptance contract",
+        "Produce every declared deliverable and satisfy every criterion. "
+        "Judgment is based only on preserved artifacts; include reproducible "
+        "commands and evidence in the workspace.",
+        "",
+        "### Deliverables",
+        *[f"- {item}" for item in case.goal.deliverables],
+        "",
+        "### Acceptance criteria",
+        *[
+            f"- {item.criterion_id} (minimum {item.minimum_score:.2f}): "
+            f"{item.description}"
+            for item in case.goal.acceptance_criteria
+        ],
+        "",
+        "### Required evidence",
+        *[f"- {item}" for item in case.goal.evidence_requirements],
+    ]
+    if contract is None or contract.kind == "self_contained":
+        return "\n".join(sections)
+    sections.extend(
+        [
         "",
         "## Sealed benchmark inputs",
         "Use only the immutable inputs below. Treat each named block as a file. "
         "Do not replace missing facts with assumptions.",
-    ]
+        ]
+    )
     for artifact in contract.artifacts:
         sections.extend(
             [

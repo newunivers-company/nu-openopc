@@ -91,6 +91,12 @@ opc = "opc.cli.app:main"
 nu-llm-routing-lib = { path = "../nu-llm-routing-lib", editable = true }
 nu-resource-gen-lib = { path = "../nu-resource-gen-lib", editable = true }
 
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+    "opc/plugins/office_ui/tests",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["opc"]
 
