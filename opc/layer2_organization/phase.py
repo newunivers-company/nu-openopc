@@ -345,7 +345,7 @@ def is_runnable(phase: Phase) -> bool:
 # must lose their dead claim but remain passive while their report/review
 # auxiliaries resume.
 _STALE_CLAIM_RELEASABLE_PHASES: frozenset[Phase] = (
-    IN_PROGRESS_PHASES | IN_REVIEW_PHASES
+    RUNNABLE_PHASES | IN_PROGRESS_PHASES | IN_REVIEW_PHASES
 )
 _RESUMABLE_AFTER_CLAIM_RELEASE_PHASES: frozenset[Phase] = IN_PROGRESS_PHASES
 

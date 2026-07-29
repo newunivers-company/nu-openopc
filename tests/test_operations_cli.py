@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import tempfile
 from pathlib import Path
 import unittest
@@ -9,6 +10,9 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from opc.cli.app import app
+from opc.core.models import DelegationWorkItem
+from opc.database.store import OPCStore
+from opc.layer2_organization.phase import Phase
 
 
 class OperationsCliTests(unittest.TestCase):
@@ -452,3 +456,64 @@ class BenchmarkRunSlotDryRunTests(unittest.TestCase):
             ],
         )
         self.assertNotEqual(result.exit_code, 0)
+
+    def test_campaign_status_does_not_sweep_live_work_item_claims(self) -> None:
+        opc_home = self.root / ".opc"
+        project = "campaign-live"
+        plan_path = self.root / "plan.json"
+        planned = self.runner.invoke(
+            app,
+            [
+                "ops", "benchmark", "plan",
+                "--campaign-id", "claim-safe",
+                "--output", str(plan_path),
+            ],
+        )
+        self.assertEqual(planned.exit_code, 0, planned.output)
+        db_path = opc_home / "projects" / project / "tasks.db"
+
+        async def seed() -> None:
+            store = OPCStore(db_path)
+            await store.initialize()
+            await store.save_delegation_work_item(
+                DelegationWorkItem(
+                    work_item_id="work-live",
+                    run_id="run-live",
+                    cell_id="cell-live",
+                    role_id="engineer",
+                    seat_id="seat::engineer",
+                    title="Long-running external work",
+                    phase=Phase.RUNNING,
+                    claimed_by_role_runtime_session_id="role-session-live",
+                    claimed_by_seat_id="seat::engineer",
+                )
+            )
+            await store.close()
+
+        asyncio.run(seed())
+        with patch("opc.cli.operations.get_opc_home", return_value=opc_home):
+            result = self.runner.invoke(
+                app,
+                [
+                    "ops", "benchmark", "campaign-status",
+                    "--plan", str(plan_path),
+                    "--project", project,
+                ],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        async def inspect() -> DelegationWorkItem | None:
+            store = OPCStore(db_path)
+            await store.initialize(run_startup_maintenance=False)
+            item = await store.get_delegation_work_item("work-live")
+            await store.close()
+            return item
+
+        item = asyncio.run(inspect())
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(
+            item.claimed_by_role_runtime_session_id,
+            "role-session-live",
+        )
+        self.assertEqual(item.claimed_by_seat_id, "seat::engineer")

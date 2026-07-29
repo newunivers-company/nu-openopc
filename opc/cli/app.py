@@ -98,7 +98,7 @@ def _get_config() -> OPCConfig:
 
 
 def _channel_runtime_pid_path() -> Path:
-    from opc.core.config import get_opc_home, get_project_workplace
+    from opc.core.config import get_opc_home
 
     return get_opc_home() / "run" / "channels.pid"
 
@@ -4401,7 +4401,13 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
         if not rest:
             console.print("[warning]Usage: /session complete <task_id>[/warning]")
             return
-        operation = lambda svc: svc.session.complete(project_id=_current_project_id(state.engine), task_id=rest[0])
+
+        async def operation(svc: Any) -> Any:
+            return await svc.session.complete(
+                project_id=_current_project_id(state.engine),
+                task_id=rest[0],
+            )
+
         payload = await _run_chat_office_service(state, operation)
         if payload:
             console.print(f"[success]Completed session:[/success] {rest[0]}")
@@ -8310,7 +8316,7 @@ async def _show_cost_summary(config) -> None:
     try:
         costs = await store.get_total_cost()
         if costs["total_calls"] > 0:
-            console.print(f"\n[bold]Cost Summary:[/bold]")
+            console.print("\n[bold]Cost Summary:[/bold]")
             console.print(f"  Total calls: {costs['total_calls']}")
             console.print(f"  Total tokens: {costs['total_tokens_in'] + costs['total_tokens_out']}")
             console.print(f"  Total cost: ${costs['total_cost']:.4f}")
@@ -8330,7 +8336,7 @@ async def _show_autonomy_summary(config, project: str | None = None) -> None:
     await store.initialize()
     try:
         stats = await store.get_autonomy_stats(project_id=project)
-        console.print(f"\n[bold]Autonomy Summary:[/bold]")
+        console.print("\n[bold]Autonomy Summary:[/bold]")
         console.print(f"  Decisions: {stats['total']}")
         console.print(f"  Auto-approved: {stats['auto_approved']}")
         console.print(f"  Escalated: {stats['escalated']}")
@@ -8481,7 +8487,7 @@ async def _run_channel_runtime(config, project: str | None) -> None:
 
 
 # ── Plugins ────────────────────────────────────────────────────────────────
-from opc.cli.operations import register_operations_cli
+from opc.cli.operations import register_operations_cli  # noqa: E402
 
 register_operations_cli(app)
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import json
 import re
@@ -16,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "config" / "nu_release_manifest.json"
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 _PACKAGE_KEYS = ("nu-llm-routing-lib", "nu-resource-gen-lib")
+_EXACT_DEPENDENCY = re.compile(
+    r"^\s*([A-Za-z0-9_.-]+)\s*==\s*([^;\s]+)(?:\s*;.*)?$"
+)
 
 
 class ReleaseManifestError(ValueError):
@@ -30,6 +34,12 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
         raise ReleaseManifestError("release manifest schema_version must be 1")
     if not str(raw.get("release_id", "") or "").strip():
         raise ReleaseManifestError("release manifest release_id is required")
+    openopc = raw.get("openopc")
+    if not isinstance(openopc, dict):
+        raise ReleaseManifestError("release manifest openopc must be an object")
+    for field in ("package", "version"):
+        if not str(openopc.get(field, "") or "").strip():
+            raise ReleaseManifestError(f"openopc.{field} is required")
     packages = raw.get("packages")
     if not isinstance(packages, dict) or set(packages) != set(_PACKAGE_KEYS):
         raise ReleaseManifestError(
@@ -57,6 +67,66 @@ def load_manifest(path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
             "nu-resource-gen-lib.stable_api_version is required"
         )
     return raw
+
+
+def verify_project_metadata(
+    manifest: Mapping[str, Any],
+    *,
+    project_path: Path = ROOT / "pyproject.toml",
+) -> dict[str, Any]:
+    """Ensure package metadata duplicates only values pinned by the manifest."""
+
+    project_text = project_path.read_text(encoding="utf-8")
+    project = _project_metadata(project_text, project_path)
+
+    expected_openopc = dict(manifest["openopc"])
+    actual_name = str(project.get("name", "") or "")
+    actual_version = str(project.get("version", "") or "")
+    expected_name = str(expected_openopc["package"])
+    expected_version = str(expected_openopc["version"])
+    if actual_name != expected_name:
+        raise ReleaseManifestError(
+            f"OpenOPC project name {actual_name!r} != manifest {expected_name!r}"
+        )
+    if actual_version != expected_version:
+        raise ReleaseManifestError(
+            f"OpenOPC project version {actual_version!r} != manifest {expected_version!r}"
+        )
+
+    nu_dependencies = _nu_optional_dependencies(project_text, project_path)
+
+    actual_pins: dict[str, str] = {}
+    expected_packages = dict(manifest["packages"])
+    for dependency in nu_dependencies:
+        match = _EXACT_DEPENDENCY.fullmatch(str(dependency))
+        if match is None:
+            raise ReleaseManifestError(
+                f"NU dependency must use an exact == pin: {dependency!r}"
+            )
+        name, version = match.groups()
+        normalized = name.lower().replace("_", "-")
+        if normalized in actual_pins:
+            raise ReleaseManifestError(f"duplicate NU dependency pin: {normalized}")
+        actual_pins[normalized] = version
+
+    if set(actual_pins) != set(expected_packages):
+        raise ReleaseManifestError(
+            "pyproject NU dependencies must be exactly "
+            f"{sorted(expected_packages)}; got {sorted(actual_pins)}"
+        )
+    for name, entry in expected_packages.items():
+        expected = str(dict(entry)["version"])
+        if actual_pins[name] != expected:
+            raise ReleaseManifestError(
+                f"pyproject pin {name}=={actual_pins[name]} != manifest {expected}"
+            )
+
+    return {
+        "package": actual_name,
+        "version": actual_version,
+        "nu_pins": dict(sorted(actual_pins.items())),
+        "path": str(project_path.resolve()),
+    }
 
 
 def github_outputs(manifest: Mapping[str, Any]) -> dict[str, str]:
@@ -136,9 +206,11 @@ def verify_installed(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
 def build_report(
     manifest: Mapping[str, Any],
     *,
+    project_path: Path = ROOT / "pyproject.toml",
     workspace_root: Path | None = None,
     check_installed: bool = False,
 ) -> dict[str, Any]:
+    project = verify_project_metadata(manifest, project_path=project_path)
     repositories = (
         verify_repositories(manifest, workspace_root=workspace_root)
         if workspace_root is not None
@@ -148,6 +220,7 @@ def build_report(
     return {
         "ok": True,
         "release_id": str(manifest["release_id"]),
+        "project": project,
         "repositories": repositories,
         "installed": installed,
         "pins": github_outputs(manifest),
@@ -170,6 +243,59 @@ def _project_version(path: Path) -> str:
     if project_match is None:
         raise ReleaseManifestError(f"project version is missing from {path}")
     return project_match.group(1).strip()
+
+
+def _project_metadata(text: str, path: Path) -> dict[str, str]:
+    section = re.search(
+        r"(?ms)^\[project\]\s*$"
+        r"(?P<body>.*?)(?=^\[[^\n]+\]\s*$|\Z)",
+        text,
+    )
+    if section is None:
+        raise ReleaseManifestError(f"[project] is missing from {path}")
+    body = section.group("body")
+    values: dict[str, str] = {}
+    for field in ("name", "version"):
+        match = re.search(
+            rf"(?m)^\s*{field}\s*=\s*['\"]([^'\"]+)['\"]\s*$",
+            body,
+        )
+        if match is not None:
+            values[field] = match.group(1).strip()
+    return values
+
+
+def _nu_optional_dependencies(text: str, path: Path) -> list[str]:
+    section = re.search(
+        r"(?ms)^\[project\.optional-dependencies\]\s*$"
+        r"(?P<body>.*?)(?=^\[[^\n]+\]\s*$|\Z)",
+        text,
+    )
+    if section is None:
+        raise ReleaseManifestError(
+            f"[project.optional-dependencies].nu is missing from {path}"
+        )
+    match = re.search(
+        r"(?ms)^\s*nu\s*=\s*(?P<value>\[.*?^\s*\])",
+        section.group("body"),
+    )
+    if match is None:
+        raise ReleaseManifestError(
+            f"[project.optional-dependencies].nu is missing from {path}"
+        )
+    try:
+        value = ast.literal_eval(match.group("value"))
+    except (SyntaxError, ValueError) as exc:
+        raise ReleaseManifestError(
+            f"[project.optional-dependencies].nu is invalid in {path}"
+        ) from exc
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ReleaseManifestError(
+            f"[project.optional-dependencies].nu must be a string array in {path}"
+        )
+    return value
 
 
 def _write_github_output(path: Path, values: Mapping[str, str]) -> None:

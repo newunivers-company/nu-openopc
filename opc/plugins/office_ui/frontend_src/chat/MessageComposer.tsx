@@ -611,8 +611,8 @@ export function MessageComposer({
                         disabled={disabled}
                         aria-label="Execution mode"
                       >
-                        <option value="task">Task</option>
-                        <option value="company">Company</option>
+                        <option value="task">Task · single agent</option>
+                        <option value="company">Company · role team</option>
                       </select>
                     </span>
                   </label>
@@ -683,7 +683,7 @@ export function MessageComposer({
                       data-kind="org"
                       title="Company architecture for this chat"
                     >
-                      <span className="composer-mode-inline-label">Company</span>
+                      <span className="composer-mode-inline-label">Team</span>
                       <span className="composer-mode-select-wrap">
                         <select
                           className="composer-mode-select"
@@ -704,7 +704,7 @@ export function MessageComposer({
                           disabled={disabled}
                           aria-label="Company architecture"
                         >
-                          <option value="corporate">Corporate</option>
+                          <option value="corporate">Default roles</option>
                           {!selectedCompanyArchitecture && (
                             <option value="" disabled>Select saved org</option>
                           )}

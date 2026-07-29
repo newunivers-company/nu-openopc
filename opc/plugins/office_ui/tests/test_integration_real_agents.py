@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +26,8 @@ from opc.core.config import LLMConfig, OPCConfig, SystemConfig, get_opc_home
 from opc.core.events import EventBus
 from opc.core.models import (
     AgentInfo,
-    AgentStatus,
     OPCEvent,
     Task,
-    TaskResult,
     TaskStatus,
 )
 from opc.layer3_agent.native_agent import NativeAgent

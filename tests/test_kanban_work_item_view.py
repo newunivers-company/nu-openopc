@@ -14,7 +14,6 @@ employee_delta_context.
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
 
 from opc.core.models import DelegationWorkItem, Phase, Task
 from opc.plugins.office_ui.snapshot_builder import work_item_to_kanban

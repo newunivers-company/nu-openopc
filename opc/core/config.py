@@ -2003,7 +2003,8 @@ class OPCConfig(BaseModel):
                         existing = yaml.safe_load(f) or {}
                     existing_roles = existing.get("roles") or []
                     if existing_roles:
-                        import logging, os as _os
+                        import logging
+                        import os as _os
                         logging.getLogger(__name__).error(
                             "OPCConfig.save(): REFUSED to wipe %d existing roles with "
                             "empty list in custom mode. pid=%d, path=%s. "

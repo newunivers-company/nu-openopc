@@ -9,7 +9,7 @@ from textual.widgets import Static
 
 from ..state.models import PipelineSnapshot, PipelineWorkItemView
 from ..state.store import BoardStateStore
-from .render_utils import status_style, truncate_text
+from .render_utils import truncate_text
 
 _STATUS_SYMBOL = {
     "done": ("\u2713", "bold #22c55e"),       # ✓ green

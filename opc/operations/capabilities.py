@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import math
+import re
 import time
 from datetime import timedelta
 from typing import Any, Awaitable, Callable, Mapping, Sequence
@@ -409,6 +410,19 @@ class UnifiedCapabilityBroker:
                         preferred_providers=request.preferred_providers,
                     )
                     targets = [item.safe_dict() for item in raw_targets]
+                    if has_tools:
+                        tool_incompatible = [
+                            str(item.get("provider", "") or "")
+                            for item in targets
+                            if not _target_supports_tools(item)
+                        ]
+                        if tool_incompatible:
+                            diagnostics["tool_incompatible_targets"] = (
+                                tool_incompatible
+                            )
+                        targets = [
+                            item for item in targets if _target_supports_tools(item)
+                        ]
                 except Exception as exc:
                     diagnostics["target_error"] = str(exc)
             else:
@@ -895,6 +909,18 @@ def _provider_matches(provider: str, configured: Sequence[str]) -> bool:
     )
 
 
+def _target_supports_tools(target: Mapping[str, Any]) -> bool:
+    """Interpret missing capability metadata using the transport contract."""
+
+    explicit = target.get("supports_tools")
+    if explicit is not None:
+        return bool(explicit)
+    return str(target.get("transport_kind", "") or "") not in {
+        "subscription_cli",
+        "nu_native",
+    }
+
+
 def _is_local_llm(provider: str, target: Mapping[str, Any]) -> bool:
     normalized = provider.lower()
     api_base = str(target.get("api_base", "")).lower()
@@ -1128,11 +1154,54 @@ def _validate_actual_route(route: CapabilityRoute, actual: Mapping[str, str]) ->
             for field in ("candidate_id", "model")
         ):
             return ""
+        if _resolved_native_model_matches(route, item, actual):
+            return ""
     identity = {
         field: str(actual.get(field, "") or "")
         for field in ("candidate_id", "model")
     }
     return f"actual route identity {identity!r} was not planned for provider {provider!r}"
+
+
+def _resolved_native_model_matches(
+    route: CapabilityRoute,
+    planned: Mapping[str, Any],
+    actual: Mapping[str, str],
+) -> bool:
+    """Accept a native provider's concrete model only when it resolves its alias."""
+
+    provider = str(planned.get("provider", "") or "")
+    target = next(
+        (
+            item
+            for item in route.diagnostics.get("targets", []) or []
+            if isinstance(item, Mapping)
+            and str(item.get("provider", "") or "") == provider
+        ),
+        {},
+    )
+    if str(target.get("transport_kind", "") or "") not in {
+        "subscription_cli",
+        "nu_native",
+    }:
+        return False
+    planned_candidate = str(planned.get("candidate_id", "") or "")
+    if (
+        planned_candidate
+        and str(actual.get("candidate_id", "") or "") != planned_candidate
+    ):
+        return False
+    planned_model = str(planned.get("model", "") or "").lower()
+    actual_model = str(actual.get("model", "") or "").lower()
+    if not planned_model or not actual_model:
+        return False
+    planned_tokens = {
+        item for item in re.split(r"[-_./:]+", planned_model) if item
+    }
+    actual_tokens = {
+        item for item in re.split(r"[-_./:]+", actual_model) if item
+    }
+    return bool(planned_tokens and planned_tokens.issubset(actual_tokens))
 
 
 def _usage_event(

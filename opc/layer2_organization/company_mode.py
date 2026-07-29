@@ -22,6 +22,7 @@ from opc.core.active_task_runs import (
     ActiveTaskRunRegistry,
 )
 from opc.core.config import DEFAULT_EXTERNAL_AGENT_STARTUP_TIMEOUT_SECONDS, DEFAULT_ORGANIZATION_ID
+from opc.core.evidence import compact_verification_evidence
 from opc.core.models import (
     AdaptiveRoleProfile,
     AdaptiveSignalSpec,
@@ -36,7 +37,6 @@ from opc.core.models import (
     EnvironmentManifest,
     Phase,
     RouterDecision,
-    StructuredReviewVerdict,
     Task,
     TaskResult,
     TaskStatus,
@@ -104,7 +104,6 @@ from opc.layer2_organization.org_work_item_planner import (
     serialize_company_work_item_plan,
 )
 from opc.layer2_organization.recruiter import (
-    normalize_recruitment_agent_choice,
     resolve_effective_execution_agent,
 )
 from opc.layer2_organization.seat_executor import SeatExecutor
@@ -2369,8 +2368,6 @@ class CompanyWorkItemExecutor:
             return tasks, work_items
         refreshed_tasks = list(tasks)
         root_task = sorted(refreshed_tasks, key=lambda item: (item.created_at, item.id))[0]
-        work_item_by_id = {str(item.work_item_id or "").strip(): item for item in work_items if str(item.work_item_id or "").strip()}
-        task_by_work_item_id = await self._task_by_work_item_id(refreshed_tasks)
         for session in self.runtime.member_sessions.values():
             session_status = normalize_role_runtime_status(
                 session.status,
@@ -2401,7 +2398,6 @@ class CompanyWorkItemExecutor:
                     break
             if source_message is None:
                 continue
-            source_message_id = str(source_message.get("msg_id", "") or "").strip()
             refreshed_tasks, work_items = await self._upsert_attention_work_item(
                 root_task=root_task,
                 tasks=refreshed_tasks,
@@ -2409,8 +2405,6 @@ class CompanyWorkItemExecutor:
                 session=session,
                 source_message=source_message,
             )
-            work_item_by_id = {str(item.work_item_id or "").strip(): item for item in work_items if str(item.work_item_id or "").strip()}
-            task_by_work_item_id = await self._task_by_work_item_id(refreshed_tasks)
         return refreshed_tasks, work_items
 
     async def _load_delegation_work_items(self, tasks: list[Task]) -> list[DelegationWorkItem]:
@@ -5813,7 +5807,10 @@ class CompanyWorkItemExecutor:
                     await self._append_progress(task, f"Work-item gate `{gate.gate_type}` skipped by runtime policy.")
                 await self._append_progress(task, f"Work item completed by role {task.assigned_to}.")
                 await self._apply_done_transition(task, result=result)
-                completion_action = await self._finalize_work_item_with_gate_harness(task, task_by_projection_id)
+                await self._finalize_work_item_with_gate_harness(
+                    task,
+                    task_by_projection_id,
+                )
                 if task.status == TaskStatus.DONE:
                     # Append completion summary to shared scratchpad
                     self._append_to_scratchpad(task, result)
@@ -11054,7 +11051,10 @@ class CompanyWorkItemExecutor:
         await self._append_progress(task, f"Gate {gate.gate_type} passed.")
         await self._apply_done_transition(task)
         await self.save_task(task)
-        completion_action = await self._finalize_work_item_with_gate_harness(task, task_by_projection_id)
+        await self._finalize_work_item_with_gate_harness(
+            task,
+            task_by_projection_id,
+        )
         if task.status == TaskStatus.DONE:
             await self._emit_progress(f"[Company:{self._projection_id_for_task(task)}] gate passed", task_id=task.id)
         elif task.status in _REVIEW_WAITING_STATUSES:
@@ -11755,6 +11755,12 @@ class CompanyWorkItemExecutor:
 
     def _capture_work_item_outputs(self, task: Task, result: TaskResult) -> WorkItemOutputBundle:
         summary = (result.content or "").strip()
+        if result.artifacts and result.artifacts.get("verification_evidence"):
+            result.artifacts["verification_evidence"] = (
+                compact_verification_evidence(
+                    result.artifacts.get("verification_evidence")
+                )
+            )
         runtime_state = self._extract_runtime_state(result)
         structured_payload = self._extract_structured_work_item_payload(summary, result.artifacts)
         existing_artifacts = list(task.metadata.get("artifacts", []) or [])
@@ -11816,7 +11822,11 @@ class CompanyWorkItemExecutor:
         if review_verdict:
             work_item_updates["structured_review_verdict"] = review_verdict
         verification = result.artifacts.get("verification", []) if result.artifacts else []
-        verification_evidence = dict(result.artifacts.get("verification_evidence", {}) if result.artifacts else {})
+        verification_evidence = dict(
+            result.artifacts.get("verification_evidence", {})
+            if result.artifacts
+            else {}
+        )
         if verification_evidence:
             work_item_updates["verification_evidence"] = verification_evidence
             runtime_audit_updates["runtime_verification_evidence"] = verification_evidence
@@ -13782,11 +13792,49 @@ class CompanyWorkItemExecutor:
         )
         affected_projection_ids = [target_projection_id, *self._collect_downstream_projection_ids(target_projection_id)]
         touched_task_ids: set[str] = set()
+        target_reopened = False
+        output_metadata_keys = [
+            "completion_report",
+            "work_item_summary",
+            "work_item_summary_for_downstream",
+            "work_item_artifact_index",
+            "verification_status",
+            "verification_evidence",
+            "verification",
+            "structured_review_verdict",
+            "delivery_package",
+            "downstream_assignments",
+            "artifacts",
+            "automated_verification_results",
+            "final_feedback_evaluation",
+            "feedback_followup_message",
+        ]
         for affected_projection_id in affected_projection_ids:
             affected_task = task_by_projection_id.get(affected_projection_id)
             if affected_task is None or affected_task.id in touched_task_ids:
                 continue
             touched_task_ids.add(affected_task.id)
+            work_item_id = linked_work_item_id_for_task(affected_task)
+            persisted_work_item = None
+            if work_item_id and hasattr(self.store, "get_delegation_work_item"):
+                try:
+                    persisted_work_item = await self.store.get_delegation_work_item(work_item_id)
+                except Exception:
+                    persisted_work_item = None
+                persisted_phase = getattr(persisted_work_item, "phase", None)
+                if persisted_phase in {Phase.FAILED, Phase.CANCELLED}:
+                    continue
+                if (
+                    persisted_phase == Phase.APPROVED
+                    and not callable(
+                        getattr(
+                            self.store,
+                            "reopen_approved_delegation_work_item_for_rework",
+                            None,
+                        )
+                    )
+                ):
+                    continue
             affected_task.metadata = dict(affected_task.metadata)
             affected_task.context_snapshot = dict(affected_task.context_snapshot)
             affected_task.result = None
@@ -13812,11 +13860,45 @@ class CompanyWorkItemExecutor:
                     affected_task,
                     f"Reset because upstream work-item projection `{target_projection_id}` entered executive-directed rework.",
                 )
-            await transition_work_item_from_task(
-                self.store, affected_task,
-                target_status_or_phase=TaskStatus.PENDING,
-                reason="ceo_rework_reset",
-            )
+            rework_metadata = {
+                "rework_feedback": normalized_feedback,
+                "ceo_rework_source_projection_id": target_projection_id,
+                "ceo_rework_requested_at": rework_request["requested_at"],
+            }
+            if persisted_work_item is not None and persisted_work_item.phase == Phase.APPROVED:
+                reopened = await self.store.reopen_approved_delegation_work_item_for_rework(
+                    work_item_id,
+                    target_phase=Phase.READY_FOR_REWORK,
+                    deliverable_summary="",
+                    blocked_reason="",
+                    metadata_updates=rework_metadata,
+                    metadata_unset=output_metadata_keys,
+                    release_claim=True,
+                )
+                if reopened is None or reopened.phase not in {Phase.READY, Phase.READY_FOR_REWORK}:
+                    continue
+                affected_task.status = TaskStatus.PENDING
+            else:
+                await transition_work_item_from_task(
+                    self.store,
+                    affected_task,
+                    target_status_or_phase=TaskStatus.PENDING,
+                    reason="ceo_rework_reset",
+                    metadata_updates=rework_metadata,
+                    release_claim=True,
+                )
+                if work_item_id and hasattr(self.store, "get_delegation_work_item"):
+                    refreshed_work_item = await self.store.get_delegation_work_item(work_item_id)
+                    if (
+                        refreshed_work_item is None
+                        or refreshed_work_item.phase not in {Phase.READY, Phase.READY_FOR_REWORK}
+                    ):
+                        continue
+                    if hasattr(self.store, "update_delegation_work_item"):
+                        await self.store.update_delegation_work_item(
+                            work_item_id,
+                            metadata_unset=output_metadata_keys,
+                        )
             await self.save_task(affected_task)
             # Emit work_item_progress event so the UI reverts the work item from
             # "done" (checkmark) back to "active" (dots) during rework.
@@ -13824,7 +13906,9 @@ class CompanyWorkItemExecutor:
                 f"[Company:{affected_projection_id}] reworking ({source} rework round {rework_round})",
                 task_id=affected_task.id,
             )
-        return target_task
+            if affected_projection_id == target_projection_id:
+                target_reopened = True
+        return target_task if target_reopened else None
 
     async def _mark_run_awaiting_owner_from_delivery(
         self,
@@ -13954,6 +14038,7 @@ class CompanyWorkItemExecutor:
                         )
                         return
                     task.metadata["pre_delivery_rework_count"] = prior_pre_delivery_reworks + 1
+                    initiated_rework_targets: list[str] = []
                     for item in rework_targets:
                         target_projection_id = str(
                             item.get("target_projection_id")
@@ -13962,13 +14047,45 @@ class CompanyWorkItemExecutor:
                         ).strip()
                         if not target_projection_id:
                             continue
-                        await self._ceo_initiate_rework(
+                        reopened_task = await self._ceo_initiate_rework(
                             target_projection_id,
                             item.get("feedback", "") or str(assessment.get("summary", "") or ""),
                             task_by_projection_id,
                             source_task=task,
                             source="pre_delivery",
                         )
+                        if reopened_task is not None:
+                            initiated_rework_targets.append(target_projection_id)
+                    if not initiated_rework_targets:
+                        task.metadata["pre_delivery_rework_unroutable"] = True
+                        task.metadata["pre_delivery_rework_unroutable_targets"] = [
+                            str(item.get("target_projection_id", "") or "").strip()
+                            for item in rework_targets
+                            if str(item.get("target_projection_id", "") or "").strip()
+                        ]
+                        await transition_work_item_from_task(
+                            self.store,
+                            task,
+                            target_status_or_phase=Phase.AWAITING_HUMAN,
+                            reason="pre_delivery_rework_unroutable",
+                        )
+                        await self._append_progress(
+                            task,
+                            "Executive rework targets could not be reopened; final delivery is awaiting human review.",
+                        )
+                        await self._mark_run_awaiting_owner_from_delivery(
+                            task,
+                            summary=str(assessment.get("summary", "") or "").strip(),
+                        )
+                        await self.save_task(task)
+                        await self._save_feedback_checkpoint(task)
+                        await self._emit_progress(
+                            f"[Company:{self._projection_id_for_task(task)}] "
+                            "pre-delivery rework could not be routed; awaiting human review",
+                            task_id=task.id,
+                        )
+                        return
+                    task.metadata["pre_delivery_rework_initiated_targets"] = initiated_rework_targets
                     if task.status != TaskStatus.PENDING:
                         task.result = None
                         self._reset_work_item_outputs_for_rework(task)
@@ -13976,6 +14093,7 @@ class CompanyWorkItemExecutor:
                             self.store, task,
                             target_status_or_phase=TaskStatus.PENDING,
                             reason="pre_delivery_rework_withheld",
+                            release_claim=True,
                         )
                     await self._append_progress(task, "Final delivery withheld pending executive-directed rework.")
                     await self.save_task(task)

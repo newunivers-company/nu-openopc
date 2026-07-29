@@ -30,6 +30,7 @@ from opc.operations.models import (
     GoalContract,
     RunManifest,
     RunStatus,
+    TERMINAL_RUN_STATUSES,
     utc_now,
 )
 
@@ -237,6 +238,7 @@ class CampaignBudget:
     """
 
     max_slots: int | None = None
+    max_pairs: int | None = None
     max_failures: int = 3
     max_cost_usd: float | None = None
     max_wall_clock_seconds: float | None = None
@@ -244,6 +246,8 @@ class CampaignBudget:
     def validate(self) -> None:
         if self.max_slots is not None and self.max_slots < 1:
             raise ValueError("max_slots must be positive when set")
+        if self.max_pairs is not None and self.max_pairs < 1:
+            raise ValueError("max_pairs must be positive when set")
         if self.max_failures < 0:
             raise ValueError("max_failures must be non-negative")
         if self.max_cost_usd is not None and self.max_cost_usd <= 0:
@@ -285,6 +289,8 @@ class CampaignRunner:
         executed = failed = skipped = 0
         measured_cost = 0.0
         halted_reason = ""
+        selected_pair_ids: set[str] = set()
+        visited_pair_ids: set[str] = set()
         slots: Sequence[Mapping[str, Any]] = sorted(
             plan.get("slots", []) or [], key=lambda item: int(item.get("sequence", 0))
         )
@@ -293,6 +299,23 @@ class CampaignRunner:
                 continue
             if mode_filter and slot.get("mode") not in mode_filter:
                 continue
+            pair_id = str(slot.get("pair_id", "") or "")
+            if pair_id and pair_id not in visited_pair_ids:
+                pair_complete = await self._pair_is_complete(
+                    slots,
+                    pair_id,
+                    workload_filter=workload_filter,
+                )
+                if (
+                    not pair_complete
+                    and budget.max_pairs is not None
+                    and len(selected_pair_ids) >= budget.max_pairs
+                ):
+                    halted_reason = "max_pairs budget reached"
+                    break
+                visited_pair_ids.add(pair_id)
+                if not pair_complete:
+                    selected_pair_ids.add(pair_id)
             if budget.max_slots is not None and executed >= budget.max_slots:
                 halted_reason = "max_slots budget reached"
                 break
@@ -323,16 +346,70 @@ class CampaignRunner:
                 if failed > budget.max_failures:
                     halted_reason = "max_failures budget exceeded"
                     break
+        completed_pair_ids, partial_pair_ids = await self._pair_progress(
+            slots,
+            visited_pair_ids,
+            workload_filter=workload_filter,
+        )
         return {
             "campaign_id": plan.get("campaign_id", ""),
             "plan_digest": plan.get("plan_digest", ""),
             "executed": executed,
             "failed": failed,
             "skipped": skipped,
+            "pairs_selected": len(selected_pair_ids),
+            "pairs_completed": len(completed_pair_ids),
+            "partial_pair_ids": sorted(partial_pair_ids),
             "measured_cost_usd": round(measured_cost, 6),
             "halted_reason": halted_reason,
             "results": [item.to_dict() for item in results],
         }
+
+    async def _pair_is_complete(
+        self,
+        slots: Sequence[Mapping[str, Any]],
+        pair_id: str,
+        *,
+        workload_filter: set[str] | None,
+    ) -> bool:
+        pair_slots = [
+            slot
+            for slot in slots
+            if str(slot.get("pair_id", "") or "") == pair_id
+            and (
+                not workload_filter
+                or str(slot.get("workload", "") or "") in workload_filter
+            )
+        ]
+        if len(pair_slots) < 2:
+            return False
+        for slot in pair_slots:
+            manifest = await self.slot_runner.service.repository.get_manifest(
+                str(slot.get("run_id", "") or "")
+            )
+            if manifest is None or manifest.status not in TERMINAL_RUN_STATUSES:
+                return False
+        return True
+
+    async def _pair_progress(
+        self,
+        slots: Sequence[Mapping[str, Any]],
+        pair_ids: set[str],
+        *,
+        workload_filter: set[str] | None,
+    ) -> tuple[set[str], set[str]]:
+        completed: set[str] = set()
+        partial: set[str] = set()
+        for pair_id in pair_ids:
+            if await self._pair_is_complete(
+                slots,
+                pair_id,
+                workload_filter=workload_filter,
+            ):
+                completed.add(pair_id)
+            else:
+                partial.add(pair_id)
+        return completed, partial
 
     async def _measured_run_cost(self, run_id: str) -> float:
         events = await self.slot_runner.service.repository.list_provider_usage_events(

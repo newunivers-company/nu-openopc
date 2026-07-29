@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any, Callable, Coroutine
 
 from opc.core.models import OPCEvent
@@ -15,10 +15,15 @@ Listener = Callable[[OPCEvent], Coroutine[Any, Any, None]]
 class EventBus:
     """Simple async pub/sub event bus for inter-layer communication."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, history_limit: int = 1_000) -> None:
         self._listeners: dict[str, list[Listener]] = defaultdict(list)
         self._global_listeners: list[Listener] = []
-        self._history: list[OPCEvent] = []
+        # Runtime deltas can arrive hundreds of times per second. The history
+        # is only used for recent UI snapshots, so retaining it without a
+        # bound turns a long-running company session into a memory leak.
+        self._history: deque[OPCEvent] = deque(
+            maxlen=max(1, int(history_limit or 1)),
+        )
         self._lock: asyncio.Lock | None = None
 
     def _get_lock(self) -> asyncio.Lock:
@@ -58,7 +63,7 @@ class EventBus:
                     raise failure
 
     def get_history(self, event_type: str | None = None, limit: int = 50) -> list[OPCEvent]:
-        events = self._history
+        events = list(self._history)
         if event_type:
             events = [e for e in events if e.event_type == event_type]
         return events[-limit:]

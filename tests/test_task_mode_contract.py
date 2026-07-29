@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from opc.core.config import OPCConfig
-from opc.core.models import AgentInfo, AgentStatus, ExecutionMode, Task, TaskResult, TaskStatus
+from opc.core.models import AgentInfo, AgentStatus, ExecutionMode, Task
 from opc.layer2_organization.org_engine import TASK_MODE_GENERAL_ROLE_ID
 from opc.layer3_agent.native_agent import NativeAgent
 from opc.layer4_tools.registry import ToolDefinition, ToolRegistry

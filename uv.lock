@@ -2170,7 +2170,7 @@ wheels = [
 
 [[package]]
 name = "nu-llm-routing-lib"
-version = "0.2.2"
+version = "0.4.0"
 source = { editable = "../nu-llm-routing-lib" }
 
 [package.metadata]
@@ -2179,11 +2179,12 @@ requires-dist = [
     { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.18" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1,<4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["postgres", "dev"]
 
 [[package]]
 name = "nu-resource-gen-lib"

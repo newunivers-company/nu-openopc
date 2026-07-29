@@ -64,6 +64,7 @@ from opc.operations.judging import (
     draft_for_goal,
     parse_draft_response,
 )
+from opc.operations.learning_effectiveness import LearningEffectivenessPolicy
 from opc.operations.experiments import (
     ShadowQualityObservation,
     bind_shadow_observation_to_transport,
@@ -475,6 +476,13 @@ def register_operations_cli(app: typer.Typer) -> None:
             Path("outputs/benchmark"), "--artifacts-root"
         ),
         max_slots: Optional[int] = typer.Option(None, "--max-slots", min=1),
+        max_pairs: Optional[int] = typer.Option(
+            None,
+            "--max-pairs",
+            min=1,
+            help="Start at most this many incomplete Task/Company pairs; "
+            "completed pairs do not consume the budget",
+        ),
         max_failures: int = typer.Option(3, "--max-failures", min=0),
         max_cost_usd: Optional[float] = typer.Option(
             None,
@@ -519,6 +527,7 @@ def register_operations_cli(app: typer.Typer) -> None:
                 plan,
                 budget=CampaignBudget(
                     max_slots=max_slots,
+                    max_pairs=max_pairs,
                     max_failures=max_failures,
                     max_cost_usd=max_cost_usd,
                     max_wall_clock_seconds=(
@@ -562,7 +571,11 @@ def register_operations_cli(app: typer.Typer) -> None:
         async def action(service: OperationsService) -> dict[str, Any]:
             return await campaign_status(service, suite, plan, rows)
 
-        report = _run(project, action)
+        report = _run(
+            project,
+            action,
+            run_startup_maintenance=False,
+        )
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(
@@ -1559,6 +1572,61 @@ def register_operations_cli(app: typer.Typer) -> None:
 
         _emit(_run(project, action))
 
+    @learning_app.command("effectiveness")
+    def learning_effectiveness(
+        asset_id: str = typer.Argument(...),
+        cohort_key: str = typer.Option(
+            "",
+            "--cohort-key",
+            help="Optional manifest/scorecard metadata key used to match runs",
+        ),
+        minimum_samples: int = typer.Option(
+            3,
+            "--minimum-samples",
+            min=1,
+            help="Required treated and control samples",
+        ),
+        maximum_regression: float = typer.Option(
+            0.02,
+            "--maximum-regression",
+            min=0,
+            max=1,
+        ),
+        minimum_improvement: float = typer.Option(
+            0.0,
+            "--minimum-improvement",
+            min=0,
+            max=1,
+        ),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        fail_on_blocked: bool = typer.Option(False, "--fail-on-blocked"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Compare runs with an exact pinned learning asset to matched controls."""
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            return await service.learning_effectiveness.report(
+                asset_id,
+                project_id=project,
+                cohort_key=cohort_key,
+                policy=LearningEffectivenessPolicy(
+                    minimum_samples_per_arm=minimum_samples,
+                    maximum_quality_regression=maximum_regression,
+                    minimum_quality_improvement=minimum_improvement,
+                ),
+            )
+
+        report = _run(project, action)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+        if fail_on_blocked and not report["promotion_evidence_eligible"]:
+            raise typer.Exit(code=1)
+
     @capability_app.command("plan")
     def capability_plan(
         request_json: Path = typer.Option(..., "--request"),
@@ -1949,8 +2017,16 @@ def _run(
     action: Callable[[OperationsService], Awaitable[T]],
     *,
     integrations: bool = False,
+    run_startup_maintenance: bool = True,
 ) -> T:
-    return asyncio.run(_run_async(project_id, action, integrations=integrations))
+    return asyncio.run(
+        _run_async(
+            project_id,
+            action,
+            integrations=integrations,
+            run_startup_maintenance=run_startup_maintenance,
+        )
+    )
 
 
 async def _run_async(
@@ -1958,6 +2034,7 @@ async def _run_async(
     action: Callable[[OperationsService], Awaitable[T]],
     *,
     integrations: bool,
+    run_startup_maintenance: bool = True,
 ) -> T:
     project = _clean_project_id(project_id)
     opc_home = get_opc_home()
@@ -1965,7 +2042,9 @@ async def _run_async(
     config = OPCConfig.load(config_dir) if config_dir.exists() else OPCConfig()
     db_path = opc_home / "projects" / project / "tasks.db"
     store = OPCStore(db_path)
-    await store.initialize()
+    await store.initialize(
+        run_startup_maintenance=run_startup_maintenance
+    )
     try:
         llm_router = None
         resource_bridge = None

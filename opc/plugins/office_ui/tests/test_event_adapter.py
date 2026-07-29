@@ -22,9 +22,6 @@ from typing import Any
 from opc.plugins.office_ui.event_adapter import (
     EventAdapter,
     AgentAnimState,
-    TOOL_MAP,
-    COLLAB_SKIP_TOOLS,
-    COLLAB_DIRECT_MAP,
 )
 
 

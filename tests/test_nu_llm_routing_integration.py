@@ -184,6 +184,12 @@ class NULlmRoutingBridgeTests(unittest.TestCase):
         with patch.dict(os.environ, {"NU_TEST_ROUTER_KEY": "secret"}, clear=True):
             self.assertEqual(bridge.targets(task_type=None, has_tools=True), ())
 
+    def test_tool_calls_exclude_text_only_subscription_target_when_enabled(self) -> None:
+        bridge = _subscription_bridge()
+        bridge.config.apply_to_tool_calls = True
+
+        self.assertEqual(bridge.targets(task_type=None, has_tools=True), ())
+
     def test_subscription_cli_target_is_authenticated_and_executable(self) -> None:
         bridge = _subscription_bridge()
 

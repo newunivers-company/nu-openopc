@@ -38,7 +38,6 @@ from opc.database.store import OPCStore
 from opc.layer2_organization.collaboration_service import (
     CollaborationContext,
     CollaborationService,
-    CommunicationDeliveryError,
 )
 from opc.layer2_organization.collaboration_policy import (
     effective_contact_roles,
@@ -101,6 +100,7 @@ class CommunicationManager:
         self.org_engine = org_engine
         self.meeting_turn_runner = meeting_turn_runner
         self._message_queues: dict[str, asyncio.Queue[AgentMessage]] = {}
+        self._rehydrated_message_recipients: set[tuple[str, str]] = set()
         self._meetings: dict[str, MeetingRoom] = {}
         self.task_adjustment_suggester: Any | None = None
         # Kanban-push hook: runtime state transitions (work item moves,
@@ -137,10 +137,14 @@ class CommunicationManager:
         count = 0
         for msg in messages:
             for recipient in msg.to_agents:
+                recipient_key = (msg.msg_id, recipient)
+                if recipient_key in self._rehydrated_message_recipients:
+                    continue
                 self._get_queue(recipient).put_nowait(msg)
+                self._rehydrated_message_recipients.add(recipient_key)
                 count += 1
         if count:
-            logger.info("Rehydrated {} pending messages into agent queues", count)
+            logger.info("Rehydrated {} unread message deliveries into agent queues", count)
         return count
 
     def _validate_recipients(self, sender: str, recipients: list[str], task: Task | None = None) -> None:
@@ -694,6 +698,28 @@ class CommunicationManager:
             return MessageStatus.READ
         return MessageStatus.DELIVERED
 
+    @staticmethod
+    def _timestamp_from_message_header(header: Any) -> datetime:
+        raw = str(getattr(header, "sent_at", "") or "").strip()
+        if raw:
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                pass
+        try:
+            return datetime.fromtimestamp(header.path.stat().st_mtime)
+        except OSError:
+            return datetime.now()
+
+    def _message_projection_unchanged(
+        self,
+        existing: AgentMessage | None,
+        projected: AgentMessage,
+    ) -> bool:
+        if existing is None:
+            return False
+        return self._serialize_message(existing) == self._serialize_message(projected)
+
     async def _project_comms_messages(
         self,
         layout: Any,
@@ -732,26 +758,71 @@ class CommunicationManager:
             transport_kind = self._coerce_transport_kind(frontmatter.get("transport_kind"))
             semantic_type = self._coerce_semantic_type(frontmatter.get("semantic_type") or frontmatter.get("kind"))
             comms_state = self._coerce_comms_state(frontmatter.get("comms_state"))
+            existing = await self.store.get_message(full_header.message_id)
+            stored_metadata = dict(existing.metadata or {}) if existing is not None else {}
+            stored_status = existing.status if existing is not None else None
+            projected_status = self._status_from_message_bucket(header.path)
+            if stored_status in {
+                MessageStatus.REPLIED,
+                MessageStatus.TIMED_OUT,
+                MessageStatus.CANCELLED,
+            }:
+                projected_status = stored_status
+            original_task_id = str(
+                frontmatter.get("task_id", "")
+                or refs.get("task_id", "")
+                or getattr(existing, "task_id", "")
+                or ""
+            ).strip()
+            original_context_ref = str(
+                frontmatter.get("context_ref", "")
+                or getattr(existing, "context_ref", "")
+                or original_task_id
+                or ""
+            ).strip()
+            reply_needed = bool(
+                frontmatter.get(
+                    "reply_needed",
+                    getattr(existing, "reply_needed", full_header.blocking),
+                )
+            )
             projection = AgentMessage(
                 msg_id=full_header.message_id,
-                msg_type=str(frontmatter.get("msg_type", "") or "question"),
+                msg_type=str(
+                    frontmatter.get("msg_type", "")
+                    or getattr(existing, "msg_type", "")
+                    or ("question" if full_header.blocking else "inform")
+                ),
                 from_agent=full_header.from_role,
                 to_agents=[full_header.to_role],
                 subject=full_header.subject,
                 body=body,
-                context_ref=task.id if task else None,
+                context_ref=original_context_ref or None,
                 urgency=MessageUrgency.BLOCKING if full_header.blocking else MessageUrgency.NORMAL,
-                reply_needed=bool(full_header.blocking),
+                reply_needed=reply_needed,
                 requires_ack=bool(frontmatter.get("requires_ack", False)),
+                timeout_action=str(
+                    frontmatter.get("timeout_action", "")
+                    or getattr(existing, "timeout_action", "")
+                    or ""
+                )
+                or None,
                 reply_to_msg_id=full_header.reply_to,
-                task_id=(task.id if task else str(frontmatter.get("task_id", "") or refs.get("task_id", "") or "").strip()) or None,
-                status=self._status_from_message_bucket(header.path),
+                task_id=original_task_id or None,
+                status=projected_status,
+                timestamp=self._timestamp_from_message_header(full_header),
+                processed_at=(
+                    existing.processed_at
+                    if existing is not None
+                    else None
+                ),
                 transport_kind=transport_kind,
                 semantic_type=semantic_type,
                 comms_state=comms_state,
                 correlation_id=str(frontmatter.get("correlation_id", "") or full_header.message_id).strip(),
                 refs=refs,
                 metadata={
+                    **stored_metadata,
                     "projection_source": "file_comms",
                     "comms_path": str(header.path),
                     "transport_kind": transport_kind.value,
@@ -768,8 +839,12 @@ class CommunicationManager:
                     },
                 },
             )
-            projection = self._canonicalize_message(projection, task=task)
-            await self.store.save_message(projection)
+            # The representative task belongs to the *reader*. It is only a
+            # mailbox-scope/filter anchor and must never rewrite the source
+            # task/session identity carried by the message itself.
+            projection = self._canonicalize_message(projection, task=None)
+            if not self._message_projection_unchanged(existing, projection):
+                await self.store.save_message(projection)
             serialized.append(classify_worker_message(self._serialize_message(projection)))
             if mark_read and header.path.parent.name == "new":
                 consumed_paths.append(header.path)
@@ -781,6 +856,13 @@ class CommunicationManager:
                 path = str(metadata.get("comms_path", "") or "").strip()
                 if path and Path(path).name in moved_names:
                     item["status"] = MessageStatus.READ.value
+                    msg_id = str(item.get("msg_id", "") or "").strip()
+                    if msg_id:
+                        await self.store.update_message_status(
+                            msg_id,
+                            MessageStatus.READ,
+                            processed_at=datetime.now(),
+                        )
         return list(reversed(serialized))
 
     async def _project_comms_meetings(self, layout: Any, *, task: Task | None) -> None:

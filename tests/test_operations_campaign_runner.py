@@ -219,6 +219,21 @@ class CampaignRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["executed"], 2)
         self.assertEqual(len(set(executor.calls)), 5)
 
+    async def test_pair_budget_never_starts_the_next_comparison_pair(self) -> None:
+        executor = _FakeExecutor()
+        report = await self._campaign(executor).run_campaign(
+            self.plan,
+            budget=CampaignBudget(max_pairs=1),
+        )
+
+        self.assertEqual(report["executed"], 2)
+        self.assertEqual(report["pairs_selected"], 1)
+        self.assertEqual(report["pairs_completed"], 1)
+        self.assertEqual(report["partial_pair_ids"], [])
+        self.assertEqual(report["halted_reason"], "max_pairs budget reached")
+        executed = report["results"]
+        self.assertEqual(executed[0]["slot_id"].rsplit("/", 2)[0], executed[1]["slot_id"].rsplit("/", 2)[0])
+
     async def test_max_failures_halts_campaign(self) -> None:
         campaign = self._campaign(
             _FakeExecutor(error=RuntimeError("transport down"))
@@ -227,6 +242,8 @@ class CampaignRunnerTests(unittest.IsolatedAsyncioTestCase):
             self.plan, budget=CampaignBudget(max_failures=1)
         )
         self.assertEqual(report["failed"], 2)
+        self.assertEqual(report["pairs_completed"], 1)
+        self.assertEqual(report["partial_pair_ids"], [])
         self.assertEqual(report["halted_reason"], "max_failures budget exceeded")
 
     async def test_measured_cost_ceiling_halts_campaign(self) -> None:
@@ -699,6 +716,8 @@ class WallClockBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_wall_clock_budget_rejected(self) -> None:
         with self.assertRaises(ValueError):
             CampaignBudget(max_wall_clock_seconds=0).validate()
+        with self.assertRaises(ValueError):
+            CampaignBudget(max_pairs=0).validate()
 
 
 class JudgmentCommandContractTests(unittest.TestCase):

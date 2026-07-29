@@ -37,6 +37,8 @@ from opc.core.config import (
     get_opc_home,
     get_project_workplace,
 )
+from opc.core.checkpoint_storage import compact_work_item_checkpoint_metadata
+from opc.core.event_persistence import should_persist_generic_event
 from opc.core.events import EventBus
 from opc.core.models import (
     ApprovalAction,
@@ -54,7 +56,6 @@ from opc.core.models import (
     Phase,
     ReorgChangeSet,
     ReorgProposal,
-    ReorgProposalStatus,
     RiskLevel,
     RouterDecision,
     SeatState,
@@ -108,6 +109,7 @@ from opc.layer2_organization.company_runtime_identity import (
     load_company_runtime_identity_index,
 )
 from opc.layer2_organization.metadata_ownership import (
+    append_work_item_progress,
     build_work_item_owner_execution_copy,
 )
 from opc.layer2_organization.phase import (
@@ -125,7 +127,6 @@ from opc.layer2_organization.prompt_contract import (
 )
 from opc.layer2_organization.org_work_item_planner import (
     CompanyWorkItemRuntimePlan,
-    WorkItemProjectionSpec,
 )
 from opc.layer2_organization.reactivation_sweeper import CommsReactivationSweeper
 from opc.layer2_organization.session_scoping import (
@@ -189,11 +190,11 @@ from opc.layer3_agent.external_session_identity import (
     select_best_external_resume_session,
 )
 from opc.layer4_tools.registry import ToolRegistry, ToolDefinition
-from opc.layer4_tools.shell import create_shell_tool, create_shell_tools
+from opc.layer4_tools.shell import create_shell_tools
 from opc.layer4_tools.file_ops import create_file_tools
 from opc.layer4_tools.user_input import create_user_input_tool
 from opc.layer4_tools.web_search import create_web_tools
-from opc.layer4_tools.browser import browser_snapshot, create_browser_tools
+from opc.layer4_tools.browser import create_browser_tools
 from opc.layer4_tools.git_ops import create_git_tools
 from opc.layer4_tools.python_exec import create_python_tool
 from opc.layer4_tools.collaboration import (
@@ -209,7 +210,14 @@ from opc.integrations.nu_resource_gen import NUResourceGenBridge
 from opc.operations.service import OperationsService
 from opc.layer2_organization.heartbeat import HeartbeatScheduler
 from opc.mcp_client import MCPManager
+from opc.layer5_memory.capability_manager import CapabilityManager
+from opc.layer5_memory.history_compactor import HistoryCompactor
 from opc.layer5_memory.memory_manager import MemoryManager
+from opc.layer5_memory.preference import PreferenceManager
+from opc.layer5_memory.secretary_policy import SecretaryPolicyManager
+from opc.layer5_memory.skill_library import SkillLibrary
+from opc.layer6_observability.cost_tracker import CostTracker
+from opc.layer6_observability.opc_logger import setup_logging
 
 
 _REVIEW_WAITING_STATUSES = {
@@ -233,13 +241,6 @@ _COMPANY_RUNTIME_CONTROL_METADATA_KEYS = (
     "company_runtime_suspend_checkpoint_type",
     "company_runtime_suspended_at",
 )
-from opc.layer5_memory.history_compactor import HistoryCompactor
-from opc.layer5_memory.preference import PreferenceManager
-from opc.layer5_memory.secretary_policy import SecretaryPolicyManager
-from opc.layer5_memory.capability_manager import CapabilityManager
-from opc.layer5_memory.skill_library import SkillLibrary
-from opc.layer6_observability.cost_tracker import CostTracker
-from opc.layer6_observability.opc_logger import setup_logging
 
 AGENT_SELECTION_PROMPT = """\
 You are the task execution-agent selector for an AI orchestration system.
@@ -929,8 +930,11 @@ class OPCEngine:
             self.tool_registry.register(tool)
 
     async def _persist_event(self, event: OPCEvent) -> None:
-        if self.store:
-            await self.store.save_event(event)
+        if not self.store:
+            return
+        if not should_persist_generic_event(event.event_type, event.payload):
+            return
+        await self.store.save_event(event)
 
     async def _forward_runtime_event(self, event: OPCEvent) -> None:
         if self.on_runtime_event is None:
@@ -2784,7 +2788,6 @@ class OPCEngine:
         attachment_context = self._build_attachment_context(attachment_refs)
         workspace_contract = await self._resolve_workspace_contract(original_message, session_id)
         target_output_dir = str(workspace_contract.get("output_root") or "").strip() or None
-        force_native_execution = decision.preferred_agent == "native"
         await self._sync_origin_task_execution_context(
             origin_task_id,
             session_id=session_id,
@@ -3650,7 +3653,6 @@ class OPCEngine:
         assert self.store and self.memory
         role_id = str(work_item.role_id or "").strip()
         seat_id = str((work_item.metadata or {}).get("seat_id", "") or "").strip()
-        team_id = str((work_item.metadata or {}).get("team_id", "") or work_item.cell_id or "").strip()
         work_kind = str((work_item.metadata or {}).get("work_kind", "") or work_item.kind or "execute").strip().lower() or "execute"
         work_item_projection_id = projection_id_for_work_item(work_item)
         legacy_turn_type = turn_type_for_work_item(work_item, fallback="")
@@ -3948,7 +3950,6 @@ class OPCEngine:
         """Build tasks and run them based on mode selection (project / company)."""
         assert self.task_scheduler and self.store
 
-        project_id = self.project_id or "default"
         primary_session_id = session_id or str(uuid.uuid4())
         await self._ensure_primary_session(primary_session_id, original_message)
         workspace_contract = await self._resolve_workspace_contract(original_message, primary_session_id)
@@ -4321,6 +4322,34 @@ class OPCEngine:
                 continue
             task.metadata[key] = payload.get(key)
             task.context_snapshot[key] = payload.get(key)
+
+    async def _append_owned_progress(
+        self,
+        task: Task,
+        message: str,
+        *,
+        limit: int = 20,
+        dedupe: bool = False,
+    ) -> None:
+        """Append progress without recreating a WorkItem-owned Task mirror."""
+
+        task.metadata = dict(task.metadata or {})
+        work_item_id = linked_work_item_id_for_task(task)
+        if work_item_id and self.store:
+            task.metadata.pop("progress_log", None)
+            await append_work_item_progress(
+                self.store,
+                work_item_id,
+                message,
+                limit=limit,
+                dedupe=dedupe,
+            )
+            return
+        progress = list(task.metadata.get("progress_log", []) or [])
+        note = str(message or "").strip()
+        if note and (not dedupe or note not in progress):
+            progress.append(note)
+        task.metadata["progress_log"] = progress[-max(1, int(limit or 20)) :]
 
     def _generated_runtime_session_id(self, task: Task, checkpoint_type: str = "") -> str:
         seed = "::".join([
@@ -5448,6 +5477,9 @@ class OPCEngine:
                 except Exception:
                     work_item = None
                 if work_item is not None:
+                    checkpoint_metadata = compact_work_item_checkpoint_metadata(
+                        getattr(work_item, "metadata", {})
+                    )
                     work_item_snapshot = {
                         "work_item_id": work_item_id,
                         "phase": (
@@ -5462,7 +5494,12 @@ class OPCEngine:
                         "claimed_by_seat_id": str(getattr(work_item, "claimed_by_seat_id", "") or ""),
                         "projection_id": str(getattr(work_item, "projection_id", "") or ""),
                         "kind": str(getattr(work_item, "kind", "") or ""),
-                        "metadata": dict(getattr(work_item, "metadata", {}) or {}),
+                        # The WorkItem row remains the authoritative metadata
+                        # source. Suspend checkpoints only need immutable
+                        # execution identity; copying verification output,
+                        # playbooks, and dossiers here produced 40+ MB rows
+                        # and duplicated the snapshot inside task_snapshots.
+                        "metadata": checkpoint_metadata,
                     }
                     execution_identity["seat_id"] = (
                         work_item_snapshot["seat_id"]
@@ -5526,7 +5563,7 @@ class OPCEngine:
             })
 
         payload: dict[str, Any] = {
-            "version": 2,
+            "version": 3,
             "stop_intent_id": stop_intent_id or "",
             "stop_state": "suspended",
             "suspend_started_at": now,
@@ -6537,9 +6574,7 @@ class OPCEngine:
                 task.metadata = dict(task.metadata or {})
                 for key in _COMPANY_RUNTIME_CONTROL_METADATA_KEYS:
                     task.metadata.pop(key, None)
-                progress = list(task.metadata.get("progress_log", []) or [])
-                progress.append(diagnostic)
-                task.metadata["progress_log"] = progress[-20:]
+                await self._append_owned_progress(task, diagnostic)
                 task.metadata["resume_unavailable_external_agent"] = pinned_agent
                 existing_result = dict(task.result or {})
                 existing_result["content"] = diagnostic
@@ -6699,9 +6734,10 @@ class OPCEngine:
                 task.metadata.pop(key, None)
             task.metadata["company_runtime_resume_checkpoint_id"] = str(payload.get("checkpoint_id", "") or "")
             task.metadata["company_runtime_resume_requested_at"] = datetime.now().isoformat()
-            progress = list(task.metadata.get("progress_log", []) or [])
-            progress.append("Resumed from company runtime suspend checkpoint.")
-            task.metadata["progress_log"] = progress[-20:]
+            await self._append_owned_progress(
+                task,
+                "Resumed from company runtime suspend checkpoint.",
+            )
 
             if work_item_id:
                 if work_item is None:
@@ -7231,10 +7267,7 @@ class OPCEngine:
         existing_result["artifacts"] = artifacts
         task.result = existing_result
         task.metadata = dict(task.metadata)
-        progress_log = list(task.metadata.get("progress_log", []))
-        if not progress_log or progress_log[-1] != reason:
-            progress_log.append(reason)
-        task.metadata["progress_log"] = progress_log[-20:]
+        await self._append_owned_progress(task, reason, dedupe=True)
         task.metadata["interrupted_recovery"] = {
             "detected_at": datetime.now().isoformat(),
             "previous_status": getattr(previous_status, "value", str(previous_status)),
@@ -7949,11 +7982,8 @@ class OPCEngine:
         target.execution_lock = False
         target.execution_locked_at = None
         target.metadata = dict(target.metadata or {})
-        progress = list(target.metadata.get("progress_log", []) or [])
         message = "Recovered stale company session routing state after startup; work-item runtime state was left intact."
-        if not progress or progress[-1] != message:
-            progress.append(message)
-        target.metadata["progress_log"] = progress[-20:]
+        await self._append_owned_progress(target, message, dedupe=True)
         await self.store.save_task(target)
         logger.info(
             "Recovered stale company session anchor {} for project {} without marking it failed",
@@ -8255,9 +8285,10 @@ class OPCEngine:
         task.metadata.pop("delegated_children_pending", None)
         task.metadata.pop("delegation_wait_for_work_item_ids", None)
         task.metadata = reset_manager_dispatch_turn_metadata(task.metadata)
-        progress = list(task.metadata.get("progress_log", []) or [])
-        progress.append(f"Company follow-up routed to final decider ({resume_source}): {reply}")
-        task.metadata["progress_log"] = progress[-20:]
+        await self._append_owned_progress(
+            task,
+            f"Company follow-up routed to final decider ({resume_source}): {reply}",
+        )
         await self.store.save_task(task)
 
         work_item_id = linked_work_item_id_for_task(task)
@@ -8481,8 +8512,11 @@ class OPCEngine:
             task.metadata.update(copy.deepcopy(dict(metadata_updates)))
         if checkpoint_id:
             task.metadata["human_review_checkpoint_id"] = checkpoint_id
-        progress = list(task.metadata.get("progress_log", []) or [])
-        progress.append(f"Delivery human review closed: {resolution}.")
+        await self._append_owned_progress(
+            task,
+            f"Delivery human review closed: {resolution}.",
+            limit=50,
+        )
         close_updates = {
             "requires_user_feedback": False,
             "human_review_closed": True,
@@ -8492,7 +8526,6 @@ class OPCEngine:
             "feedback_resolved": True,
             "feedback_resolution": resolution,
             "feedback_closed_at": now,
-            "progress_log": progress[-50:],
         }
         task.metadata.update(close_updates)
         task.status = TaskStatus.DONE
@@ -11329,9 +11362,10 @@ class OPCEngine:
         task.status = TaskStatus.PENDING
         task.result = None
         task.metadata = dict(task.metadata)
-        progress = list(task.metadata.get("progress_log", []))
-        progress.append(f"Resumed with user input: {user_reply.strip()}")
-        task.metadata["progress_log"] = progress
+        await self._append_owned_progress(
+            task,
+            f"Resumed with user input: {user_reply.strip()}",
+        )
         await self.store.save_task(task)
 
         # Sibling ids persisted by older checkpoints can be work-item ids rather
@@ -12222,9 +12256,10 @@ class OPCEngine:
                     ]))
                 else:
                     waiting_task.metadata["gate_harness_status"] = "passed"
-            progress = list(waiting_task.metadata.get("progress_log", []))
-            progress.append(f"Human confirmed via resume message: {reply_text}")
-            waiting_task.metadata["progress_log"] = progress
+            await self._append_owned_progress(
+                waiting_task,
+                f"Human confirmed via resume message: {reply_text}",
+            )
             await self.store.save_task(waiting_task)
             # Emit a visible progress signal so the UI shows the resume actually
             # took effect, instead of leaving the user staring at the same gate
@@ -12247,9 +12282,10 @@ class OPCEngine:
                     "There is a pending runtime waiting for confirmation. "
                     "Reply with `approve` / `continue` to proceed, or `deny` / `stop` to halt it."
                 )
-            progress = list(waiting_task.metadata.get("progress_log", []))
-            progress.append(f"Human review feedback via resume message: {rejection_feedback}")
-            waiting_task.metadata["progress_log"] = progress
+            await self._append_owned_progress(
+                waiting_task,
+                f"Human review feedback via resume message: {rejection_feedback}",
+            )
             if gate_source == "gate_harness":
                 waiting_task.metadata = dict(waiting_task.metadata)
                 waiting_task.metadata.pop("gate_harness_pending_decision", None)
@@ -13653,9 +13689,10 @@ class OPCEngine:
                     waiting_task.status = TaskStatus.PENDING
                     waiting_task.result = None
                 waiting_task.metadata = dict(waiting_task.metadata)
-                progress = list(waiting_task.metadata.get("progress_log", []))
-                progress.append(f"Approved runtime replan `{proposal_id}` and refreshed the runtime.")
-                waiting_task.metadata["progress_log"] = progress
+                await self._append_owned_progress(
+                    waiting_task,
+                    f"Approved runtime replan `{proposal_id}` and refreshed the runtime.",
+                )
                 await self.store.save_task(waiting_task)
             if parent_session_id and self.company_executor:
                 profile = self.org_engine.get_company_profile() if self.org_engine else base_plan.profile
@@ -13698,9 +13735,10 @@ class OPCEngine:
                     "artifacts": {},
                 }
                 waiting_task.metadata = dict(waiting_task.metadata)
-                progress = list(waiting_task.metadata.get("progress_log", []))
-                progress.append(f"Denied runtime replan `{proposal_id}`.")
-                waiting_task.metadata["progress_log"] = progress
+                await self._append_owned_progress(
+                    waiting_task,
+                    f"Denied runtime replan `{proposal_id}`.",
+                )
                 await self._fail_task_via_phase(
                     waiting_task,
                     reason=f"reorg_denied:{proposal_id}",
@@ -13722,8 +13760,6 @@ class OPCEngine:
             return "Unsupported reorg command. Use `reorg propose|approve|deny|apply|show|adjust`."
         action = match.group(1).lower()
         remainder = match.group(2).strip()
-        project_id = self.project_id or "default"
-
         if action == "show":
             proposal = await self.store.get_reorg_proposal(remainder)
             if not proposal:

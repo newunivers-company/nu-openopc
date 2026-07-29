@@ -308,6 +308,11 @@ class NULlmRoutingBridge:
             )
             if target is None:
                 continue
+            # Enabling routed tool turns does not make text-only transports
+            # tool-capable. Only candidates that preserve the OpenAI tool-call
+            # envelope can enter an executable tool turn.
+            if has_tools and not target.supports_tools:
+                continue
             targets.append(target)
             if len(targets) >= int(self.config.max_candidates):
                 break

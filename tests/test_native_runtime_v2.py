@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import unittest
 from pathlib import Path
@@ -55,6 +57,37 @@ class _StubLLM:
         else:
             yield type("Evt", (), {"event_type": "assistant_delta", "payload": {"text": "done"}, "model": "stub"})()
         yield type("Evt", (), {"event_type": "message_stop", "payload": {"finish_reason": "stop"}, "model": "stub"})()
+
+
+class _ContextAwareStreamLLM(_StubLLM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.context: ContextVar[dict[str, object]] = ContextVar(
+            "native_runtime_test_context",
+            default={},
+        )
+
+    @contextmanager
+    def operations_call_context(self, context):
+        token = self.context.set(dict(context))
+        try:
+            yield
+        finally:
+            self.context.reset(token)
+
+    async def chat_stream(self, messages, tools=None):
+        _ = (messages, tools)
+        assert self.context.get().get("runtime_session_id") == "runtime-1"
+        yield type(
+            "Evt",
+            (),
+            {"event_type": "message_start", "payload": {}, "model": "stub"},
+        )()
+        yield type(
+            "Evt",
+            (),
+            {"event_type": "message_stop", "payload": {}, "model": "stub"},
+        )()
 
 
 class _StubStore:
@@ -150,6 +183,26 @@ class NativeRuntimeV2Tests(unittest.IsolatedAsyncioTestCase):
             event_bus=_StubEventBus(),
             config=OPCConfig(),
         )
+
+    async def test_governed_stream_can_close_from_another_async_context(self) -> None:
+        runtime = NativeRuntimeV2(
+            llm=_ContextAwareStreamLLM(),
+            tool_registry=ToolRegistry(),
+            event_bus=_StubEventBus(),
+            config=OPCConfig(),
+        )
+        stream = runtime._governed_chat_stream(
+            [{"role": "user", "content": "hello"}],
+            tools=[],
+            task=None,
+            runtime_session_id="runtime-1",
+            conversation_turn_id="turn-1",
+            iteration=0,
+        )
+
+        first = await anext(stream)
+        self.assertEqual(first.event_type, "message_start")
+        await asyncio.create_task(stream.aclose())
 
     async def test_task_mode_does_not_require_automatic_verification(self) -> None:
         runtime = self._runtime_for_unit_checks()

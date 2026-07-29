@@ -4,6 +4,8 @@ Initializes OPCEngine, opens ui_state.db for agent/chat persistence,
 sets up the event adapter pipeline, and serves static files + WebSocket.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import asyncio

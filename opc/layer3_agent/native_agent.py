@@ -22,7 +22,7 @@ from opc.core.worker_envelope import classify_worker_message
 from opc.llm.provider import LLMProvider
 from opc.layer1_perception.context_assembler import ContextAssembler
 from opc.layer3_agent.company_runtime_contract import (
-    _COMPANY_REVIEW_WORK_ITEM_GUIDELINES,
+    _COMPANY_REVIEW_WORK_ITEM_GUIDELINES as _COMPANY_REVIEW_WORK_ITEM_GUIDELINES,
     build_company_work_item_contract,
 )
 from opc.layer3_agent.runtime_v2 import NativeRuntimeV2
@@ -343,7 +343,6 @@ class NativeAgent:
             payload={"role_id": self.role.role_id, "status": "running", "task_id": task.id},
         ))
 
-        is_task_mode = self._is_task_mode_task(task)
         allowed = self._resolve_allowed_tools(task)
         inbox_interrupt_provider = None
         if (

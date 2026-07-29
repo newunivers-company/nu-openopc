@@ -29,7 +29,6 @@ from opc.core.models import (
     CostEvent,
     DelegationCell,
     DelegationEvent,
-    DelegationRoleSession,
     DelegationRun,
     DelegationWorkItem,
     ExecutionCheckpoint,
@@ -68,6 +67,7 @@ from opc.core.models import (
     normalize_role_runtime_status,
 )
 from opc.core.models import Phase
+from opc.core.checkpoint_storage import compact_execution_checkpoint_payload
 from opc.core.transcript_visibility import (
     normalize_transcript_detail_level,
     transcript_visibility_sql,
@@ -77,10 +77,8 @@ from opc.layer2_organization.phase import (
     IN_PROGRESS_PHASES,
     IN_REVIEW_PHASES,
     InvalidPhaseTransition,
-    TODO_PHASES,
     coerce_phase,
     is_stale_claim_releasable,
-    is_terminal,
     kanban_column,
     on_phase_transition,
     validate_transition,
@@ -92,7 +90,6 @@ from opc.layer2_organization.work_item_identity import (
     projection_id_for_work_item,
 )
 from opc.layer2_organization.work_item_links import (
-    linked_work_item_id_for_task,
     set_linked_work_item_id,
 )
 from opc.layer2_organization.work_item_runtime import (
@@ -4616,7 +4613,9 @@ class OPCStore:
             """SELECT work_item_id, phase, metadata
                FROM delegation_work_items
                WHERE claimed_by_role_runtime_session_id != ''
-                  OR claimed_by_seat_id != ''"""
+                  OR claimed_by_seat_id != ''
+                  OR COALESCE(json_extract(metadata, '$.claimed_by_role_session_id'), '') != ''
+                  OR COALESCE(json_extract(metadata, '$.claimed_task_id'), '') != ''"""
         ) as cursor:
             rows = await cursor.fetchall()
         cleared = 0
@@ -7260,8 +7259,29 @@ class OPCStore:
 
     # --- Execution checkpoints ---
 
+    async def _execution_checkpoint_storage_row(
+        self,
+        checkpoint_id: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        assert self._db
+        async with self._db.execute(
+            """SELECT checkpoint_type, payload
+               FROM execution_checkpoints
+               WHERE checkpoint_id = ?""",
+            (checkpoint_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return str(row[0] or ""), _json_loads(row[1], {})
+
     async def save_execution_checkpoint(self, checkpoint: ExecutionCheckpoint) -> None:
         assert self._db
+        checkpoint.payload = compact_execution_checkpoint_payload(
+            checkpoint.checkpoint_type,
+            checkpoint.payload,
+            status=checkpoint.status,
+        )
         await self._db.execute(
             """INSERT OR REPLACE INTO execution_checkpoints
             (checkpoint_id, project_id, session_id, checkpoint_type, status, task_id, payload, created_at, updated_at)
@@ -7307,6 +7327,11 @@ class OPCStore:
         project_id = str(checkpoint.project_id or "default").strip() or "default"
         session_id = str(checkpoint.session_id or "").strip()
         checkpoint_type = str(checkpoint.checkpoint_type or "").strip()
+        checkpoint.payload = compact_execution_checkpoint_payload(
+            checkpoint_type,
+            checkpoint.payload,
+            status=checkpoint.status,
+        )
         if not session_id:
             raise ValueError("active execution checkpoint requires session_id")
         if checkpoint_type not in clean_types:
@@ -7341,6 +7366,11 @@ class OPCStore:
                     payload = _json_loads(duplicate.get("payload"), {})
                     payload["superseded_at"] = now
                     payload["superseded_by_checkpoint_id"] = winner_id
+                    payload = compact_execution_checkpoint_payload(
+                        str(duplicate.get("checkpoint_type", "") or ""),
+                        payload,
+                        status="superseded",
+                    )
                     await self._db.execute(
                         """UPDATE execution_checkpoints
                         SET status = 'superseded', payload = ?, updated_at = ?
@@ -7451,6 +7481,13 @@ class OPCStore:
         ]
         if not checkpoint_id or not expected:
             return False
+        storage_row = await self._execution_checkpoint_storage_row(checkpoint_id)
+        checkpoint_type = storage_row[0] if storage_row is not None else ""
+        compacted_payload = compact_execution_checkpoint_payload(
+            checkpoint_type,
+            payload,
+            status=status,
+        )
         placeholders = ", ".join("?" for _ in expected)
         cursor = await self._db.execute(
             f"""UPDATE execution_checkpoints
@@ -7458,7 +7495,7 @@ class OPCStore:
             WHERE checkpoint_id = ? AND status IN ({placeholders})""",
             (
                 str(status or "").strip(),
-                _json_dumps(dict(payload or {})),
+                _json_dumps(compacted_payload),
                 (updated_at or datetime.now()).isoformat(),
                 checkpoint_id,
                 *expected,
@@ -7498,6 +7535,15 @@ class OPCStore:
         now = updated_at or datetime.now()
         try:
             await self._db.execute("BEGIN IMMEDIATE")
+            storage_row = await self._execution_checkpoint_storage_row(
+                checkpoint_id
+            )
+            checkpoint_type = storage_row[0] if storage_row is not None else ""
+            compacted_payload = compact_execution_checkpoint_payload(
+                checkpoint_type,
+                payload,
+                status=status,
+            )
             cursor = await self._db.execute(
                 """UPDATE execution_checkpoints
                 SET status = ?, payload = ?, updated_at = ?
@@ -7507,7 +7553,7 @@ class OPCStore:
                   AND status = ?""",
                 (
                     status,
-                    _json_dumps(dict(payload or {})),
+                    _json_dumps(compacted_payload),
                     now.isoformat(),
                     checkpoint_id,
                     project_id,
@@ -7600,9 +7646,24 @@ class OPCStore:
 
     async def resolve_execution_checkpoint(self, checkpoint_id: str, status: str = "resolved") -> None:
         assert self._db
+        storage_row = await self._execution_checkpoint_storage_row(checkpoint_id)
+        if storage_row is None:
+            return
+        payload = compact_execution_checkpoint_payload(
+            storage_row[0],
+            storage_row[1],
+            status=status,
+        )
         await self._db.execute(
-            "UPDATE execution_checkpoints SET status = ?, updated_at = ? WHERE checkpoint_id = ?",
-            (status, datetime.now().isoformat(), checkpoint_id),
+            """UPDATE execution_checkpoints
+               SET status = ?, payload = ?, updated_at = ?
+               WHERE checkpoint_id = ?""",
+            (
+                status,
+                _json_dumps(payload),
+                datetime.now().isoformat(),
+                checkpoint_id,
+            ),
         )
         await self._db.commit()
 

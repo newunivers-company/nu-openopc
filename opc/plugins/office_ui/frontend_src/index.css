@@ -383,6 +383,25 @@ html, body, #root {
   position: relative;
 }
 
+.page-nav-btn--operator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border)) !important;
+}
+
+.page-nav-btn--operator small {
+  padding: 1px 4px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  opacity: 0.72;
+}
+
 .nav-unread-badge {
   position: absolute;
   top: -2px;
@@ -1771,6 +1790,8 @@ html, body, #root {
   .topbar-right { display: none; }
   .page-nav { width: 100%; max-width: 370px; }
   .page-nav-btn { flex: 1; padding: 6px 4px; font-size: 10px; }
+  .page-nav-btn--operator { justify-content: center; }
+  .page-nav-btn--operator small { display: none; }
   .mission-control-page { padding: 20px 14px 36px; }
   .mc-header { display: grid; gap: 18px; }
   .mc-header-actions { justify-items: start; }

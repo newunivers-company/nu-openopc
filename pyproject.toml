@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 nu = [
-    "nu-llm-routing-lib==0.2.2; python_version >= '3.11'",
+    "nu-llm-routing-lib==0.4.0; python_version >= '3.11'",
     "nu-resource-gen-lib==0.2.2; python_version >= '3.11'",
 ]
 dev = [

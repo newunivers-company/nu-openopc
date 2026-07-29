@@ -21,6 +21,7 @@ from opc.core.company_tools import (
 )
 from opc.core.config import DEFAULT_EXTERNAL_AGENT_STARTUP_TIMEOUT_SECONDS, get_opc_home
 from opc.core.events import EventBus
+from opc.core.evidence import compact_verification_evidence
 from opc.core.models import ApprovalAction, ExternalSession, Task, TaskResult, TaskStatus, VerificationEvidence
 from opc.core.worker_envelope import classify_worker_message
 from opc.database.store import OPCStore
@@ -1842,7 +1843,7 @@ class ExternalAgentBroker:
             evidence.status = "provided"
         if evidence.status != "provided":
             return {}
-        return evidence.__dict__
+        return compact_verification_evidence(evidence.__dict__)
 
     @staticmethod
     def _normalize_verification_line(line: str) -> str:
@@ -1896,13 +1897,15 @@ class ExternalAgentBroker:
             checks.append(dict(current))
         if not checks or not verdict:
             return {}
-        return VerificationEvidence(
-            status="provided",
-            verdict=verdict,
-            summary="\n".join(summary_lines).strip(),
-            checks=checks[:24],
-            raw_output=raw,
-        ).__dict__
+        return compact_verification_evidence(
+            VerificationEvidence(
+                status="provided",
+                verdict=verdict,
+                summary="\n".join(summary_lines).strip(),
+                checks=checks[:24],
+                raw_output=raw,
+            ).__dict__
+        )
 
     def _infer_verification_evidence_from_command_events(self, output: str) -> dict[str, Any]:
         raw = str(output or "").strip()
@@ -1955,13 +1958,15 @@ class ExternalAgentBroker:
             return {}
         verdict = "fail" if failure_seen else "pass"
         summary = "Derived verification evidence from external command execution events."
-        return VerificationEvidence(
-            status="provided",
-            verdict=verdict,
-            summary=summary,
-            checks=checks[:24],
-            raw_output=raw,
-        ).__dict__
+        return compact_verification_evidence(
+            VerificationEvidence(
+                status="provided",
+                verdict=verdict,
+                summary=summary,
+                checks=checks[:24],
+                raw_output=raw,
+            ).__dict__
+        )
 
     def _fallback_work_item_runtime_plan(self, task: Task) -> dict[str, Any]:
         work_item_assignment = dict(task.metadata.get("work_item_assignment", {}) or {})

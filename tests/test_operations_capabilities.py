@@ -66,6 +66,20 @@ class _FakeLLMRouterWithUnusableCloud(_FakeLLMRouter):
         )
 
 
+class _FakeTextOnlyTarget(_FakeTarget):
+    def safe_dict(self):
+        return {
+            **super().safe_dict(),
+            "transport_kind": "subscription_cli",
+            "supports_tools": False,
+        }
+
+
+class _FakeLLMRouterWithTextOnlyTarget(_FakeLLMRouter):
+    def targets(self, **_kwargs):
+        return (_FakeTextOnlyTarget("claude_opus", "opus", ""),)
+
+
 class _FakeResourceBridge:
     enabled = True
 
@@ -232,6 +246,31 @@ class UnifiedCapabilityBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(allowed.provider, "ollama-local")
         self.assertEqual(allowed.estimated_cost_usd, 0.0)
         self.assertEqual(self.llm_router.calls[-1]["gpu_free_vram_mib"], 0)
+
+    async def test_tool_route_never_selects_text_only_transport(self) -> None:
+        broker = UnifiedCapabilityBroker(
+            self.repository,
+            llm_router=_FakeLLMRouterWithTextOnlyTarget(),
+            default_llm_model="openai/fallback",
+            default_llm_credential_ready=True,
+            default_llm_transport_ready=True,
+        )
+
+        route = await broker.plan(
+            CapabilityRequest(
+                capability_kind=CapabilityKind.LLM,
+                task_type="agentic_tools",
+                required_capabilities=["tool_use"],
+                sandboxed_tools=True,
+            )
+        )
+
+        self.assertTrue(route.allowed)
+        self.assertEqual(route.provider, "openopc_config")
+        self.assertEqual(
+            route.diagnostics["tool_incompatible_targets"],
+            ["claude_opus"],
+        )
 
     async def test_default_llm_selection_prefers_usable_local_target(self) -> None:
         route = await self.broker.plan(
@@ -599,6 +638,45 @@ class UnifiedCapabilityBrokerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("was not planned", error)
+
+    def test_execution_contract_accepts_native_resolution_of_planned_model_alias(self) -> None:
+        route = CapabilityRoute(
+            request_id="native-alias",
+            capability_kind=CapabilityKind.LLM,
+            provider="claude_opus",
+            candidate_id="opus",
+            model="opus",
+            mode="live",
+            allowed=True,
+            diagnostics={
+                "targets": [
+                    {
+                        "provider": "claude_opus",
+                        "transport_kind": "subscription_cli",
+                    }
+                ]
+            },
+        )
+
+        accepted = _validate_actual_route(
+            route,
+            {
+                "provider": "claude_opus",
+                "candidate_id": "opus",
+                "model": "claude-opus-5",
+            },
+        )
+        rejected = _validate_actual_route(
+            route,
+            {
+                "provider": "claude_opus",
+                "candidate_id": "opus",
+                "model": "claude-sonnet-5",
+            },
+        )
+
+        self.assertEqual(accepted, "")
+        self.assertIn("was not planned", rejected)
 
     def test_invalid_reported_cost_is_unknown_not_zero(self) -> None:
         self.assertIsNone(_result_cost({"cost": -1, "cost_unit": "usd"}))

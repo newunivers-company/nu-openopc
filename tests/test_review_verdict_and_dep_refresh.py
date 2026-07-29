@@ -23,7 +23,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 from opc.core.models import (
     DelegationWorkItem,
@@ -763,7 +762,7 @@ class RefreshDependentsForRunTests(unittest.IsolatedAsyncioTestCase):
         doomed = compute_doomed_work_item_ids(by_id)
         self.assertNotIn("alive-triage", doomed)
 
-        changed = await refresh_dependents_for_run(self.store, run_id="run-alive")
+        await refresh_dependents_for_run(self.store, run_id="run-alive")
         after_upper = await self.store.get_delegation_work_item("alive-upper")
         # The upper parent keeps waiting for the live triage card — no
         # premature settlement over it.

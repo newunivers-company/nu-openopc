@@ -177,5 +177,15 @@ assert.match(
 // component assertions were replaced by MissionControlPage.render.test.tsx).
 assert.match(src, /activePage === 'operations'/, 'App must expose the Mission Control page')
 assert.match(src, /30_000/, 'Mission Control must refresh periodically while visible')
+assert.match(
+  src,
+  /page-nav-btn--operator[\s\S]*Operations[\s\S]*<small>Advanced<\/small>/,
+  'advanced operator tooling must be distinguished from the primary workspace navigation',
+)
+assert.match(
+  src,
+  /setActivePage\('org'\)[\s\S]*setActivePage\('operations'\)/,
+  'primary organization navigation must precede advanced operations',
+)
 
 console.log('App.test.tsx: OK (org handlers + snapshot boundary + runtime displayTool/draft contract)')

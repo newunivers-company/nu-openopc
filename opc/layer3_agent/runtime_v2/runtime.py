@@ -14,11 +14,12 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 from loguru import logger
 
 from opc.core.config import OPCConfig
+from opc.core.evidence import compact_verification_evidence
+from opc.core.event_persistence import should_persist_runtime_event
 from opc.core.events import EventBus
 from opc.core.models import OPCEvent, PermissionResolution, Task, TaskResult, TaskStatus, VerificationEvidence
 from opc.layer2_organization.collaboration_policy import ownership_guard_violation
 from opc.layer2_organization.work_item_identity import (
-    projection_id_for_task,
     result_delivery_identity_payload_for_task,
     turn_type_for_task,
     work_item_identity_payload_for_task,
@@ -44,7 +45,6 @@ from opc.llm.provider import LLMProvider
 
 ApprovalCallback = Callable[[ToolDefinition, dict[str, Any], Optional[Task], Any], Awaitable[tuple[bool, Any]]]
 PrefetchProvider = Callable[[Task, str, list[dict[str, Any]]], Awaitable[dict[str, str]]]
-
 
 @dataclass
 class _RuntimePrefetchHandle:
@@ -137,7 +137,6 @@ class NativeRuntimeV2:
             guardian=self.config.autonomy.permissions_v2.guardian,
         )
         todo_state: list[dict[str, Any]] = self._restore_task_ledger(task)
-        current_runtime_messages: list[dict[str, Any]] = []
         runtime_status: dict[str, Any] = {
             "current_tool": None,
             "queue_depth": 0,
@@ -677,7 +676,6 @@ class NativeRuntimeV2:
                     for item in tool_calls
                 ]
             messages.append(assistant_message)
-            current_runtime_messages = [dict(message) for message in messages]
             await self._persist_assistant_turn(
                 task,
                 assistant_text,
@@ -1002,9 +1000,27 @@ class NativeRuntimeV2:
             iteration=iteration,
             has_tools=bool(tools),
         )
-        with context_factory(context):
-            async for event in self.llm.chat_stream(messages, tools=tools):
+        # Never keep a ContextVar token live across a yield. Python may
+        # finalize an async generator in another task/context, where resetting
+        # the old token raises ``ValueError``. Advance and close the provider
+        # stream inside short-lived context scopes instead.
+        stream = self.llm.chat_stream(messages, tools=tools)
+        iterator = stream.__aiter__()
+        exhausted = False
+        try:
+            while True:
+                with context_factory(context):
+                    try:
+                        event = await anext(iterator)
+                    except StopAsyncIteration:
+                        exhausted = True
+                        return
                 yield event
+        finally:
+            closer = getattr(iterator, "aclose", None)
+            if not exhausted and callable(closer):
+                with context_factory(context):
+                    await closer()
 
     async def _governed_chat(
         self,
@@ -3235,7 +3251,11 @@ class NativeRuntimeV2:
             **payload,
         }
         store = getattr(self.memory_manager, "store", None)
-        if store and hasattr(store, "save_runtime_event"):
+        if (
+            should_persist_runtime_event(event_type)
+            and store
+            and hasattr(store, "save_runtime_event")
+        ):
             await store.save_runtime_event(runtime_session_id, event_type, event_payload)
         if self.event_bus:
             await self.event_bus.publish(OPCEvent(event_type="runtime_event", payload=event_payload))
@@ -3563,13 +3583,16 @@ class NativeRuntimeV2:
             and verification_evidence.status == "provided"
             and verification_evidence.verdict == "pass"
         )
+        verification_evidence_payload = compact_verification_evidence(
+            verification_evidence.__dict__
+        )
         verification_state = {
             "completed": True,
             "passed": passed,
             "profile": policy.verifier_profile,
             "verdict": verdict_text,
             "spawn_success": spawn_success,
-            "evidence": verification_evidence.__dict__,
+            "evidence": verification_evidence_payload,
             "repair_attempted": repair_attempted,
         }
         runtime_notes["verification"] = verification_state
@@ -3615,7 +3638,7 @@ class NativeRuntimeV2:
             artifacts={
                 "runtime_session_id": runtime_session_id,
                 "verification": verification_state,
-                "verification_evidence": verification_evidence.__dict__,
+                "verification_evidence": verification_evidence_payload,
                 "permission_requests": list(runtime_notes.get("permission_details", []) or []),
                 "task_ledger": list(todo_state or []),
                 "prefetch_hits": list(runtime_notes.get("prefetch_hits", []) or []),

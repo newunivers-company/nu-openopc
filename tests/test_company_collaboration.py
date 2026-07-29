@@ -26,13 +26,11 @@ from opc.core.models import (
     ExecutionMode,
     MeetingStatus,
     MessageStatus,
-    MessageUrgency,
     Phase,
     RecruitmentCandidateRecommendation,
     RecruitmentPlan,
     RecruitmentProposal,
     RoleMemoryRecord,
-    RouterDecision,
     SeatState,
     Task,
     TaskResult,
@@ -2345,6 +2343,289 @@ class CompanyCollaborationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("role_task_map", prompt)
         self.assertIn("executor", prompt["role_task_map"])
 
+    async def test_pre_delivery_rework_reopens_approved_work_and_releases_claims(self) -> None:
+        with _workspace_tempdir() as tmpdir:
+            store = OPCStore(Path(tmpdir) / "tasks.db")
+            await store.initialize()
+            try:
+                execution_task = Task(
+                    id="execution-task-approved",
+                    title="Execution",
+                    status=TaskStatus.DONE,
+                    project_id="proj1",
+                    assigned_to="executor",
+                    result={"content": "Initial implementation.", "artifacts": {}},
+                    metadata={
+                        "execution_mode": "company_mode",
+                        "runtime_model": "multi_team_org",
+                        "work_item_projection_id": "engineering_execution",
+                        "work_item_turn_type": "execute",
+                        "progress_log": [],
+                    },
+                )
+                set_linked_work_item_id(execution_task, "execution-wi-approved")
+                delivery_task = Task(
+                    id="delivery-task-rework",
+                    title="CEO Final Delivery",
+                    status=TaskStatus.AWAITING_HUMAN,
+                    project_id="proj1",
+                    assigned_to="reviewer",
+                    result={"content": "Candidate delivery.", "artifacts": {}},
+                    dependencies=["engineering_execution"],
+                    metadata={
+                        "execution_mode": "company_mode",
+                        "runtime_model": "multi_team_org",
+                        "company_profile": "corporate",
+                        "work_item_projection_id": "ceo_delivery",
+                        "work_item_turn_type": "deliver",
+                        "authoritative_output": True,
+                        "user_visible": True,
+                        "requires_user_feedback": True,
+                        "feedback_scope": "final",
+                        "progress_log": [],
+                    },
+                )
+                set_linked_work_item_id(delivery_task, "delivery-wi-rework")
+                await store.save_task(execution_task)
+                await store.save_task(delivery_task)
+                await store.save_delegation_work_item(
+                    DelegationWorkItem(
+                        work_item_id="execution-wi-approved",
+                        run_id="run-pre-delivery-rework",
+                        role_id="executor",
+                        title="Execution",
+                        kind="execute",
+                        projection_id="engineering_execution",
+                        phase=Phase.APPROVED,
+                        deliverable_summary="stale output",
+                        metadata={
+                            "task_id": execution_task.id,
+                            "work_item_projection_id": "engineering_execution",
+                            "work_item_turn_type": "execute",
+                            "completion_report": "stale output",
+                            "work_item_summary": "stale output",
+                        },
+                    )
+                )
+                await store.save_delegation_work_item(
+                    DelegationWorkItem(
+                        work_item_id="delivery-wi-rework",
+                        run_id="run-pre-delivery-rework",
+                        role_id="reviewer",
+                        title="CEO Final Delivery",
+                        kind="deliver",
+                        projection_id="ceo_delivery",
+                        phase=Phase.AWAITING_HUMAN,
+                        claimed_by_role_runtime_session_id="role-runtime::ceo",
+                        claimed_by_seat_id="seat::ceo",
+                        metadata={
+                            "task_id": delivery_task.id,
+                            "work_item_projection_id": "ceo_delivery",
+                            "work_item_turn_type": "deliver",
+                            "authoritative_output": True,
+                            "user_visible": True,
+                            "requires_user_feedback": True,
+                            "feedback_scope": "final",
+                            "dependency_work_item_ids": ["execution-wi-approved"],
+                        },
+                    )
+                )
+                await store.link_work_item_runtime_task("execution-wi-approved", execution_task.id)
+                await store.link_work_item_runtime_task("delivery-wi-rework", delivery_task.id)
+
+                checkpoints: list[dict[str, object]] = []
+
+                async def checkpoint_callback(data: dict[str, object]) -> None:
+                    checkpoints.append(dict(data))
+
+                executor = CompanyWorkItemExecutor(
+                    org_engine=DummyOrgEngine(),
+                    communication=SimpleNamespace(),
+                    approval_engine=SimpleNamespace(),
+                    memory=None,
+                    store=store,
+                    execute_task=AsyncMock(),
+                    save_task=store.save_task,
+                    checkpoint_callback=checkpoint_callback,
+                )
+                executor._ceo_pre_delivery_assessment = AsyncMock(
+                    return_value={
+                        "deliverable": False,
+                        "summary": "Engineering needs one more pass.",
+                        "rework_targets": [
+                            {
+                                "target_projection_id": "engineering_execution",
+                                "feedback": "Resolve the remaining issue.",
+                            }
+                        ],
+                    }
+                )
+                executor._active_plan = CompanyWorkItemRuntimePlan(
+                    profile="corporate",
+                    projections=[
+                        WorkItemProjectionSpec(
+                            projection_id="engineering_execution",
+                            turn_type="execute",
+                            title="Execution",
+                            summary="",
+                            role_id="executor",
+                        ),
+                        WorkItemProjectionSpec(
+                            projection_id="ceo_delivery",
+                            turn_type="deliver",
+                            title="CEO Final Delivery",
+                            summary="",
+                            role_id="reviewer",
+                            dependency_projection_ids=["engineering_execution"],
+                        ),
+                    ],
+                )
+                executor._active_tasks = [execution_task, delivery_task]
+
+                await executor._finalize_completed_work_item(delivery_task)
+
+                refreshed_execution = await store.get_task(execution_task.id)
+                refreshed_delivery = await store.get_task(delivery_task.id)
+                execution_item = await store.get_delegation_work_item("execution-wi-approved")
+                delivery_item = await store.get_delegation_work_item("delivery-wi-rework")
+                assert refreshed_execution is not None
+                assert refreshed_delivery is not None
+                assert execution_item is not None
+                assert delivery_item is not None
+                self.assertEqual(refreshed_execution.status, TaskStatus.PENDING)
+                self.assertEqual(refreshed_delivery.status, TaskStatus.PENDING)
+                self.assertEqual(execution_item.phase, Phase.READY_FOR_REWORK)
+                self.assertEqual(delivery_item.phase, Phase.READY)
+                self.assertEqual(execution_item.claimed_by_role_runtime_session_id, "")
+                self.assertEqual(delivery_item.claimed_by_role_runtime_session_id, "")
+                self.assertNotIn("completion_report", execution_item.metadata)
+                self.assertNotIn("work_item_summary", execution_item.metadata)
+                self.assertEqual(checkpoints, [])
+            finally:
+                await store.close()
+
+    async def test_pre_delivery_rework_with_no_reopenable_target_awaits_human(self) -> None:
+        with _workspace_tempdir() as tmpdir:
+            store = OPCStore(Path(tmpdir) / "tasks.db")
+            await store.initialize()
+            try:
+                failed_task = Task(
+                    id="failed-execution-task",
+                    title="Failed execution",
+                    status=TaskStatus.FAILED,
+                    project_id="proj1",
+                    assigned_to="executor",
+                    metadata={
+                        "execution_mode": "company_mode",
+                        "runtime_model": "multi_team_org",
+                        "work_item_projection_id": "failed_execution",
+                        "work_item_turn_type": "execute",
+                        "progress_log": [],
+                    },
+                )
+                set_linked_work_item_id(failed_task, "failed-execution-wi")
+                delivery_task = Task(
+                    id="delivery-task-unroutable",
+                    title="CEO Final Delivery",
+                    status=TaskStatus.AWAITING_HUMAN,
+                    project_id="proj1",
+                    assigned_to="reviewer",
+                    result={"content": "Candidate delivery.", "artifacts": {}},
+                    metadata={
+                        "execution_mode": "company_mode",
+                        "runtime_model": "multi_team_org",
+                        "company_profile": "corporate",
+                        "work_item_projection_id": "ceo_delivery_unroutable",
+                        "work_item_turn_type": "deliver",
+                        "authoritative_output": True,
+                        "user_visible": True,
+                        "requires_user_feedback": True,
+                        "feedback_scope": "final",
+                        "progress_log": [],
+                    },
+                )
+                set_linked_work_item_id(delivery_task, "delivery-wi-unroutable")
+                await store.save_task(failed_task)
+                await store.save_task(delivery_task)
+                await store.save_delegation_work_item(
+                    DelegationWorkItem(
+                        work_item_id="failed-execution-wi",
+                        run_id="run-pre-delivery-unroutable",
+                        role_id="executor",
+                        title="Failed execution",
+                        kind="execute",
+                        projection_id="failed_execution",
+                        phase=Phase.FAILED,
+                        metadata={"task_id": failed_task.id},
+                    )
+                )
+                await store.save_delegation_work_item(
+                    DelegationWorkItem(
+                        work_item_id="delivery-wi-unroutable",
+                        run_id="run-pre-delivery-unroutable",
+                        role_id="reviewer",
+                        title="CEO Final Delivery",
+                        kind="deliver",
+                        projection_id="ceo_delivery_unroutable",
+                        phase=Phase.AWAITING_HUMAN,
+                        metadata={
+                            "task_id": delivery_task.id,
+                            "work_item_projection_id": "ceo_delivery_unroutable",
+                            "work_item_turn_type": "deliver",
+                            "authoritative_output": True,
+                            "user_visible": True,
+                            "requires_user_feedback": True,
+                            "feedback_scope": "final",
+                        },
+                    )
+                )
+                await store.link_work_item_runtime_task("failed-execution-wi", failed_task.id)
+                await store.link_work_item_runtime_task("delivery-wi-unroutable", delivery_task.id)
+
+                checkpoints: list[dict[str, object]] = []
+
+                async def checkpoint_callback(data: dict[str, object]) -> None:
+                    checkpoints.append(dict(data))
+
+                executor = CompanyWorkItemExecutor(
+                    org_engine=DummyOrgEngine(),
+                    communication=SimpleNamespace(),
+                    approval_engine=SimpleNamespace(),
+                    memory=None,
+                    store=store,
+                    execute_task=AsyncMock(),
+                    save_task=store.save_task,
+                    checkpoint_callback=checkpoint_callback,
+                )
+                executor._ceo_pre_delivery_assessment = AsyncMock(
+                    return_value={
+                        "deliverable": False,
+                        "summary": "The failed work item cannot be reopened automatically.",
+                        "rework_targets": [
+                            {
+                                "target_projection_id": "failed_execution",
+                                "feedback": "Investigate manually.",
+                            }
+                        ],
+                    }
+                )
+                executor._active_plan = CompanyWorkItemRuntimePlan(profile="corporate", projections=[])
+                executor._active_tasks = [failed_task, delivery_task]
+
+                await executor._finalize_completed_work_item(delivery_task)
+
+                refreshed_delivery = await store.get_task(delivery_task.id)
+                delivery_item = await store.get_delegation_work_item("delivery-wi-unroutable")
+                assert refreshed_delivery is not None
+                assert delivery_item is not None
+                self.assertEqual(refreshed_delivery.status, TaskStatus.AWAITING_HUMAN)
+                self.assertEqual(delivery_item.phase, Phase.AWAITING_HUMAN)
+                self.assertTrue(refreshed_delivery.metadata["pre_delivery_rework_unroutable"])
+                self.assertEqual(len(checkpoints), 1)
+                self.assertEqual(checkpoints[0]["checkpoint_type"], "company_delivery_feedback")
+            finally:
+                await store.close()
+
     def test_summarize_results_prefers_authoritative_final_delivery(self) -> None:
         executor = CompanyWorkItemExecutor(
             org_engine=DummyOrgEngine(),
@@ -2497,7 +2778,7 @@ class CompanyCollaborationTests(unittest.IsolatedAsyncioTestCase):
             project_id="proj1",
         )
 
-        selected = await engine._assign_task_execution_agent(task)
+        await engine._assign_task_execution_agent(task)
 
         # No LLM call attempted; selection comes from rule-based fallback.
         self.assertEqual(len(engine.llm.calls), 0)

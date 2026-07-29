@@ -18,7 +18,6 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 

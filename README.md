@@ -4,11 +4,11 @@
   <b>English</b> | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-🏗️ **Self-Built** — Fully automated to recruit role-specific AI employees and build the org.
+🏗️ **Self-Built** — Proposes the roles, employees, and skills a goal needs, with explicit operator review.
 
-⚙️ **Self-Run** — Fully automated to assign tasks, drive handoffs, and keep moving toward your goal.
+⚙️ **Self-Run** — Assigns work, drives handoffs, recovers durable runs, and escalates only when human authority is required.
 
-🌱 **Self-Grown** — Learns from every task, builds organizational memory, always delivers smarter.
+🌱 **Self-Grown** — Turns reviewed outcomes into governed organizational memory and measures whether later runs improve.
 
 <p align="center">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white">
@@ -43,52 +43,29 @@
 
 ## When to Use OpenOPC
 
-**OpenOPC** covers nine core verticals — from AI development and software engineering to finance, sales, media, e-commerce, and education. Whatever the industry, OpenOPC assembles the right team and delivers end-to-end.
+OpenOPC's current product and outcome-validation focus is deliberately narrow:
+**software delivery, content production, and evidence-backed research**. These
+workloads exercise the same core company loop while remaining concrete enough
+to benchmark against Task Mode.
 
-<table>
-  <tr>
-    <td width="33%" valign="top">
-      <br><strong>🤖 AI Tech & Research</strong>
-      <br><sub>Model training & evaluation, Agent development, LLM apps & AI infrastructure</sub>
-    </td>
-    <td width="33%" valign="top">
-      <br><strong>💻 Software Development</strong>
-      <br><sub>Android apps, SaaS MVPs, websites, mini programs & game development</sub>
-    </td>
-    <td width="33%" valign="top">
-      <br><strong>📈 Financial Investment</strong>
-      <br><sub>Investment memos, market maps, due diligence & IC decision packages</sub>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>🚀 Sales Growth</strong>
-      <br><sub>Outbound sales, deal strategy, proposals & channel expansion</sub>
-    </td>
-    <td valign="top">
-      <strong>🎬 Content & Media</strong>
-      <br><sub>Video production, short-form content, scripts, storyboards & multi-platform cuts</sub>
-    </td>
-    <td valign="top">
-      <strong>🤝 Industry Assistants</strong>
-      <br><sub>Copilots for support, real estate, legal intake, HR onboarding, retail</sub>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>🧾 Accounting & Finance</strong>
-      <br><sub>Bookkeeping, financial reporting, tax compliance, budgeting & risk review</sub>
-    </td>
-    <td valign="top">
-      <strong>🛍️ Brand & E-commerce</strong>
-      <br><sub>Brand planning, product selection, store ops, user growth & retention</sub>
-    </td>
-    <td valign="top">
-      <strong>🎓 Education & Training</strong>
-      <br><sub>Curriculum design, knowledge base, learner management & content production</sub>
-    </td>
-  </tr>
-</table>
+| Current focus | Good fits |
+|---|---|
+| **💻 Software delivery** | Features, fixes, migrations, tests, release evidence, operational recovery |
+| **🎬 Content production** | Scripts, storyboards, campaign packages, release-ready multi-format assets |
+| **🔎 Research** | Cited briefs, market maps, technical comparisons, investment and decision packages |
+
+Use **Task Mode** for direct, bounded work where one execution agent is enough.
+Use **Company Mode** when the work materially benefits from decomposition,
+parallel roles, independent review, and a final integrator.
+
+Finance, sales, e-commerce, education, and other organization packages remain
+extension targets. OpenOPC does not treat an available template or demo as
+evidence that Company Mode is production-ready for that domain. Product claims
+remain gated by the checked-in Task-versus-Company benchmark and promotion
+dossier.
+
+See [Product Vision](docs/product-vision.md) for the current product contract,
+north-star outcomes, and explicit non-goals.
 
 ## Demos
 
@@ -120,7 +97,11 @@
 
 ## How OpenOPC Works
 
-OpenOPC assembles a AI company around complex, real-world tasks — through three tightly coupled mechanisms: **Self-Built** staffs the organisation, **Self-Run** executes the work, and **Self-Grown** learns from the outcome.
+OpenOPC assembles an AI company around complex, real-world tasks through three
+tightly coupled mechanisms: **Self-Built** staffs the organisation,
+**Self-Run** executes the work, and **Self-Grown** learns from reviewed
+outcomes. Autonomy is bounded by evidence, budget, permissions, and human
+authority rather than measured by how rarely the system asks for help.
 
 <p align="center">
   <img src="docs/assets/video.png" alt="An OpenOPC company: roles, reporting lines, and the employee staffed into each role" width="100%">
@@ -131,7 +112,7 @@ OpenOPC assembles a AI company around complex, real-world tasks — through thre
 Before any work begins, the right people must be in place. Given a goal, OpenOPC:
 
 - 🌿 Drafts the org chart — deriving the roles and reporting structure the task demands.
-- 🎯 Fills each role — a recruiter agent chooses between reusing an existing employee (shaped by prior projects) and onboarding a fresh hire from the talent pool.
+- 🎯 Proposes staffing — a recruiter compares existing employees, fresh hires, experience, reliability, and cost before an operator confirms the run.
 - 🧩 Assembles role skills — a deterministic installed-catalog planner recommends content-addressed skills and reports uncovered capabilities before an operator assigns them.
 
 💡 Experienced employees carry accumulated context; fresh hires offer a clean slate when a role demands it.
@@ -162,7 +143,10 @@ A manager decomposes items, assigns, and reviews results — accepting, reworkin
 
 **🌱 3. Self-Grown — Learning from the Run**
 
-Execution generates raw experience; Self-Grown turns it into lasting improvement, guided by two principles.
+Execution generates raw experience; reviewed execution turns it into lasting
+improvement. Candidate memories, skills, and policies must pass offline,
+shadow, and canary evidence before promotion, and their effect on later runs
+can be measured against matched controls.
 
 🏅 Attributing outcomes to the right roles. Crediting the whole company teaches nothing. Instead, OpenOPC:
 
@@ -293,7 +277,11 @@ uv run opc chat -p demo --mode task \
   "Run nu_llm_route_diagnostics and list the available NU resource candidates"
 ```
 
-The `nu` extra is pinned to the tested stable facades (`nu-llm-routing-lib==0.2.1` and `nu-resource-gen-lib==0.2.1`). OpenOPC consumes `ResourceGenerator.evaluate_prompt()` rather than an internal module path, and CI verifies the same contract from built wheels.
+The exact `nu` dependency versions and immutable source revisions are declared
+once in `config/nu_release_manifest.json`; CI verifies that `pyproject.toml`,
+the sibling source checkouts, installed packages, and stable wheel facades
+match that release identity. OpenOPC consumes
+`ResourceGenerator.evaluate_prompt()` rather than an internal module path.
 
 NU model routing is fail-open: explicit `llm.routing` entries remain
 authoritative, tool-calling turns stay on the configured OpenOPC model by
@@ -858,6 +846,8 @@ OpenOPC is moving quickly. The areas below reflect active development priorities
 
 | Area | Planned direction |
 |---|---|
+| **Outcome proof** | The paired software/content/research campaign and fail-closed promotion dossier are implemented. Next: complete trusted Task-versus-Company pairs and publish quality, success, duration, cost, and intervention deltas. |
+| **Self-Grown effectiveness** | Exact promoted assets are pinned into run manifests and can now be compared with matched controls. Next: accumulate representative treated/control cohorts and feed accepted lift reports into normal learning promotion evidence. |
 | **Role-level skills** | Role assignment, deterministic goal-to-skill recommendations, content digests, and Native/external runtime mounting are implemented. Next: searchable marketplace selection, signed packages, and richer capability metadata. |
 | **Secretary settings** | The secretary now consumes deterministic Mission Control and read-only skill-assembly context without auto-executing operator actions. Next: cross-project comparison and guided YAML setup. |
 | **Company-mode channels** | Every configured channel supports model-free `/opc status`, `/opc skills`, and two-phase governed actions under its sender allowlist. Next: role-aware notifications and richer structured approval cards. |

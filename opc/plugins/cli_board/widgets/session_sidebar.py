@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.widgets import Static
 
-from ..state.models import BoardTaskView, SessionSummaryView
+from ..state.models import BoardTaskView
 from ..state.store import BoardStateStore
 from .render_utils import badge, humanize_age, priority_style, status_style, truncate_text
 

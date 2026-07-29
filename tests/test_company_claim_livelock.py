@@ -11,6 +11,8 @@ next tick filters the card out and the dispatcher quiesces.
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 from opc.core.models import (
@@ -20,6 +22,7 @@ from opc.core.models import (
     Task,
     TaskStatus,
 )
+from opc.database.store import OPCStore
 from opc.layer2_organization.company_runtime import CompanyRuntime
 from opc.layer2_organization.work_item_links import set_linked_work_item_id
 
@@ -125,6 +128,43 @@ class ClaimLivelockRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.runtime._claim_loss_counts.get("wi-livelock"), 2
         )
+
+    async def test_startup_sweep_repairs_metadata_only_claim_on_ready_item(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "tasks.db"
+            first = OPCStore(db_path)
+            await first.initialize()
+            await first.save_delegation_work_item(
+                DelegationWorkItem(
+                    work_item_id="ready-with-metadata-claim",
+                    run_id="run-1",
+                    title="Synthesis",
+                    role_id="coo",
+                    phase=Phase.READY,
+                    metadata={
+                        "claimed_by_role_session_id": "dead-role-session",
+                        "claimed_task_id": "dead-task",
+                    },
+                )
+            )
+            await first.close()
+
+            reopened = OPCStore(db_path)
+            await reopened.initialize()
+            try:
+                repaired = await reopened.get_delegation_work_item(
+                    "ready-with-metadata-claim"
+                )
+                self.assertIsNotNone(repaired)
+                self.assertEqual(
+                    repaired.metadata.get("claimed_by_role_session_id"),
+                    "",
+                )
+                self.assertEqual(repaired.metadata.get("claimed_task_id"), "")
+            finally:
+                await reopened.close()
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ Runs through the OPC engine with real LLM calls.
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import time
 import traceback
@@ -80,7 +79,7 @@ def print_result(idx: int, desc: str, success: bool, response: str, elapsed: flo
     preview = response[:300].replace("\n", " ")
     print(f"  Response: {preview}...")
     if _logs:
-        tool_calls = [l for l in _logs if l.startswith("[Tool:")]
+        tool_calls = [line for line in _logs if line.startswith("[Tool:")]
         if tool_calls:
             print(f"  Tool calls ({len(tool_calls)}):")
             for tc in tool_calls[:5]:
@@ -307,7 +306,7 @@ async def main():
     print(f"\n{'#'*60}")
     print(f"# FINAL SUMMARY: {total_passed}/{total_tests} passed")
     if total_passed == total_tests:
-        print(f"# ALL TESTS PASSED!")
+        print("# ALL TESTS PASSED!")
     else:
         print(f"# {total_tests - total_passed} FAILURES — need to fix and re-run")
     print(f"{'#'*60}")

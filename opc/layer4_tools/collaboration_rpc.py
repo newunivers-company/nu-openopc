@@ -566,5 +566,10 @@ def collaboration_rpc_transport_parent(
         parent = Path(candidate_root).resolve() / ".opc-comms" / "rpc"
         parent.mkdir(parents=True, exist_ok=True)
         return parent
-    except OSError:
-        return None
+    except OSError as exc:
+        # A supplied workspace is a security and correctness boundary. Falling
+        # back to /tmp here silently recreates the EROFS failure inside
+        # workspace-write sandboxes, so fail setup visibly instead.
+        raise RuntimeError(
+            f"Cannot prepare collaboration RPC transport under workspace {candidate_root}: {exc}"
+        ) from exc

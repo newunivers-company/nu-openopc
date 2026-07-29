@@ -933,8 +933,6 @@ class TestWSHandlerSessionSend(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_send_passes_session_id_to_engine(self) -> None:
         """_process_session_message should pass session_id to engine.process_message."""
-        ws = MagicMock()
-
         # Instead of mocking _track, let _process_session_message run directly
         await self.handler._process_session_message(
             self.task_id, "test content", session_id=self.session_id

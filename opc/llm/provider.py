@@ -1,5 +1,7 @@
 """LLM provider layer built on LiteLLM for unified model access."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import asyncio
@@ -479,6 +481,21 @@ class LLMProvider:
             reason = "model is not mapped in litellm"
         except Exception as e:
             reason = str(e)
+        # Subscription CLIs can legitimately return a provider-local alias
+        # (for example ``opus``) when their JSON payload omits the canonical
+        # model revision. LiteLLM cannot resolve those aliases, and there is no
+        # authoritative context-window value in the route contract. Keep the
+        # conservative denominator without presenting this expected transport
+        # limitation as a user configuration error.
+        if target.transport_kind == "subscription_cli":
+            logger.debug(
+                "Using conservative context window for subscription alias model={} "
+                "from provider={}: {}",
+                resolved_model,
+                target.provider,
+                reason,
+            )
+            return _CONTEXT_WINDOW_FALLBACK
         if resolved_model not in _context_window_fallback_warned:
             _context_window_fallback_warned.add(resolved_model)
             logger.warning(

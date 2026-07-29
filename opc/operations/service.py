@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Mapping, Sequence
 
 from opc.core.config import OperationsConfig
+from opc.database.store import OPCStore
 from opc.operations.capabilities import UnifiedCapabilityBroker
 from opc.operations.canary import ProviderCanaryScheduler, ProviderCanaryService
 from opc.operations.durable import DurableRunKernel
 from opc.operations.evaluation import OutcomeEvaluator
 from opc.operations.learning import LearningAssetManager
 from opc.operations.learning_activation import LearningActivationResolver
+from opc.operations.learning_effectiveness import LearningEffectivenessService
 from opc.operations.mission_control import MissionControlService
 from opc.operations.models import CapabilityKind, CapabilityRequest
 from opc.operations.outbox import OutboxDispatcher, event_bus_handler
@@ -50,6 +52,7 @@ class OperationsService:
         self.durable = DurableRunKernel(self.repository, self.config.durable)
         self.learning = LearningAssetManager(self.repository, self.config.learning)
         self.learning_activations = LearningActivationResolver(self.repository)
+        self.learning_effectiveness = LearningEffectivenessService(self.repository)
         self.operator_actions = OperatorActionService(
             self.repository,
             self.durable,
@@ -117,6 +120,7 @@ class OperationsService:
             provider_config=self.config.providers,
         )
         self.outbox_dispatcher: OutboxDispatcher | None = None
+        self._outbox_store: OPCStore | None = None
 
     def rebind(self, store: Any) -> None:
         self.repository.rebind(store)
@@ -281,8 +285,21 @@ class OperationsService:
         if not self.config.durable.outbox_dispatcher_enabled:
             return
         if self.outbox_dispatcher is None:
+            # The application store is shared with task/company writes. An
+            # outbox ``BEGIN IMMEDIATE`` on that same sqlite3 connection can
+            # collide with an unrelated implicit transaction and fail with
+            # "cannot start a transaction within a transaction". Give the
+            # background owner a dedicated WAL connection instead.
+            outbox_store = OPCStore(Path(self.repository.store.db_path))
+            await outbox_store.initialize(run_startup_maintenance=False)
+            outbox_repository = OperationsRepository(outbox_store)
+            outbox_kernel = DurableRunKernel(
+                outbox_repository,
+                self.config.durable,
+            )
+            self._outbox_store = outbox_store
             self.outbox_dispatcher = OutboxDispatcher(
-                self.durable,
+                outbox_kernel,
                 event_bus_handler(event_bus),
                 batch_size=self.config.durable.outbox_dispatch_batch_size,
                 poll_seconds=self.config.durable.outbox_dispatch_poll_seconds,
@@ -290,8 +307,14 @@ class OperationsService:
         await self.outbox_dispatcher.start()
 
     async def stop_outbox_dispatcher(self) -> None:
-        if self.outbox_dispatcher is not None:
-            await self.outbox_dispatcher.stop()
+        dispatcher = self.outbox_dispatcher
+        self.outbox_dispatcher = None
+        if dispatcher is not None:
+            await dispatcher.stop()
+        outbox_store = self._outbox_store
+        self._outbox_store = None
+        if outbox_store is not None:
+            await outbox_store.close()
 
     async def start_provider_monitoring(self) -> None:
         start_shadow = getattr(self.llm_router, "start_background_shadow", None)

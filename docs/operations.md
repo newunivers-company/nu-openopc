@@ -178,6 +178,38 @@ uv run opc ops backup restore backups/demo.db --destination restored/tasks.db
 
 Every backup has a sidecar manifest containing the schema version, SHA-256 digest, byte size, and operations-table row counts. Inspect and restore verify the digest and SQLite integrity before accepting the file. Stop OpenOPC before replacing a live project database; `--overwrite` is an explicit operator decision.
 
+For an offline project database that has accumulated legacy duplicate runtime
+events or oversized evidence/checkpoints, inspect it with the storage
+maintenance command. Dry-run is the default:
+
+```bash
+uv run python -m opc.operations.storage_maintenance \
+  .opc/projects/<project>/tasks.db
+```
+
+Apply mode requires an explicit backup path in the same directory and refuses
+to run while another process has the database open:
+
+```bash
+uv run python -m opc.operations.storage_maintenance \
+  .opc/projects/<project>/tasks.db \
+  --apply \
+  --backup .opc/projects/<project>/tasks.db.backup-YYYYMMDD
+```
+
+The command checkpoints any offline WAL, validates SQLite before and after the
+rewrite, removes only policy-recognized duplicate/transient events, compacts
+bounded evidence and legacy Company checkpoints, runs `VACUUM`, and installs
+the rewritten database atomically. Inbox-event comparison ignores projection-
+only timestamps, processed times, and communication paths at any payload depth;
+message identity, status, counts, and other semantic state remain part of the
+fingerprint. Active runtime/staffing checkpoints retain the data needed to
+resume, while terminal checkpoints retain bounded audit counts instead of
+resume tokens or staffing pools. Delivery checkpoints retain review summaries
+and authoritative Task/WorkItem references rather than copied member-session
+state. Re-run dry-run afterward; all eligible and compaction counts should be
+zero.
+
 A stale worker cannot write with a fencing token after another owner takes over its expired lease. Dead-letter replay is intentionally not automatic: repair the consumer and replay with an explicit reason. Replay resets the delivery attempt budget and appends an `outbox.replayed` audit event in the same transaction.
 
 When the OpenOPC engine is running, the configured outbox dispatcher claims pending deliveries in bounded batches, publishes them to the internal event bus, and acknowledges them with the claim's fencing token. Handler failures are retried with the durable backoff policy and move to `dead_letter` after the configured attempt limit. Shutdown stops the dispatcher before closing the store. Set `system.operations.durable.outbox_dispatcher_enabled: false` only when a separate process owns delivery.
@@ -230,6 +262,20 @@ uv run opc ops learning propose-routing --min-samples 3 --project demo
 
 Eligibility requires enough samples, at least 90% successful execution, passing scorecard evidence, at least 0.8 average quality, and at least 80% measured usage. The result remains a `candidate` with `application_mode=shadow_only`, `automatic_promotion=false`, and the normal offline → shadow → canary release gates. A subscription route whose usage is unknown cannot supply measured evidence by itself.
 
+After a promoted asset has been pinned into later run manifests, compare those
+runs with controls from the same benchmark case, explicit evaluation cohort, or
+goal. The report measures quality, success, interventions, rework, duration,
+and cost; unrelated goals are excluded rather than used as convenient controls:
+
+```bash
+uv run opc ops learning effectiveness <asset-id> \
+  --minimum-samples 3 --maximum-regression 0.02 \
+  --output learning-effectiveness.json --fail-on-blocked --project demo
+```
+
+This report is evidence for the normal learning gate, not an automatic
+promotion mechanism. Insufficient treated or control samples fail closed.
+
 ## Self-Built role skill assembly
 
 Installed local skills can be compared with a goal, role responsibility, current
@@ -278,6 +324,8 @@ and research cases with three repetitions per mode. Validation is deterministic:
 uv run opc ops benchmark validate
 uv run opc ops benchmark plan --campaign-id openopc-2026q3-v1 \
   --output campaign-plan.json
+uv run opc ops benchmark run-campaign --plan campaign-plan.json \
+  --max-pairs 1 --max-hours 4 --project benchmark
 uv run opc ops benchmark progress --campaign-id openopc-2026q3-v1 \
   --observations observations.jsonl --output campaign-progress.json
 uv run opc ops benchmark observe-run <case-id> <run-id> \

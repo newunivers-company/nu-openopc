@@ -87,7 +87,11 @@ class RefreshDependentsClearClaimTests(unittest.IsolatedAsyncioTestCase):
             role_runtime_session_id="role-runtime::r::cmo",
             claimed_by_role_runtime_session_id="role-runtime::r::cmo",
             claimed_by_seat_id="seat::team::ceo::cmo",
-            metadata={"dependency_work_item_ids": ["child-1"]},
+            metadata={
+                "dependency_work_item_ids": ["child-1"],
+                "claimed_by_role_session_id": "role-runtime::r::cmo",
+                "claimed_task_id": "parent-task",
+            },
         )
         await self.store.save_delegation_work_item(parent)
         await self.store.update_delegation_work_item(
@@ -110,6 +114,8 @@ class RefreshDependentsClearClaimTests(unittest.IsolatedAsyncioTestCase):
         # Claim must be cleared so dispatcher picks it up as orphaned.
         self.assertEqual(after.claimed_by_role_runtime_session_id, "")
         self.assertEqual(after.claimed_by_seat_id, "")
+        self.assertEqual(after.metadata.get("claimed_by_role_session_id"), "")
+        self.assertEqual(after.metadata.get("claimed_task_id"), "")
         self.assertTrue(is_dispatchable(after))
 
     async def test_leader_parent_enters_synthesis_turn_after_all_children_approved(self) -> None:
@@ -175,6 +181,8 @@ class RefreshDependentsClearClaimTests(unittest.IsolatedAsyncioTestCase):
                 "delegated_children_pending": True,
                 "frontier": "waiting_for_children",
                 "last_delegated_by_seat_id": "seat::team::ceo::cto",
+                "claimed_by_role_session_id": "role-runtime::r::cto",
+                "claimed_task_id": "cto-task",
             },
         )
         await self.store.save_delegation_work_item(parent)
@@ -197,6 +205,8 @@ class RefreshDependentsClearClaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after.phase, Phase.READY)
         self.assertEqual(after.claimed_by_role_runtime_session_id, "")
         self.assertEqual(after.claimed_by_seat_id, "")
+        self.assertEqual(after.metadata.get("claimed_by_role_session_id"), "")
+        self.assertEqual(after.metadata.get("claimed_task_id"), "")
         self.assertTrue(is_dispatchable(after))
         self.assertEqual(after.metadata["work_kind"], "synthesize")
         self.assertEqual(after.metadata["work_item_turn_type"], "aggregate")

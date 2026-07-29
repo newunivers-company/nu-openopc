@@ -17,7 +17,6 @@ from .package_format import (
     OPCPackage,
     OPCPackageManifest,
 )
-from .sandbox_checker import SandboxChecker
 
 if TYPE_CHECKING:
     from opc.core.config import OPCConfig

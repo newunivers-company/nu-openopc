@@ -28,7 +28,6 @@ from opc.core.models import (
 from opc.layer2_organization.company_runtime import canonical_role_session_id
 from opc.layer2_organization.phase import (
     DONE_PHASES,
-    IN_REVIEW_PHASES,
     InvalidPhaseTransition,
     kanban_column,
 )
@@ -1651,7 +1650,6 @@ def create_collaboration_tools(
                 "delegate_work: planning_context was empty in dispatch_required mode — "
                 "auto-filled a placeholder. The calling agent should provide an explicit planning_context."
             )
-        runtime_topology = dict(task.metadata.get("runtime_topology", {}) or {})
         playbook = dict(task.metadata.get("delegation_playbook", {}) or {})
         direct_report_role_ids = {
             str(item).strip()

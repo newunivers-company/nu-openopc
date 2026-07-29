@@ -25,13 +25,11 @@ from opc.core.config import (
     OPCConfig,
     get_project_workplace,
     slugify_organization_name,
-    validate_organization_id,
 )
 from opc.core.org_config import (
     allocate_org_config_id,
     apply_org_config_payload_to_config,
     build_org_config_payload_from_config,
-    list_org_config_paths,
     load_org_config_payload,
     org_config_filename,
     org_config_path,
@@ -46,10 +44,6 @@ from opc.core.org_config import (
 from opc.core.models import normalize_role_runtime_status
 from opc.core.transcript_visibility import rendered_transcript_metadata_visible
 from opc.presentation.kanban import build_company_board_columns
-from opc.layer2_organization.phase import (
-    kanban_column,
-    should_hide_work_item_from_company_kanban,
-)
 from opc.layer2_organization.company_runtime_identity import (
     ACTIVE_COMPANY_RUNTIME_CHECKPOINT_STATUSES,
     COMPANY_RUNTIME_CHECKPOINT_TYPES,
@@ -58,16 +52,12 @@ from opc.layer2_organization.company_runtime_identity import (
 )
 from opc.layer2_organization.work_item_identity import (
     work_item_identity_payload,
-    work_item_identity_payload_for_task,
     work_item_projection_id_from_metadata,
     work_item_turn_type_from_metadata,
 )
-from opc.layer2_organization.work_item_links import linked_work_item_id_for_task
 from opc.layer2_organization.work_item_transition import (
     apply_task_status_transition,
 )
-from opc.layer2_organization.org_work_item_planner import build_custom_org_work_item_blueprint
-from opc.layer4_tools.output_budget import clip_text
 
 if TYPE_CHECKING:
     import aiohttp.web
@@ -101,8 +91,6 @@ from opc.plugins.office_ui.snapshot_builder import (
 )
 from opc.plugins.office_ui.org_architecture_snapshot import (
     apply_org_architecture_snapshot,
-    build_org_architecture_snapshot,
-    dump_org_architecture_snapshot,
     parse_org_architecture_snapshot,
 )
 
@@ -4950,7 +4938,6 @@ class WSHandler:
             content = f"{title}\n{description}".strip()
             engine_mode, company_profile = self._resolve_engine_mode(mode, profile)
             engine_preferred_agent = preferred_agent if engine_mode == "project" else None
-            response = None
 
             if task_id:
                 # Per-task lock: same session serialized, different sessions concurrent
@@ -4981,7 +4968,7 @@ class WSHandler:
                             await self._set_company_runtime_control(company_runtime_target, state="running")
                         except Exception:
                             logger.opt(exception=True).debug("failed to mark run_task company runtime running")
-                    response = await engine.process_message(
+                    await engine.process_message(
                         content,
                         project_id=pid,
                         session_id=session_id,
@@ -4993,7 +4980,7 @@ class WSHandler:
                     )
                 await self._sync_task_transcript_messages(task_id, engine=engine)
             else:
-                response = await engine.process_message(
+                await engine.process_message(
                     content,
                     project_id=pid,
                     mode=engine_mode,
@@ -7689,10 +7676,8 @@ class WSHandler:
                         logger.opt(exception=True).debug("failed to load parent task for delivery feedback reply")
                 session_exec_mode = self._normalize_session_exec_mode(self._exec_mode)
                 session_company_profile = self._normalize_session_company_profile(self._company_profile)
-                session_org_id = ""
                 if parent_task is not None:
                     session_exec_mode, session_company_profile = self._resolve_task_session_config(parent_task)
-                    session_org_id = self._resolve_task_org_id(parent_task)
                 engine_mode, company_profile = self._resolve_engine_mode(
                     session_exec_mode,
                     session_company_profile,
@@ -8512,7 +8497,7 @@ class WSHandler:
                     conversation_turn_id=_ui_conversation_turn_id(user_message_id),
                     created_at=user_message_created_at,
                 ))
-                response = await engine.process_message(
+                await engine.process_message(
                     content,
                     project_id=pid,
                     session_id=session_id,

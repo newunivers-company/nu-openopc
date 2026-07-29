@@ -2443,8 +2443,15 @@ export default function App() {
               })()}
             </button>
             <button className={`page-nav-btn${activePage === 'office' ? ' active' : ''}`} onClick={() => setActivePage('office')}>Office</button>
-            <button className={`page-nav-btn${activePage === 'operations' ? ' active' : ''}`} onClick={() => setActivePage('operations')}>Mission Control</button>
             <button className={`page-nav-btn${activePage === 'org' ? ' active' : ''}`} onClick={() => setActivePage('org')}>Org</button>
+            <button
+              className={`page-nav-btn page-nav-btn--operator${activePage === 'operations' ? ' active' : ''}`}
+              onClick={() => setActivePage('operations')}
+              title="Advanced operations: alerts, approvals, provider capacity, and recovery"
+            >
+              <span>Operations</span>
+              <small>Advanced</small>
+            </button>
           </div>
           <div className="stat-chips">
             <span className="stat-chip"><b>{metrics.totalAgents}</b> agents</span>

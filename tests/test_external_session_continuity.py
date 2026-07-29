@@ -35,7 +35,6 @@ from opc.core.models import (
     TaskStatus,
 )
 from opc.database.store import OPCStore
-from opc.layer3_agent.adapters.base import ExternalAgentAdapter
 from opc.layer3_agent.external_broker import ExternalAgentBroker
 
 
