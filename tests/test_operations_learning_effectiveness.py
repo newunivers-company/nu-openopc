@@ -141,3 +141,31 @@ def test_effectiveness_report_rejects_regression() -> None:
     assert report["status"] == "regressed"
     assert report["promotion_evidence_eligible"] is False
     assert report["delta"]["quality_score"] == -0.2
+
+
+def test_effectiveness_report_counts_missing_evidence_violations() -> None:
+    manifests = [
+        _simple_manifest("control", "same-goal", treated=False),
+        _simple_manifest("treated", "same-goal", treated=True),
+    ]
+    control = _scorecard(
+        "control", "same-goal", 0.8, interventions=1, rework=1
+    )
+    control.violations = [
+        "criterion rights is missing required evidence",
+        "criterion checksum is missing required evidence",
+    ]
+    treated = _scorecard(
+        "treated", "same-goal", 0.9, interventions=0, rework=0
+    )
+
+    report = build_learning_effectiveness_report(
+        ASSET_ID,
+        manifests=manifests,
+        scorecards=[control, treated],
+        policy=LearningEffectivenessPolicy(minimum_samples_per_arm=1),
+    )
+
+    assert report["control"]["mean_missing_required_evidence"] == 2.0
+    assert report["treated"]["mean_missing_required_evidence"] == 0.0
+    assert report["delta"]["mean_missing_required_evidence"] == -2.0

@@ -161,6 +161,26 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.pending_approvals, 1)
         self.assertEqual(snapshot.learning_candidates, 1)
         self.assertAlmostEqual(snapshot.total_cost_usd, 0.7)
+        self.assertEqual(
+            snapshot.evidence_funnel["all_runs"],
+            {
+                "started": 3,
+                "completed": 2,
+                "scored": 1,
+                "accepted": 0,
+                "awaiting_judgment": 0,
+            },
+        )
+        self.assertEqual(
+            snapshot.evidence_funnel["benchmark"],
+            {
+                "started": 0,
+                "completed": 0,
+                "scored": 0,
+                "accepted": 0,
+                "awaiting_judgment": 0,
+            },
+        )
         kinds = [item.kind for item in snapshot.alerts]
         self.assertIn("deadlock", kinds)
         self.assertIn("dead_letter", kinds)
@@ -189,6 +209,16 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("run-awaiting-judgment", queued_ids)
         self.assertNotIn("run-failed-gate", queued_ids)  # already has a scorecard
         self.assertNotIn("run-unscored", queued_ids)  # failed, not completed
+        self.assertEqual(
+            snapshot.evidence_funnel["benchmark"],
+            {
+                "started": 1,
+                "completed": 1,
+                "scored": 0,
+                "accepted": 0,
+                "awaiting_judgment": 1,
+            },
+        )
         entry = next(
             item
             for item in snapshot.judgment_queue

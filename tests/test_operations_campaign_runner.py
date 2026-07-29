@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from opc.core.config import OperationsConfig
 from opc.database.store import OPCStore
@@ -20,7 +21,10 @@ from opc.operations.campaign_runner import (
     CampaignRunner,
     CampaignSlotRunner,
     SlotExecution,
+    SubprocessExecutorConfig,
     build_slot_command,
+    slot_execution_project_id,
+    subprocess_executor_preflight,
     verify_plan,
 )
 from opc.operations.models import RunMetrics, RunStatus
@@ -313,6 +317,53 @@ class SlotCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_slot_command({"mode": "org", "prompt": "x"}, project_id="demo")
 
+    def test_executor_preflight_blocks_unready_native_and_checks_external_binary(
+        self,
+    ) -> None:
+        native = subprocess_executor_preflight(
+            SubprocessExecutorConfig(),
+            native_transport_ready=False,
+        )
+        self.assertFalse(native["execution_ready"])
+        self.assertIn("not transport-ready", native["blockers"][0])
+
+        with patch(
+            "opc.operations.campaign_runner.shutil.which",
+            return_value="/usr/bin/codex",
+        ):
+            codex = subprocess_executor_preflight(
+                SubprocessExecutorConfig(
+                    task_args=("--mode", "task", "--agent", "codex")
+                ),
+                native_transport_ready=False,
+            )
+        self.assertTrue(codex["execution_ready"])
+        self.assertEqual(codex["task_agent"], "codex")
+
+    def test_each_arm_gets_a_stable_isolated_execution_project(self) -> None:
+        plan = build_campaign_plan(load_suite(), campaign_id="workspace-isolation")
+        pair = plan["pairs"][0]
+        slots = [
+            next(item for item in plan["slots"] if item["slot_id"] == slot_id)
+            for slot_id in pair["slot_ids"]
+        ]
+
+        project_ids = [
+            slot_execution_project_id("benchmark-proof", slot) for slot in slots
+        ]
+
+        self.assertEqual(len(set(project_ids)), 2)
+        self.assertTrue(
+            all(item.startswith("benchmark-proof-slot-") for item in project_ids)
+        )
+        self.assertEqual(
+            project_ids,
+            [
+                slot_execution_project_id("benchmark-proof", slot)
+                for slot in slots
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -425,6 +476,17 @@ class CampaignStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(totals["completed"], 2)
         self.assertEqual(totals["not_started"], 70)
         self.assertEqual(totals["awaiting_judgment"], 1)
+        self.assertEqual(report["attention_summary"]["awaiting_judgment"], 1)
+        self.assertEqual(report["attention_summary"]["awaiting_observation"], 1)
+        self.assertTrue(report["execution_preflight"]["execution_ready"])
+        self.assertEqual(
+            [item["action"] for item in report["next_actions"][:3]],
+            [
+                "confirm_independent_judgments",
+                "record_trusted_observations",
+                "run_next_complete_pairs",
+            ],
+        )
         for stats in report["workloads"].values():
             self.assertEqual(stats["trusted_pairs_remaining_to_gate"], 10)
         self.assertFalse(report["promotion_eligible"])

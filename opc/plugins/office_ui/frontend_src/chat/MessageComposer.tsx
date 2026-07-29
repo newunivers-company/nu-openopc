@@ -15,6 +15,7 @@ import type { OutgoingAttachmentPayload } from '../types/chat'
 import type { TaskPreferredAgent } from '../types/kanban'
 import type { SavedOrgSummary } from '../types/visual'
 import { getContextUsageMetrics } from '../lib/contextUsage'
+import { ModeAdvisorPanel } from './ModeAdvisorPanel'
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const MAX_TOTAL_SIZE = 20 * 1024 * 1024
@@ -587,6 +588,19 @@ export function MessageComposer({
             />
             {(showModePicker || execMode) && (
               <div className="composer-config-group" data-locked={lockedMode ? 'true' : undefined}>
+                {showModePicker && !lockedMode && (
+                  <ModeAdvisorPanel
+                    disabled={disabled}
+                    currentMode={selectedModeOption}
+                    onApply={(mode) => {
+                      if (mode === 'task') {
+                        onModeChange?.('task')
+                        return
+                      }
+                      onModeChange?.('company', 'corporate')
+                    }}
+                  />
+                )}
                 {showModePicker && !lockedMode ? (
                   <label
                     className="composer-mode-inline"

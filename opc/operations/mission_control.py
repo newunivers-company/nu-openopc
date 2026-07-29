@@ -250,6 +250,44 @@ class MissionControlService:
             )
 
         scorecard_run_ids = {item.run_id for item in scorecards}
+        manifest_run_ids = {item.run_id for item in manifests}
+        completed_run_ids = {
+            item.run_id
+            for item in manifests
+            if item.status
+            in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+        }
+        judgment_ready_run_ids = {
+            item.run_id for item in manifests if item.status == RunStatus.COMPLETED
+        }
+        accepted_run_ids = {
+            item.run_id
+            for item in scorecards
+            if item.gate_status == GateStatus.PASS and item.run_id in manifest_run_ids
+        }
+        benchmark_run_ids = {
+            item.run_id
+            for item in manifests
+            if str(item.metadata.get("benchmark_slot_id", "") or "").strip()
+        }
+
+        def funnel_stage(run_ids: set[str]) -> dict[str, int]:
+            completed_ids = run_ids & completed_run_ids
+            scored_ids = run_ids & scorecard_run_ids
+            return {
+                "started": len(run_ids),
+                "completed": len(completed_ids),
+                "scored": len(scored_ids),
+                "accepted": len(run_ids & accepted_run_ids),
+                "awaiting_judgment": len(
+                    (run_ids & judgment_ready_run_ids) - scorecard_run_ids
+                ),
+            }
+
+        evidence_funnel = {
+            "all_runs": funnel_stage(manifest_run_ids),
+            "benchmark": funnel_stage(benchmark_run_ids),
+        }
         judgment_candidates = sorted(
             (
                 run
@@ -472,6 +510,7 @@ class MissionControlService:
             unmeasured_usage_events=unmeasured_usage_events,
             provider_slo=provider_slo,
             provider_call_quotas=provider_call_quotas,
+            evidence_funnel=evidence_funnel,
             judgment_queue=judgment_queue,
             alerts=alerts,
             recommendations=recommendations,

@@ -20,6 +20,20 @@
       "title": "Repair an atomic reservation race",
       "prompt": "Diagnose and repair a concurrent reservation race in a small SQLite-backed service. Preserve failed-call accounting, add multiprocess regression coverage, and produce a concise operator note.",
       "tags": ["concurrency", "sqlite", "recovery"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "reservation.py",
+            "content": "import sqlite3\n\n\ndef reserve(db_path: str, bucket: str, limit: int) -> bool:\n    conn = sqlite3.connect(db_path, timeout=5)\n    try:\n        row = conn.execute(\"SELECT used FROM reservations WHERE bucket = ?\", (bucket,)).fetchone()\n        used = int(row[0]) if row else 0\n        if used >= limit:\n            return False\n        conn.execute(\"INSERT INTO reservations(bucket, used) VALUES(?, 1) ON CONFLICT(bucket) DO UPDATE SET used = ?\", (bucket, used + 1))\n        conn.commit()\n        return True\n    finally:\n        conn.close()\n\n\ndef record_failed_call(db_path: str, bucket: str) -> None:\n    conn = sqlite3.connect(db_path)\n    conn.execute(\"INSERT INTO failed_calls(bucket) VALUES(?)\", (bucket,))\n    conn.commit()\n    conn.close()\n"
+          },
+          {
+            "name": "schema.sql",
+            "content": "CREATE TABLE reservations(bucket TEXT PRIMARY KEY, used INTEGER NOT NULL);\nCREATE TABLE failed_calls(id INTEGER PRIMARY KEY, bucket TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-software-race-fix",
         "project_id": "benchmark",
@@ -41,6 +55,20 @@
       "title": "Add a governed API feature",
       "prompt": "Add a versioned JSON API endpoint to an existing service, including validation, authorization boundaries, backwards compatibility, tests, and migration notes.",
       "tags": ["api", "compatibility", "security"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "service.py",
+            "content": "from dataclasses import dataclass\n\n\n@dataclass\nclass Request:\n    method: str\n    path: str\n    token: str | None\n    json: dict\n\n\ndef handle(request: Request) -> tuple[int, dict]:\n    if request.method == \"GET\" and request.path == \"/v1/items\":\n        return 200, {\"items\": []}\n    return 404, {\"error\": \"not_found\"}\n"
+          },
+          {
+            "name": "contract.md",
+            "content": "Add POST /v2/items. Accept JSON {name: non-empty string, priority: integer 1..5}. Require token `writer-token`; missing or other tokens return 401 without revealing validation details. Success returns 201 and {id, name, priority}. GET /v1/items must remain unchanged. No third-party dependencies may be added.\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-software-api-feature",
         "project_id": "benchmark",
@@ -62,6 +90,24 @@
       "title": "Make a private dependency release reproducible",
       "prompt": "Replace mutable sibling dependency checkouts with an immutable release manifest, exact source refs, installed-version checks, and clean-wheel verification.",
       "tags": ["release", "supply-chain", "ci"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "pyproject.toml",
+            "content": "[project]\nname = \"demo-app\"\nversion = \"0.1.0\"\ndependencies = [\"private-router @ ../private-router\"]\n"
+          },
+          {
+            "name": ".github/workflows/test.yml",
+            "content": "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - run: pip install -e ../private-router\n      - run: pytest\n"
+          },
+          {
+            "name": "dependency-identity.json",
+            "content": "{\"repository\":\"example/private-router\",\"version\":\"0.4.0\",\"commit\":\"5f6e18ad6af547626030f66e2f82c3d11d2529f1\",\"required_import\":\"private_router.route\"}\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-software-dependency-release",
         "project_id": "benchmark",
@@ -83,6 +129,20 @@
       "title": "Recover a failed durable delivery",
       "prompt": "Investigate a dead-letter delivery after a process crash, prove the external side effect is not duplicated, replay it safely, and document the recovery decision.",
       "tags": ["incident", "outbox", "idempotency"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "outbox-state.json",
+            "content": "{\"message\":{\"id\":\"msg-017\",\"status\":\"dead_letter\",\"attempts\":3,\"idempotency_key\":\"invoice-1042\"},\"external_receipts\":[{\"idempotency_key\":\"invoice-1042\",\"receipt_id\":\"rcpt-88\",\"accepted_at\":\"2026-07-20T04:10:00Z\"}],\"last_error\":\"worker exited before local acknowledgement\",\"operator\":\"op-7\"}\n"
+          },
+          {
+            "name": "replay.py",
+            "content": "def replay(message, transport, store):\n    receipt = transport.send(message[\"payload\"], idempotency_key=message[\"idempotency_key\"])\n    store.mark_delivered(message[\"id\"], receipt.id)\n    return receipt.id\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-software-incident-recovery",
         "project_id": "benchmark",
@@ -104,6 +164,16 @@
       "title": "Plan a vertical microdrama episode",
       "prompt": "Create a production-ready 60–90 second vertical microdrama package with a hook, beat sheet, scene board, character continuity constraints, and platform-safe ending.",
       "tags": ["vertical-video", "story", "production"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "creative-brief.json",
+            "content": "{\"runtime_seconds\":[60,90],\"format\":\"9:16\",\"audience\":\"Korean viewers age 18-34\",\"premise\":\"A night-shift convenience-store worker discovers that every receipt predicts the customer's next decision.\",\"characters\":[{\"id\":\"mina\",\"role\":\"worker\",\"anchor\":\"red name tag, tied black hair\"},{\"id\":\"jun\",\"role\":\"customer\",\"anchor\":\"navy raincoat, cracked silver watch\"}],\"locations\":[\"convenience store counter\",\"rainy storefront\"],\"prohibited\":[\"graphic harm\",\"guaranteed sequel claim\"],\"ending\":\"resolve the immediate choice while leaving one evidence-based question\"}\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-content-vertical-series",
         "project_id": "benchmark",
@@ -125,6 +195,16 @@
       "title": "Build a launch campaign package",
       "prompt": "Produce a coherent product launch package: positioning, landing-page outline, three channel variants, CTA hypotheses, and a measurable experiment plan without inventing customer evidence.",
       "tags": ["marketing", "copy", "experimentation"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "product-brief.json",
+            "content": "{\"product\":\"TraceBoard\",\"facts\":[\"imports CSV files up to 25 MB\",\"creates a claim-to-source table\",\"exports Markdown and JSON\",\"single-user beta\"],\"unknowns\":[\"time saved\",\"accuracy improvement\",\"team collaboration date\"],\"audience\":\"independent analysts\",\"channels\":[\"landing page\",\"email\",\"LinkedIn\"],\"primary_metric\":\"qualified beta signup rate\",\"constraints\":[\"do not invent testimonials\",\"do not claim compliance certification\"]}\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-content-campaign-package",
         "project_id": "benchmark",
@@ -146,6 +226,16 @@
       "title": "Gate character and prop continuity",
       "prompt": "Review a synthetic two-scene asset manifest for character identity, costume, prop, composition, and story continuity. Separate object-grounding evidence from judgments requiring stronger VLM or human review.",
       "tags": ["quality", "continuity", "vlm"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "scene-manifest.json",
+            "content": "{\"anchors\":{\"character\":\"mina\",\"costume\":\"green jacket with white stripe\",\"prop\":\"red umbrella\"},\"scenes\":[{\"scene_id\":\"s1\",\"detections\":[{\"class\":\"person\",\"confidence\":0.98,\"box\":[10,20,110,300]},{\"class\":\"umbrella\",\"confidence\":0.94,\"box\":[120,40,210,190]}],\"human_notes\":\"face not reviewed\"},{\"scene_id\":\"s2\",\"detections\":[{\"class\":\"person\",\"confidence\":0.97,\"box\":[15,18,118,302]},{\"class\":\"umbrella\",\"confidence\":0.61,\"box\":[118,42,205,188]}],\"human_notes\":\"jacket appears blue; identity unconfirmed\"}],\"detector_scope\":[\"object presence\",\"bounding box\"],\"unsupported_by_detector\":[\"identity\",\"aesthetics\",\"story continuity\"]}\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-content-continuity-qa",
         "project_id": "benchmark",
@@ -167,6 +257,16 @@
       "title": "Prepare a platform release package",
       "prompt": "Package approved synthetic media metadata for a vertical-video release with rights, aspect, duration, captions, thumbnails, checksum, and delivery manifest gates.",
       "tags": ["release", "rights", "delivery"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "approved-media.json",
+            "content": "{\"release_id\":\"rel-204\",\"platform\":\"vertical-video-demo\",\"requirements\":{\"aspect\":\"9:16\",\"max_duration_seconds\":90,\"captions_required\":true,\"thumbnail_required\":true},\"assets\":[{\"path\":\"episode.mp4\",\"aspect\":\"9:16\",\"duration_seconds\":78,\"sha256\":\"3d7e3f6a30f2490012728e30b1c21578bdb6f2d66a8573a3a33ec4b05a2f7c51\",\"rights\":\"owned\",\"approved\":true},{\"path\":\"captions.ko.vtt\",\"sha256\":\"0e4d39f71bbf624e459a1f00c535282680b5c14b59e90f7849a3d406228086bb\",\"rights\":\"owned\",\"approved\":true},{\"path\":\"thumbnail.jpg\",\"aspect\":\"9:16\",\"sha256\":\"2b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfe\",\"rights\":\"pending\",\"approved\":false}]}\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-content-release-package",
         "project_id": "benchmark",
@@ -188,6 +288,16 @@
       "title": "Draft an evidence-bound investment memo",
       "prompt": "Using only a supplied synthetic source pack, write an investment memo that separates evidence, inference, and unknowns; includes counterarguments; and maps every material claim to a source.",
       "tags": ["investment", "citations", "risk"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "source-pack.md",
+            "content": "# Fictional company: Northstar Labs\n\n[S1 — audited filing, 2025] Revenue was $4.0M in 2024 and $5.2M in 2025. Gross margin was 62% in 2025. Cash at year end was $1.1M.\n\n[S2 — management deck, 2026-06] Management projects $9M revenue for 2026 and states that 70% of revenue is recurring. Neither statement is audited.\n\n[S3 — customer survey, n=18, 2026-05] Twelve respondents rated the product 8/10 or higher. The sample was selected from customers who renewed.\n\n[S4 — contract summary] The largest customer represented 38% of 2025 revenue; its contract renews monthly.\n\nMissing: cap table, churn cohort, bank statement, security audit.\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-research-investment-memo",
         "project_id": "benchmark",
@@ -209,6 +319,16 @@
       "title": "Build a sourced market map",
       "prompt": "Normalize a synthetic company dataset into a market taxonomy, explain inclusion rules, flag conflicting records, and produce a ranked review queue instead of silently resolving ambiguity.",
       "tags": ["market-map", "normalization", "review"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "companies.csv",
+            "content": "source_id,name,description,segment,employees,updated_at\nA1,AlphaGrid,workflow automation for clinics,vertical SaaS,42,2026-05-01\nA2,Alpha Grid,AI scheduling for hospitals,health AI,45,2026-06-10\nB1,BetaForge,developer deployment automation,devtools,18,2026-04-12\nC1,ClearNote,meeting summaries for any team,productivity,,2026-02-01\nC2,ClearNote,clinical note transcription,health AI,27,2026-06-20\nD1,DeltaDesk,outsourced support agency,services,120,2025-12-11\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-research-market-map",
         "project_id": "benchmark",
@@ -230,6 +350,16 @@
       "title": "Run a due-diligence risk review",
       "prompt": "Review a synthetic diligence room, construct a risk register with severity and evidence strength, identify missing documents, and avoid legal or financial conclusions unsupported by the pack.",
       "tags": ["diligence", "risk-register", "evidence"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "diligence-room.md",
+            "content": "# Fictional diligence room index\n\n[D1] 2025 management accounts: revenue $2.4M, marked draft, no accountant signature.\n[D2] Customer list: 63 customers; top three account for 51% of listed annual contract value.\n[D3] IP schedule: founders assigned code to the company; two contractor assignments are listed as requested but absent.\n[D4] Security questionnaire: completed internally; penetration test field says planned.\n[D5] Employee roster: 14 employees in two countries; employment agreements supplied for 11.\n[D6] Board minutes: approve the current financing but do not include an updated cap table.\n\nExplicitly missing: signed contractor IP assignments, penetration test, three employment agreements, updated cap table, bank statements, tax filings.\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-research-due-diligence",
         "project_id": "benchmark",
@@ -251,6 +381,16 @@
       "title": "Produce an executive evidence brief",
       "prompt": "Transform a synthetic mixed-quality research pack into a one-page executive brief, a detailed appendix, and a source-quality table. Preserve disagreements and prioritize decisions.",
       "tags": ["executive", "synthesis", "source-quality"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "research-pack.md",
+            "content": "# Decision: whether to extend a fictional pilot\n\n[R1 — instrumented product log, high quality] 74 of 100 invited users activated; 41 were active in week four. Log coverage was 98%.\n\n[R2 — support summary, medium quality] 19 onboarding tickets were filed; 11 concerned CSV formatting. Ticket categories were assigned manually.\n\n[R3 — sales interview notes, low quality] Two account executives believe demand is strong. No interview transcript or customer sample is attached.\n\n[R4 — finance model, medium quality] Extending for 90 days is estimated at $48K. The estimate excludes security review and localization.\n\n[R5 — research memo, medium quality] Recommends extension if week-four activity exceeds 50% of activated users. A separate steering note sets the threshold at 60%; neither explains why.\n\nOpen decisions: threshold owner, CSV remediation scope, security-review budget, and whether localization is in pilot scope.\n"
+          }
+        ]
+      },
       "goal": {
         "goal_id": "benchmark-research-executive-brief",
         "project_id": "benchmark",

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type {
   MissionActionPayload,
   MissionControlAlert,
+  MissionControlEvidenceStage,
   MissionControlPayload,
   MissionControlProviderQuota,
   MissionControlProviderSlo,
@@ -83,6 +84,66 @@ function MetricCard({ label, value, detail, tone = 'neutral' }: {
       <strong className="mc-metric-value">{value}</strong>
       <span className="mc-metric-detail">{detail}</span>
     </article>
+  )
+}
+
+function EvidenceFunnel({ data }: {
+  data?: MissionControlPayload['evidence_funnel']
+}) {
+  const benchmark = data?.benchmark
+  const allRuns = data?.all_runs
+  const benchmarkStarted = numberOrZero(benchmark?.started)
+  const scope = benchmarkStarted > 0 ? benchmark : allRuns
+  const scopeLabel = benchmarkStarted > 0 ? 'Benchmark runs' : 'All governed runs'
+  const started = numberOrZero(scope?.started)
+  const stages: Array<{ key: keyof MissionControlEvidenceStage; label: string }> = [
+    { key: 'started', label: 'Started' },
+    { key: 'completed', label: 'Terminal' },
+    { key: 'scored', label: 'Judged' },
+    { key: 'accepted', label: 'Accepted' },
+  ]
+  return (
+    <section className="mc-evidence" aria-labelledby="mc-evidence-title">
+      <div className="mc-evidence-heading">
+        <div>
+          <span className="mc-section-index">00</span>
+          <h2 id="mc-evidence-title">Evidence funnel</h2>
+        </div>
+        <span>{scopeLabel}</span>
+      </div>
+      <div className="mc-funnel">
+        {stages.map(({ key, label }, index) => {
+          const value = numberOrZero(scope?.[key])
+          const width = started > 0 ? Math.max(8, Math.round((value / started) * 100)) : 0
+          return (
+            <article className="mc-funnel-stage" key={key}>
+              <div>
+                <span>{label}</span>
+                <strong>{value}</strong>
+              </div>
+              <div
+                className="mc-funnel-track"
+                role="progressbar"
+                aria-label={`${label} evidence`}
+                aria-valuemin={0}
+                aria-valuemax={Math.max(started, 1)}
+                aria-valuenow={value}
+              >
+                <span style={{ width: `${width}%` }} />
+              </div>
+              {index < stages.length - 1 && <span className="mc-funnel-arrow" aria-hidden="true">→</span>}
+            </article>
+          )
+        })}
+      </div>
+      <p>
+        Accepted means a persisted passing scorecard. It does not imply trusted-pair
+        validation or learning-asset promotion.
+        {numberOrZero(scope?.awaiting_judgment) > 0 && (
+          <> {numberOrZero(scope?.awaiting_judgment)} completed run(s) still await judgment.</>
+        )}
+      </p>
+    </section>
   )
 }
 
@@ -352,6 +413,8 @@ export function MissionControlPage({
           tone={numberOrZero(data.unmeasured_usage_events) > 0 ? 'warning' : 'neutral'}
         />
       </section>
+
+      <EvidenceFunnel data={data.evidence_funnel} />
 
       <div className="mc-content-grid">
         <section className="mc-section" aria-labelledby="mc-alerts-title">

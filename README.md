@@ -58,6 +58,11 @@ Use **Task Mode** for direct, bounded work where one execution agent is enough.
 Use **Company Mode** when the work materially benefits from decomposition,
 parallel roles, independent review, and a final integrator.
 
+For an auditable recommendation before execution, `opc ops mode assess` accepts
+explicit scope, input-readiness, workstream, role, dependency, review, and
+integration evidence. It returns `task`, `company`, or `clarify`; the assessment
+is advisory and never starts work or changes the project default.
+
 Finance, sales, e-commerce, education, and other organization packages remain
 extension targets. OpenOPC does not treat an available template or demo as
 evidence that Company Mode is production-ready for that domain. Product claims
@@ -846,8 +851,8 @@ OpenOPC is moving quickly. The areas below reflect active development priorities
 
 | Area | Planned direction |
 |---|---|
-| **Outcome proof** | The paired software/content/research campaign and fail-closed promotion dossier are implemented. Next: complete trusted Task-versus-Company pairs and publish quality, success, duration, cost, and intervention deltas. |
-| **Self-Grown effectiveness** | Exact promoted assets are pinned into run manifests and can now be compared with matched controls. Next: accumulate representative treated/control cohorts and feed accepted lift reports into normal learning promotion evidence. |
+| **Outcome proof** | The paired software/content/research campaign, sealed inline input contracts, executor-readiness preflight, isolated slot projects, evidence funnel, and fail-closed promotion dossier are implemented. Next: complete trusted Task-versus-Company pairs and publish quality, success, duration, cost, and intervention deltas. |
+| **Self-Grown effectiveness** | Exact promoted assets are pinned into run manifests; release-playbook experiments now seal alternating matched controls, activation metadata, provenance, and contamination guards. Next: accumulate representative cohorts and feed accepted lift reports into normal learning promotion evidence. |
 | **Role-level skills** | Role assignment, deterministic goal-to-skill recommendations, content digests, and Native/external runtime mounting are implemented. Next: searchable marketplace selection, signed packages, and richer capability metadata. |
 | **Secretary settings** | The secretary now consumes deterministic Mission Control and read-only skill-assembly context without auto-executing operator actions. Next: cross-project comparison and guided YAML setup. |
 | **Company-mode channels** | Every configured channel supports model-free `/opc status`, `/opc skills`, and two-phase governed actions under its sender allowlist. Next: role-aware notifications and richer structured approval cards. |

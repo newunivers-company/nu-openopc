@@ -265,13 +265,24 @@ Eligibility requires enough samples, at least 90% successful execution, passing 
 After a promoted asset has been pinned into later run manifests, compare those
 runs with controls from the same benchmark case, explicit evaluation cohort, or
 goal. The report measures quality, success, interventions, rework, duration,
-and cost; unrelated goals are excluded rather than used as convenient controls:
+cost, and missing required evidence; unrelated goals are excluded rather than
+used as convenient controls. Before collecting those outcomes, seal the exact
+release-playbook treatment and its alternating matched controls:
 
 ```bash
+uv run opc ops learning release-playbook-plan <asset-id> \
+  --experiment-id release-playbook-2026q3 --pairs 5 \
+  --output release-playbook-plan.json --project demo
 uv run opc ops learning effectiveness <asset-id> \
   --minimum-samples 3 --maximum-regression 0.02 \
   --output learning-effectiveness.json --fail-on-blocked --project demo
 ```
+
+The experiment plan pins the asset id, version, content digest, source-run
+provenance, exact activation metadata, cohort, and treatment order. It requires
+at least three matched pairs and trusted judgment, forbids automatic promotion,
+and retains the normal offline → shadow → canary release path. Verifying the
+plan detects any later mutation or treatment leakage.
 
 This report is evidence for the normal learning gate, not an automatic
 promotion mechanism. Insufficient treated or control samples fail closed.
@@ -315,17 +326,60 @@ matching. Organization-wide required capabilities are assigned to the most
 relevant explicit role and reported once in
 `organization_capability_coverage`; they are not copied blindly to every role.
 
+## Deterministic Task-versus-Company mode assessment
+
+Mode advice is evidence-based and read-only. The request must explicitly state
+whether inputs and requirements are ready; strings such as `"yes"` are not
+coerced into trusted booleans:
+
+```json
+{
+  "goal": "Ship a reviewed multi-part release",
+  "deliverable_count": 4,
+  "role_count": 4,
+  "independent_workstreams": 3,
+  "dependency_count": 2,
+  "bounded_scope": false,
+  "input_complete": true,
+  "requirements_stable": true,
+  "independent_review_required": true,
+  "final_integration_required": true,
+  "risk_level": "high",
+  "estimated_duration_minutes": 240
+}
+```
+
+```bash
+uv run opc ops mode assess --request mode-assessment.json \
+  --output mode-assessment-report.json
+```
+
+The result is `task`, `company`, or `clarify`, with weighted factors, blockers,
+confidence, and required controls. It is always marked `advisory_only`; it does
+not start a run or alter the configured mode. Missing inputs or unstable
+acceptance boundaries fail closed to `clarify`, even if coordination would
+otherwise favor Company Mode.
+
 ## Versioned Task-versus-Company outcome benchmark
 
 The checked-in `openopc-core-outcomes` v1 suite contains 12 software, content,
-and research cases with three repetitions per mode. Validation is deterministic:
+and research cases with three repetitions per mode. Every v1 case includes a
+sealed synthetic input contract. Inline fixture contents and SHA-256 identities
+have a separate input-binding digest and are included in the campaign-plan
+digest, then rendered identically into the Task and Company prompts. The
+outcome/rubric suite digest remains stable for historical comparisons.
+The expanded v2 suite has 18 cases and all six added migration, performance,
+localization, incident-communication, replication, and competitor-analysis
+cases are sealed to the same standard. Validation is deterministic:
 
 ```bash
-uv run opc ops benchmark validate
+uv run opc ops benchmark validate --require-execution-ready
 uv run opc ops benchmark plan --campaign-id openopc-2026q3-v1 \
   --output campaign-plan.json
 uv run opc ops benchmark run-campaign --plan campaign-plan.json \
-  --max-pairs 1 --max-hours 4 --project benchmark
+  --max-pairs 1 --max-hours 4 --task-agent codex --project benchmark
+uv run opc ops benchmark campaign-status --plan campaign-plan.json \
+  --observations observations.jsonl --project benchmark
 uv run opc ops benchmark progress --campaign-id openopc-2026q3-v1 \
   --observations observations.jsonl --output campaign-progress.json
 uv run opc ops benchmark observe-run <case-id> <run-id> \
@@ -336,10 +390,27 @@ uv run opc ops benchmark evaluate --observations observations.jsonl \
   --output benchmark-report.json --fail-on-blocked
 ```
 
+`benchmark plan` requires execution-ready inputs by default. An operator may use
+`--allow-unready` to seal a diagnostic-only plan, but its preflight blockers
+remain in the plan and status report. A `self_contained` declaration that still
+refers to an unbundled supplied, attached, provided, or existing input is also
+blocked.
+
+Live execution fails before starting a slot unless the selected executor is
+ready. The default `--task-agent native` requires a transport-ready native LLM
+route. `codex`, `claude_code`, `cursor`, and `opencode` require their executable
+to be installed; authentication is checked again by the slot runtime. Each
+Task/Company slot receives a deterministic isolated project id, so startup
+recovery, checkpoints, and work-item leases cannot mutate a paired slot or the
+operator's base project.
+
 The campaign plan fixes all 36 pairs and 72 execution slots, gives every slot a
 unique goal/run identity and artifact directory, and counterbalances Task-first
 and Company-first order 18/18. Progress rejects foreign, duplicate, and
-untrusted slots instead of silently counting them.
+untrusted slots instead of silently counting them. `campaign-status` also emits
+an ordered `next_actions` queue for input blockers, failed slots, pending
+judgments, duplicate/foreign/untrusted rows, scored-but-unrecorded observations,
+in-flight work, and remaining trusted-pair distance.
 
 Promotion requires completed actual runs, a passing scorecard, durable evidence,
 a SHA-256 artifact digest, trusted human or independent-judge authority, unique
@@ -567,6 +638,11 @@ uv run opc ops staffing observe <decision-id> --observed-score 0.83 \
 
 Mission Control is deterministic and model-free. It reports active/blocked runs, failed or missing scorecards, pending and dead-letter deliveries, approval checkpoints, deadlines, learning candidates, promoted assets, tracked score and cost, provider SLOs, long-window production readiness, and unmeasured usage. Alerts distinguish an SLO miss from incomplete observation/drill evidence and are ordered critical → high → medium → low.
 
+Its evidence funnel separates `started → terminal → scored → accepted` runs and
+also shows completed benchmark slots still awaiting trusted judgment.
+`accepted` means a persisted scorecard passed; it does not mean a benchmark pair
+has independent authority or is eligible for promotion.
+
 It is available through:
 
 - `opc ops mission status|brief|plan-action|execute-action|actions`;
@@ -576,7 +652,15 @@ It is available through:
   a visibility-aware 30-second polling interval, and an explicit
   plan-review-confirm receipt panel.
 
-The UI displays durable work, gate failures, delivery/approval queues, provider SLOs, subscription call quotas, ordered alerts, and deterministic next actions. A late WebSocket response is discarded after a project switch.
+The UI displays the evidence funnel, durable work, gate failures,
+delivery/approval queues, provider SLOs, subscription call quotas, ordered
+alerts, and deterministic next actions. A late WebSocket response is discarded
+after a project switch.
+
+Inspection commands such as `opc runtime status|checkpoints|logs`, communication
+state/read, and work-item list/show/logs/role-status open the store in read-only
+service mode. They do not initialize the execution engine, sweep leases, or run
+startup reconciliation, so inspecting a live campaign cannot interrupt it.
 
 The same model-free controls work through every configured external channel:
 

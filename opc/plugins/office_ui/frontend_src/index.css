@@ -1588,6 +1588,79 @@ html, body, #root {
 
 .mc-metric-detail { color: var(--text-dim); font-size: 11px; line-height: 1.4; }
 
+.mc-evidence {
+  max-width: 1440px;
+  margin: 0 auto 18px;
+  padding: 16px 18px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.mc-evidence-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.mc-evidence-heading > div { display: flex; align-items: baseline; gap: 10px; }
+.mc-evidence-heading h2 { margin: 0; font-size: 13px; letter-spacing: -0.01em; }
+.mc-evidence-heading > span {
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mc-funnel {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 22px;
+}
+
+.mc-funnel-stage { position: relative; display: grid; gap: 7px; }
+.mc-funnel-stage > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mc-funnel-stage > div:first-child span {
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.mc-funnel-stage strong {
+  font-size: 18px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.mc-funnel-track { height: 5px; overflow: hidden; background: var(--surface-hover); }
+.mc-funnel-track > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 180ms ease-out;
+}
+.mc-funnel-arrow {
+  position: absolute;
+  top: 19px;
+  right: -16px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.mc-evidence > p {
+  margin: 11px 0 0;
+  color: var(--text-dim);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
 .mc-content-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.85fr);
@@ -1798,11 +1871,14 @@ html, body, #root {
   .mc-metrics { grid-template-columns: 1fr; }
   .mc-metric { min-height: 100px; border-right: 0; border-bottom: 1px solid var(--border); }
   .mc-metric:last-child { border-bottom: 0; }
+  .mc-funnel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mc-funnel-stage:nth-child(2) .mc-funnel-arrow { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .mc-state-indicator { animation-duration: 1.8s; }
-  .mc-progress > span { transition: none; }
+  .mc-progress > span,
+  .mc-funnel-track > span { transition: none; }
 }
 
 /* ── Map Editor Page ──────────────────────────────────── */

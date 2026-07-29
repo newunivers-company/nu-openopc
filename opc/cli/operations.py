@@ -44,6 +44,7 @@ from opc.operations.benchmarks import (
     load_observations,
     load_suite,
     observation_from_run,
+    suite_execution_readiness,
 )
 from opc.operations.campaign_runner import (
     CampaignBudget,
@@ -55,6 +56,8 @@ from opc.operations.campaign_runner import (
     campaign_status,
     find_slot,
     pending_judgment_slots,
+    slot_execution_project_id,
+    subprocess_executor_preflight,
     verify_plan,
 )
 from opc.operations.judging import (
@@ -65,6 +68,10 @@ from opc.operations.judging import (
     parse_draft_response,
 )
 from opc.operations.learning_effectiveness import LearningEffectivenessPolicy
+from opc.operations.mode_advisor import (
+    ModeAssessmentRequest,
+    assess_execution_mode,
+)
 from opc.operations.experiments import (
     ShadowQualityObservation,
     bind_shadow_observation_to_transport,
@@ -96,6 +103,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     resource_app = typer.Typer(help="Run approval-gated NU resource pipelines")
     backup_app = typer.Typer(help="Create, inspect, and restore verified SQLite snapshots")
     benchmark_app = typer.Typer(help="Run versioned Task-versus-Company outcome benchmarks")
+    mode_app = typer.Typer(help="Assess Task versus Company execution fit")
     skills_app = typer.Typer(help="Assemble installed skills for explicit role capabilities")
     judge_app = typer.Typer(
         help="LLM-drafted, human-confirmed judgment for benchmark scorecards"
@@ -113,6 +121,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     ops_app.add_typer(resource_app, name="resource")
     ops_app.add_typer(backup_app, name="backup")
     ops_app.add_typer(benchmark_app, name="benchmark")
+    ops_app.add_typer(mode_app, name="mode")
     ops_app.add_typer(skills_app, name="skills")
     ops_app.add_typer(judge_app, name="judge")
 
@@ -278,36 +287,69 @@ def register_operations_cli(app: typer.Typer) -> None:
             )
         _emit(report)
 
+    @mode_app.command("assess")
+    def mode_assess(
+        request_json: Path = typer.Option(..., "--request"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+    ) -> None:
+        """Recommend Task, Company, or clarification from explicit work evidence."""
+
+        report = assess_execution_mode(
+            ModeAssessmentRequest.from_dict(_load_mapping(request_json))
+        )
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
     @benchmark_app.command("validate")
     def benchmark_validate(
         suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
+        require_execution_ready: bool = typer.Option(
+            False,
+            "--require-execution-ready",
+            help="Exit non-zero when fixtures or evidence contracts are incomplete",
+        ),
     ) -> None:
         suite = load_suite(suite_path)
-        _emit(
-            {
-                "valid": True,
-                "suite_id": suite.suite_id,
-                "version": suite.version,
-                "status": suite.status,
-                "digest": suite.digest,
-                "cases": len(suite.cases),
-                "workloads": list(suite.workloads),
-                "repetitions": suite.repetitions,
-                "minimum_paired_samples_per_workload": (
-                    suite.minimum_paired_samples_per_workload
-                ),
-            }
-        )
+        preflight = suite_execution_readiness(suite)
+        report = {
+            "valid": True,
+            "execution_ready": preflight["execution_ready"],
+            "suite_id": suite.suite_id,
+            "version": suite.version,
+            "status": suite.status,
+            "digest": suite.digest,
+            "cases": len(suite.cases),
+            "workloads": list(suite.workloads),
+            "repetitions": suite.repetitions,
+            "minimum_paired_samples_per_workload": (
+                suite.minimum_paired_samples_per_workload
+            ),
+            "execution_preflight": preflight,
+        }
+        _emit(report)
+        if require_execution_ready and not preflight["execution_ready"]:
+            raise typer.Exit(code=1)
 
     @benchmark_app.command("plan")
     def benchmark_plan(
         campaign_id: str = typer.Option(..., "--campaign-id"),
         suite_path: Path = typer.Option(DEFAULT_SUITE_PATH, "--suite"),
         output: Optional[Path] = typer.Option(None, "--output"),
+        allow_unready: bool = typer.Option(
+            False,
+            "--allow-unready",
+            help="Seal a diagnostic plan even when input preflight is blocked",
+        ),
     ) -> None:
         report = build_campaign_plan(
             load_suite(suite_path),
             campaign_id=campaign_id,
+            require_execution_ready=not allow_unready,
         )
         if output is not None:
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -431,19 +473,34 @@ def register_operations_cli(app: typer.Typer) -> None:
             False, "--dry-run", help="Show the executor command without running"
         ),
         timeout_seconds: float = typer.Option(3600.0, "--timeout-seconds", min=1),
+        task_agent: str = typer.Option(
+            "native",
+            "--task-agent",
+            help="Pinned Task arm executor: native, codex, claude_code, cursor, or opencode",
+        ),
         project: str = typer.Option("default", "--project", "-p"),
     ) -> None:
         """Execute one campaign slot end to end and emit its scoring skeleton."""
 
         plan = verify_plan(_load_mapping(plan_path))
+        executor_config = _benchmark_executor_config(
+            task_agent=task_agent,
+            timeout_seconds=timeout_seconds,
+        )
         if dry_run:
             slot = find_slot(plan, slot_id)
+            execution_project_id = slot_execution_project_id(project, slot)
             _emit(
                 {
                     "dry_run": True,
                     "slot_id": slot_id,
                     "run_id": slot["run_id"],
-                    "command": build_slot_command(slot, project_id=project),
+                    "execution_project_id": execution_project_id,
+                    "command": build_slot_command(
+                        slot,
+                        project_id=execution_project_id,
+                        config=executor_config,
+                    ),
                     "artifact_directory": str(
                         artifacts_root / slot["artifact_directory"]
                     ),
@@ -452,11 +509,22 @@ def register_operations_cli(app: typer.Typer) -> None:
             return
 
         async def action(service: OperationsService) -> dict[str, Any]:
+            preflight = subprocess_executor_preflight(
+                executor_config,
+                native_transport_ready=(
+                    service.capabilities.default_llm_transport_ready
+                ),
+            )
+            if not preflight["execution_ready"]:
+                raise ValueError(
+                    "benchmark executor preflight failed: "
+                    + "; ".join(preflight["blockers"])
+                )
             runner = CampaignSlotRunner(
                 service,
                 SubprocessSlotExecutor(
                     project_id=project,
-                    config=SubprocessExecutorConfig(timeout_seconds=timeout_seconds),
+                    config=executor_config,
                 ),
                 project_id=project,
                 artifacts_root=artifacts_root,
@@ -502,28 +570,46 @@ def register_operations_cli(app: typer.Typer) -> None:
         mode: list[str] = typer.Option([], "--mode"),
         stop_on_failure: bool = typer.Option(False, "--stop-on-failure"),
         timeout_seconds: float = typer.Option(3600.0, "--timeout-seconds", min=1),
+        task_agent: str = typer.Option(
+            "native",
+            "--task-agent",
+            help="Pinned Task arm executor: native, codex, claude_code, cursor, or opencode",
+        ),
         output: Optional[Path] = typer.Option(None, "--output"),
         project: str = typer.Option("default", "--project", "-p"),
     ) -> None:
         """Drive campaign slots in sequence with budget ceilings; resumable."""
 
         plan = verify_plan(_load_mapping(plan_path))
+        executor_config = _benchmark_executor_config(
+            task_agent=task_agent,
+            timeout_seconds=timeout_seconds,
+        )
 
         async def action(service: OperationsService) -> dict[str, Any]:
+            preflight = subprocess_executor_preflight(
+                executor_config,
+                native_transport_ready=(
+                    service.capabilities.default_llm_transport_ready
+                ),
+            )
+            if not preflight["execution_ready"]:
+                raise ValueError(
+                    "benchmark executor preflight failed: "
+                    + "; ".join(preflight["blockers"])
+                )
             campaign = CampaignRunner(
                 CampaignSlotRunner(
                     service,
                     SubprocessSlotExecutor(
                         project_id=project,
-                        config=SubprocessExecutorConfig(
-                            timeout_seconds=timeout_seconds
-                        ),
+                        config=executor_config,
                     ),
                     project_id=project,
                     artifacts_root=artifacts_root,
                 )
             )
-            return await campaign.run_campaign(
+            report = await campaign.run_campaign(
                 plan,
                 budget=CampaignBudget(
                     max_slots=max_slots,
@@ -538,6 +624,8 @@ def register_operations_cli(app: typer.Typer) -> None:
                 modes=mode or None,
                 stop_on_failure=stop_on_failure,
             )
+            report["executor_preflight"] = preflight
+            return report
 
         report = _run(project, action)
         if output is not None:
@@ -1627,6 +1715,33 @@ def register_operations_cli(app: typer.Typer) -> None:
         if fail_on_blocked and not report["promotion_evidence_eligible"]:
             raise typer.Exit(code=1)
 
+    @learning_app.command("release-playbook-plan")
+    def learning_release_playbook_plan(
+        asset_id: str = typer.Argument(...),
+        experiment_id: str = typer.Option(..., "--experiment-id"),
+        pairs: int = typer.Option(5, "--pairs", min=3),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Seal a paired release-playbook experiment without promoting the asset."""
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            return await service.learning_effectiveness.release_playbook_plan(
+                asset_id,
+                project_id=project,
+                experiment_id=experiment_id,
+                pairs=pairs,
+            )
+
+        plan = _run(project, action)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(plan)
+
     @capability_app.command("plan")
     def capability_plan(
         request_json: Path = typer.Option(..., "--request"),
@@ -2076,6 +2191,29 @@ def _clean_project_id(value: str) -> str:
     if project in {".", ".."} or Path(project).name != project or "/" in project or "\\" in project:
         raise ValueError(f"invalid project id: {project!r}")
     return project
+
+
+def _benchmark_executor_config(
+    *,
+    task_agent: str,
+    timeout_seconds: float,
+) -> SubprocessExecutorConfig:
+    normalized_agent = str(task_agent or "").strip().lower()
+    allowed_agents = {
+        "native",
+        "codex",
+        "claude_code",
+        "cursor",
+        "opencode",
+    }
+    if normalized_agent not in allowed_agents:
+        raise ValueError(
+            "task_agent must be native, codex, claude_code, cursor, or opencode"
+        )
+    return SubprocessExecutorConfig(
+        task_args=("--mode", "task", "--agent", normalized_agent),
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _served_judge_model(provider: Any, fallback: str) -> str:

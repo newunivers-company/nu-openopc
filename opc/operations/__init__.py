@@ -42,7 +42,15 @@ from opc.operations.durable import DurableRunKernel
 from opc.operations.evaluation import OutcomeEvaluator
 from opc.operations.learning import LearningAssetManager
 from opc.operations.learning_activation import LearningActivationResolver
+from opc.operations.learning_experiments import (
+    build_release_playbook_experiment,
+    verify_release_playbook_experiment,
+)
 from opc.operations.mission_control import MissionControlService
+from opc.operations.mode_advisor import (
+    ModeAssessmentRequest,
+    assess_execution_mode,
+)
 from opc.operations.operator_actions import OperatorActionService
 from opc.operations.promotion import build_promotion_dossier
 from opc.operations.repository import OperationsRepository
@@ -87,7 +95,11 @@ __all__ = [
     "DurableRunKernel",
     "LearningAssetManager",
     "LearningActivationResolver",
+    "build_release_playbook_experiment",
+    "verify_release_playbook_experiment",
     "MissionControlService",
+    "ModeAssessmentRequest",
+    "assess_execution_mode",
     "OperatorActionService",
     "build_promotion_dossier",
     "OperationsRepository",

@@ -219,6 +219,39 @@ describe('MissionControlPage governed action flow', () => {
     expect(screen.getByText('Continue the codex readiness campaign.')).toBeInTheDocument()
   })
 
+  it('renders benchmark evidence stages without implying trusted promotion', () => {
+    renderPage({
+      data: {
+        available: true,
+        project_id: 'demo',
+        alerts: [],
+        evidence_funnel: {
+          all_runs: {
+            started: 10,
+            completed: 9,
+            scored: 8,
+            accepted: 7,
+            awaiting_judgment: 1,
+          },
+          benchmark: {
+            started: 6,
+            completed: 5,
+            scored: 3,
+            accepted: 2,
+            awaiting_judgment: 2,
+          },
+        },
+      },
+    })
+
+    expect(screen.getByRole('heading', { name: 'Evidence funnel' })).toBeInTheDocument()
+    expect(screen.getByText('Benchmark runs')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Started evidence' })).toHaveAttribute('aria-valuenow', '6')
+    expect(screen.getByRole('progressbar', { name: 'Accepted evidence' })).toHaveAttribute('aria-valuenow', '2')
+    expect(screen.getByText(/does not imply trusted-pair validation/)).toBeInTheDocument()
+    expect(screen.getByText(/2 completed run\(s\) still await judgment/)).toBeInTheDocument()
+  })
+
   it('lists runs awaiting judgment with run id and benchmark slot', () => {
     renderPage({
       data: {

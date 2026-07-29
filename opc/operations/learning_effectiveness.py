@@ -7,6 +7,7 @@ from statistics import fmean
 from typing import Any, Mapping, Sequence
 
 from opc.operations.models import RunManifest, RunScorecard
+from opc.operations.learning_experiments import build_release_playbook_experiment
 from opc.operations.repository import OperationsRepository
 
 
@@ -35,6 +36,28 @@ class LearningEffectivenessService:
 
     def __init__(self, repository: OperationsRepository) -> None:
         self.repository = repository
+
+    async def release_playbook_plan(
+        self,
+        asset_id: str,
+        *,
+        project_id: str,
+        experiment_id: str,
+        pairs: int = 5,
+    ) -> dict[str, Any]:
+        asset = await self.repository.get_learning_asset(asset_id)
+        if asset is None:
+            raise KeyError(f"learning asset not found: {asset_id}")
+        if asset.project_id != project_id:
+            raise ValueError(
+                f"learning asset project {asset.project_id!r} does not match "
+                f"requested project {project_id!r}"
+            )
+        return build_release_playbook_experiment(
+            asset,
+            experiment_id=experiment_id,
+            pairs=pairs,
+        )
 
     async def report(
         self,
@@ -225,6 +248,11 @@ def build_learning_effectiveness_report(
             "success_rate": success_delta,
             "mean_interventions": intervention_delta,
             "mean_rework_cycles": rework_delta,
+            "mean_missing_required_evidence": _delta(
+                treated_summary,
+                control_summary,
+                "mean_missing_required_evidence",
+            ),
             "mean_duration_seconds": _delta(
                 treated_summary,
                 control_summary,
@@ -292,6 +320,7 @@ def _summarize(scorecards: Sequence[RunScorecard]) -> dict[str, Any]:
             "success_rate": 0.0,
             "mean_interventions": 0.0,
             "mean_rework_cycles": 0.0,
+            "mean_missing_required_evidence": 0.0,
             "mean_duration_seconds": 0.0,
             "mean_cost_usd": 0.0,
         }
@@ -314,6 +343,18 @@ def _summarize(scorecards: Sequence[RunScorecard]) -> dict[str, Any]:
         ),
         "mean_rework_cycles": mean(
             [float(item.metrics.rework_cycles) for item in scorecards]
+        ),
+        "mean_missing_required_evidence": mean(
+            [
+                float(
+                    sum(
+                        1
+                        for violation in item.violations
+                        if "evidence" in violation.lower()
+                    )
+                )
+                for item in scorecards
+            ]
         ),
         "mean_duration_seconds": mean(
             [item.metrics.duration_seconds for item in scorecards]

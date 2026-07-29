@@ -388,6 +388,61 @@ class OperationsCliTests(unittest.TestCase):
             ["credential_expiry"],
         )
 
+    def test_release_playbook_plan_seals_existing_candidate_without_promotion(self) -> None:
+        candidate = self._write_json(
+            "release-playbook.json",
+            {
+                "name": "release-evidence-playbook",
+                "kind": "release_playbook",
+                "content": {
+                    "required_steps": [
+                        "verify rights",
+                        "validate checksums",
+                        "record approval receipt",
+                    ]
+                },
+                "source_run_ids": ["release-source-run"],
+                "confidence": 0.8,
+            },
+        )
+        created = self._invoke(
+            [
+                "ops",
+                "learning",
+                "create",
+                "--candidate",
+                str(candidate),
+                "--project",
+                "demo",
+            ]
+        )
+        asset = json.loads(created.output)
+        output = self.root / "release-experiment.json"
+
+        planned = self._invoke(
+            [
+                "ops",
+                "learning",
+                "release-playbook-plan",
+                asset["asset_id"],
+                "--experiment-id",
+                "release-evidence-2026q3",
+                "--pairs",
+                "3",
+                "--output",
+                str(output),
+                "--project",
+                "demo",
+            ]
+        )
+
+        plan = json.loads(planned.output)
+        self.assertEqual(plan, json.loads(output.read_text(encoding="utf-8")))
+        self.assertFalse(plan["automatic_promotion"])
+        self.assertEqual(plan["asset"]["status_at_plan_time"], "candidate")
+        self.assertEqual(plan["design"]["slot_count"], 6)
+        self.assertEqual(len(plan["plan_digest"]), 64)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -431,8 +486,82 @@ class BenchmarkRunSlotDryRunTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertTrue(payload["dry_run"])
         self.assertEqual(payload["run_id"], plan["slots"][0]["run_id"])
+        self.assertRegex(
+            payload["execution_project_id"],
+            r"^demo-slot-[0-9a-f]{12}$",
+        )
+        project_flag = payload["command"].index("-p")
+        self.assertEqual(
+            payload["command"][project_flag + 1],
+            payload["execution_project_id"],
+        )
         self.assertIn("opc", payload["command"][0])
         self.assertIn("--json", payload["command"])
+
+        codex = self.runner.invoke(
+            app,
+            [
+                "ops", "benchmark", "run-slot", slot_id,
+                "--plan", str(plan_path),
+                "--dry-run",
+                "--task-agent", "codex",
+                "--project", "demo",
+            ],
+        )
+        self.assertEqual(codex.exit_code, 0, codex.output)
+        codex_command = json.loads(codex.output)["command"]
+        self.assertEqual(
+            codex_command[codex_command.index("--agent") + 1],
+            "codex",
+        )
+
+    def test_mode_assessment_and_execution_preflight_are_exposed(self) -> None:
+        request = self.root / "mode-request.json"
+        request.write_text(
+            json.dumps(
+                {
+                    "goal": "Ship a multi-part release",
+                    "deliverable_count": 4,
+                    "role_count": 4,
+                    "independent_workstreams": 3,
+                    "dependency_count": 2,
+                    "bounded_scope": False,
+                    "input_complete": True,
+                    "requirements_stable": True,
+                    "independent_review_required": True,
+                    "final_integration_required": True,
+                    "risk_level": "high",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assessed = self.runner.invoke(
+            app,
+            ["ops", "mode", "assess", "--request", str(request)],
+        )
+        self.assertEqual(assessed.exit_code, 0, assessed.output)
+        assessment = json.loads(assessed.output)
+        self.assertEqual(assessment["recommendation"], "company")
+        self.assertTrue(assessment["advisory_only"])
+
+        validated = self.runner.invoke(
+            app,
+            [
+                "ops",
+                "benchmark",
+                "validate",
+                "--require-execution-ready",
+            ],
+        )
+        self.assertEqual(validated.exit_code, 0, validated.output)
+        preflight = json.loads(validated.output)
+        self.assertTrue(preflight["valid"])
+        self.assertTrue(preflight["execution_ready"])
+        self.assertEqual(
+            preflight["execution_preflight"]["ready_case_count"],
+            preflight["cases"],
+        )
 
     def test_tampered_plan_is_rejected_before_any_execution(self) -> None:
         plan_path = self.root / "plan.json"

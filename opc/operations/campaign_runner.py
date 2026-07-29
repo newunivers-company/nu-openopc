@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -620,6 +621,77 @@ class SubprocessExecutorConfig:
     continue_command: tuple[str, ...] = ("opc", "session", "send")
     max_continuations: int = 12
     timeout_seconds: float = 3600.0
+    isolate_slot_projects: bool = True
+
+
+def subprocess_executor_preflight(
+    config: SubprocessExecutorConfig,
+    *,
+    native_transport_ready: bool,
+) -> dict[str, Any]:
+    """Fail closed before a campaign compares an unavailable Task executor."""
+
+    task_args = list(config.task_args)
+    try:
+        task_agent = task_args[task_args.index("--agent") + 1]
+    except (ValueError, IndexError):
+        task_agent = ""
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not task_agent:
+        blockers.append("Task executor command does not pin an --agent.")
+    elif task_agent == "native":
+        if not native_transport_ready:
+            blockers.append(
+                "Task/native LLM route is not transport-ready for live execution."
+            )
+    else:
+        executable = {
+            "codex": "codex",
+            "claude_code": "claude",
+            "cursor": "cursor-agent",
+            "opencode": "opencode",
+        }.get(task_agent)
+        if executable is None:
+            blockers.append(f"Unsupported Task executor agent: {task_agent}.")
+        elif shutil.which(executable) is None:
+            blockers.append(
+                f"Task executor {task_agent} is unavailable ({executable} not found)."
+            )
+        else:
+            warnings.append(
+                f"{task_agent} executable is present; authentication is rechecked "
+                "by the isolated slot runtime."
+            )
+    return {
+        "execution_ready": not blockers,
+        "task_agent": task_agent,
+        "native_transport_ready": bool(native_transport_ready),
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def slot_execution_project_id(
+    project_id: str,
+    slot: Mapping[str, Any],
+) -> str:
+    """Return a safe, deterministic project id that isolates one slot.
+
+    Task and Company arms must never share a mutable workplace.  The campaign
+    repository still owns the governed run manifest; this project id scopes the
+    concrete executor task, workspace, checkpoints, and external-agent session.
+    """
+
+    base = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(project_id or "benchmark"))
+    base = base.strip("-_") or "benchmark"
+    identity = str(
+        slot.get("run_id")
+        or slot.get("slot_id")
+        or _canonical_digest(dict(slot))
+    )
+    suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    return f"{base[:40]}-slot-{suffix}"
 
 
 def build_slot_command(
@@ -714,8 +786,13 @@ class SubprocessSlotExecutor:
     async def __call__(
         self, slot: Mapping[str, Any], artifact_dir: Path
     ) -> SlotExecution:
+        execution_project_id = (
+            slot_execution_project_id(self.project_id, slot)
+            if self.config.isolate_slot_projects
+            else self.project_id
+        )
         command = build_slot_command(
-            slot, project_id=self.project_id, config=self.config
+            slot, project_id=execution_project_id, config=self.config
         )
         spawn = await self._spawn(command)
         if spawn.get("timed_out"):
@@ -735,7 +812,9 @@ class SubprocessSlotExecutor:
         ):
             continuations += 1
             if reply == ANSWER_CHECKPOINTS:
-                answered = await self._answer_pending_checkpoints()
+                answered = await self._answer_pending_checkpoints(
+                    execution_project_id
+                )
                 answered_checkpoints.extend(answered)
                 reply = "continue"
             continue_command = [
@@ -743,7 +822,7 @@ class SubprocessSlotExecutor:
                 task_id,
                 reply,
                 "-p",
-                self.project_id,
+                execution_project_id,
                 "--json",
             ]
             spawn = await self._spawn(continue_command)
@@ -765,6 +844,7 @@ class SubprocessSlotExecutor:
             output_text=str(verdict["response"]) if success else "",
             metadata={
                 "command": command,
+                "execution_project_id": execution_project_id,
                 "exit_code": spawn["exit_code"],
                 "task_id": verdict["task_id"] or task_id,
                 "session_id": verdict["session_id"],
@@ -776,7 +856,9 @@ class SubprocessSlotExecutor:
             },
         )
 
-    async def _answer_pending_checkpoints(self) -> list[dict[str, str]]:
+    async def _answer_pending_checkpoints(
+        self, execution_project_id: str
+    ) -> list[dict[str, str]]:
         """Resolve parked approval checkpoints with explicit-id replies.
 
         Approval-type checkpoints intentionally refuse plain chat; each is
@@ -785,7 +867,14 @@ class SubprocessSlotExecutor:
         """
 
         listing = await self._spawn(
-            ["opc", "runtime", "checkpoints", "-p", self.project_id, "--json"]
+            [
+                "opc",
+                "runtime",
+                "checkpoints",
+                "-p",
+                execution_project_id,
+                "--json",
+            ]
         )
         answered: list[dict[str, str]] = []
         if listing.get("timed_out") or listing.get("exit_code") != 0:
@@ -820,7 +909,7 @@ class SubprocessSlotExecutor:
                     "--reply-kind",
                     reply_kind,
                     "-p",
-                    self.project_id,
+                    execution_project_id,
                     "--json",
                 ]
             )
@@ -910,10 +999,19 @@ async def campaign_status(
             "failed": 0,
             "in_flight": 0,
             "awaiting_judgment": 0,
+            "awaiting_observation": 0,
         }
         for workload in suite.workloads
     }
     awaiting: list[dict[str, Any]] = []
+    awaiting_observation: list[dict[str, Any]] = []
+    observed_keys = {
+        (row.case_id, row.mode, row.repetition)
+        for row in observations
+        if row.suite_digest == suite.digest
+        and str(row.metadata.get("campaign_id", "") or "")
+        == str(plan["campaign_id"])
+    }
     for slot in plan.get("slots", []) or []:
         workload = str(slot["workload"])
         stats = execution[workload]
@@ -940,6 +1038,24 @@ async def campaign_status(
                     "artifact_directory": slot["artifact_directory"],
                 }
             )
+            continue
+        slot_key = (
+            str(slot["case_id"]),
+            str(slot["mode"]),
+            int(slot["repetition"]),
+        )
+        if slot_key not in observed_keys:
+            stats["awaiting_observation"] += 1
+            awaiting_observation.append(
+                {
+                    "slot_id": slot["slot_id"],
+                    "run_id": run_id,
+                    "case_id": slot["case_id"],
+                    "mode": slot["mode"],
+                    "repetition": slot["repetition"],
+                    "workload": workload,
+                }
+            )
     workloads: dict[str, dict[str, Any]] = {}
     for workload in suite.workloads:
         observed = dict(progress["workloads"].get(workload, {}))
@@ -954,14 +1070,155 @@ async def campaign_status(
             **observed,
             "trusted_pairs_remaining_to_gate": max(0, minimum - trusted),
         }
+    totals = {
+        key: sum(int(stats[key]) for stats in execution.values())
+        for key in (
+            "not_started",
+            "failed",
+            "in_flight",
+            "awaiting_judgment",
+            "awaiting_observation",
+        )
+    }
+    totals.update(
+        {
+            "untrusted_observations": len(progress["untrusted_slots"]),
+            "duplicate_observations": len(progress["duplicate_slots"]),
+            "foreign_observations": len(progress["foreign_run_ids"]),
+        }
+    )
+    preflight = dict(plan.get("execution_preflight", {}) or {})
+    next_actions = _campaign_next_actions(
+        totals=totals,
+        preflight=preflight,
+        trusted_pairs_remaining=sum(
+            int(stats["trusted_pairs_remaining_to_gate"])
+            for stats in workloads.values()
+        ),
+    )
     return {
         "schema_version": 1,
         "campaign_id": plan.get("campaign_id", ""),
         "plan_digest": plan.get("plan_digest", ""),
         "suite_digest": suite.digest,
+        "execution_preflight": preflight,
         "workloads": workloads,
         "awaiting_judgment": awaiting,
+        "awaiting_observation": awaiting_observation,
+        "attention_summary": totals,
+        "next_actions": next_actions,
         "observed_slots": progress["observed_slots"],
         "trusted_pairs": progress["trusted_pairs"],
         "promotion_eligible": progress["promotion_eligible"],
     }
+
+
+def _campaign_next_actions(
+    *,
+    totals: Mapping[str, int],
+    preflight: Mapping[str, Any],
+    trusted_pairs_remaining: int,
+) -> list[dict[str, Any]]:
+    """Build a deterministic, operator-oriented campaign action queue."""
+
+    actions: list[dict[str, Any]] = []
+    if preflight and not bool(preflight.get("execution_ready", False)):
+        actions.append(
+            {
+                "priority": "critical",
+                "action": "bind_benchmark_inputs",
+                "count": int(preflight.get("blocked_case_count", 0) or 0),
+                "reason": "Benchmark input contracts are incomplete.",
+            }
+        )
+    if totals["failed"]:
+        actions.append(
+            {
+                "priority": "high",
+                "action": "diagnose_failed_slots",
+                "count": totals["failed"],
+                "reason": "Failed runs cannot become trusted paired evidence.",
+            }
+        )
+    if totals["duplicate_observations"]:
+        actions.append(
+            {
+                "priority": "high",
+                "action": "resolve_duplicate_observations",
+                "count": totals["duplicate_observations"],
+                "reason": "Retries cannot be counted as independent samples.",
+            }
+        )
+    if totals["untrusted_observations"]:
+        actions.append(
+            {
+                "priority": "high",
+                "action": "repair_untrusted_observations",
+                "count": totals["untrusted_observations"],
+                "reason": "Actual-run evidence, authority, or artifact identity is incomplete.",
+            }
+        )
+    if totals["awaiting_judgment"]:
+        actions.append(
+            {
+                "priority": "high",
+                "action": "confirm_independent_judgments",
+                "count": totals["awaiting_judgment"],
+                "reason": "Completed artifacts need criterion-level authority.",
+            }
+        )
+    if totals["awaiting_observation"]:
+        actions.append(
+            {
+                "priority": "high",
+                "action": "record_trusted_observations",
+                "count": totals["awaiting_observation"],
+                "reason": "Scored runs are not yet present in the campaign ledger.",
+            }
+        )
+    if totals["in_flight"]:
+        actions.append(
+            {
+                "priority": "medium",
+                "action": "monitor_in_flight_slots",
+                "count": totals["in_flight"],
+                "reason": "Runs are active and should settle before replacement work.",
+            }
+        )
+    if totals["foreign_observations"]:
+        actions.append(
+            {
+                "priority": "medium",
+                "action": "quarantine_foreign_observations",
+                "count": totals["foreign_observations"],
+                "reason": "Rows from another suite or campaign must stay out of this ledger.",
+            }
+        )
+    if totals["not_started"]:
+        actions.append(
+            {
+                "priority": "medium",
+                "action": "run_next_complete_pairs",
+                "count": totals["not_started"],
+                "reason": "Use pair budgets so Task and Company evidence stays balanced.",
+            }
+        )
+    if trusted_pairs_remaining:
+        actions.append(
+            {
+                "priority": "medium",
+                "action": "close_trusted_pair_gap",
+                "count": trusted_pairs_remaining,
+                "reason": "Promotion stays blocked until every workload reaches its pair floor.",
+            }
+        )
+    if not actions:
+        actions.append(
+            {
+                "priority": "low",
+                "action": "review_promotion_dossier",
+                "count": 1,
+                "reason": "Execution, judgment, and paired evidence queues are clear.",
+            }
+        )
+    return actions

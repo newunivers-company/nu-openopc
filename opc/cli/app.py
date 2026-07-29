@@ -1436,11 +1436,16 @@ async def _run_service_command(
     *,
     json_output: bool = False,
     render: Any | None = None,
+    read_only: bool = False,
 ) -> None:
     from opc.plugins.office_ui.services import ServiceError
     from opc.plugins.office_ui.services.factory import OfficeServiceFactory
 
-    async with OfficeServiceFactory(config=_get_config(), project_id=project) as services:
+    async with OfficeServiceFactory(
+        config=_get_config(),
+        project_id=project,
+        read_only=read_only,
+    ) as services:
         try:
             result = await operation(services)
         except ServiceError as exc:
@@ -2218,17 +2223,17 @@ app.add_typer(runtime_app, name="runtime")
 
 @runtime_app.command("status")
 def runtime_status(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.status(project_id=project or "default"), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.status(project_id=project or "default"), json_output=json_output, read_only=True))
 
 
 @runtime_app.command("checkpoints")
 def runtime_checkpoints(project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(50, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.checkpoints(project_id=project or "default", limit=limit), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.checkpoints(project_id=project or "default", limit=limit), json_output=json_output, read_only=True))
 
 
 @runtime_app.command("logs")
 def runtime_logs(task_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.logs(project_id=project or "default", task_id=task_id, limit=limit), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.logs(project_id=project or "default", task_id=task_id, limit=limit), json_output=json_output, read_only=True))
 
 
 @runtime_app.command("run")
@@ -2242,12 +2247,12 @@ app.add_typer(comms_app, name="comms")
 
 @comms_app.command("state")
 def comms_state(task_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.comms.state(project_id=project or "default", task_id=task_id), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.comms.state(project_id=project or "default", task_id=task_id), json_output=json_output, read_only=True))
 
 
 @comms_app.command("read")
 def comms_read(task_id: str = typer.Argument(...), path: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.comms.read(project_id=project or "default", task_id=task_id, path=path), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.comms.read(project_id=project or "default", task_id=task_id, path=path), json_output=json_output, read_only=True))
 
 
 work_item_app = typer.Typer(help="Inspect company-mode work items")
@@ -2256,22 +2261,22 @@ app.add_typer(work_item_app, name="work-item")
 
 @work_item_app.command("list")
 def work_item_list(project: Optional[str] = typer.Option(None, "--project", "-p"), role_id: Optional[str] = typer.Option(None, "--role", "--role-id"), status: Optional[str] = typer.Option(None, "--status"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.list(project_id=project or "default", role_id=role_id, status=status, limit=limit), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.list(project_id=project or "default", role_id=role_id, status=status, limit=limit), json_output=json_output, read_only=True))
 
 
 @work_item_app.command("show")
 def work_item_show(work_item_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.show(project_id=project or "default", work_item_id=work_item_id, limit=limit), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.show(project_id=project or "default", work_item_id=work_item_id, limit=limit), json_output=json_output, read_only=True))
 
 
 @work_item_app.command("logs")
 def work_item_logs(work_item_id: str = typer.Argument(""), role_id: Optional[str] = typer.Option(None, "--role", "--role-id"), project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.logs(project_id=project or "default", work_item_id=work_item_id, role_id=role_id or "", limit=limit), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.logs(project_id=project or "default", work_item_id=work_item_id, role_id=role_id or "", limit=limit), json_output=json_output, read_only=True))
 
 
 @work_item_app.command("role-status")
 def work_item_role_status(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.status_by_role(project_id=project or "default"), json_output=json_output))
+    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.status_by_role(project_id=project or "default"), json_output=json_output, read_only=True))
 
 
 channels_app = typer.Typer(help="Manage external messaging channels")

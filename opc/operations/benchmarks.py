@@ -23,6 +23,119 @@ DEFAULT_SUITE_PATH = (
 _ALLOWED_MODES = {"task", "company"}
 _TRUSTED_AUTHORITIES = {"human_confirmed", "independent_judge"}
 _CAMPAIGN_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+_UNBOUND_INPUT_REFERENCE = re.compile(
+    r"\b(?:supplied|provided|attached|existing)\b.{0,48}"
+    r"\b(?:pack|dataset|manifest|service|repository|file|script|room|input)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_MAX_INLINE_INPUT_BYTES = 128 * 1024
+
+
+@dataclass(frozen=True)
+class BenchmarkInputArtifact:
+    """One immutable inline input bundled into a benchmark case."""
+
+    name: str
+    content: str
+    sha256: str
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "BenchmarkInputArtifact":
+        name = str(data.get("name", "") or "").strip()
+        content = str(data.get("content", "") or "")
+        actual_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        claimed_digest = str(data.get("sha256", "") or "").strip().lower()
+        if claimed_digest and claimed_digest != actual_digest:
+            raise ValueError(
+                f"benchmark input artifact {name!r} does not match its SHA-256 digest"
+            )
+        artifact = cls(name=name, content=content, sha256=actual_digest)
+        artifact.validate()
+        return artifact
+
+    def validate(self) -> None:
+        path = Path(self.name)
+        if (
+            not self.name
+            or path.is_absolute()
+            or ".." in path.parts
+            or self.name.endswith("/")
+        ):
+            raise ValueError(
+                "benchmark input artifact names must be safe relative file paths"
+            )
+        if not self.content.strip():
+            raise ValueError(
+                f"benchmark input artifact {self.name!r} requires non-empty content"
+            )
+        if len(self.content.encode("utf-8")) > _MAX_INLINE_INPUT_BYTES:
+            raise ValueError(
+                f"benchmark input artifact {self.name!r} exceeds "
+                f"{_MAX_INLINE_INPUT_BYTES} bytes"
+            )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "content": self.content,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True)
+class BenchmarkInputContract:
+    """Fail-closed declaration of the material available to both benchmark arms."""
+
+    kind: str
+    artifacts: tuple[BenchmarkInputArtifact, ...] = ()
+    network_allowed: bool = False
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "BenchmarkInputContract":
+        network_allowed = data.get("network_allowed", False)
+        if not isinstance(network_allowed, bool):
+            raise ValueError(
+                "benchmark input contract network_allowed must be a boolean"
+            )
+        contract = cls(
+            kind=str(data.get("kind", "") or "").strip(),
+            artifacts=tuple(
+                BenchmarkInputArtifact.from_dict(item)
+                for item in data.get("artifacts", []) or []
+                if isinstance(item, Mapping)
+            ),
+            network_allowed=network_allowed,
+        )
+        contract.validate()
+        return contract
+
+    def validate(self) -> None:
+        if self.kind not in {"self_contained", "inline_fixture"}:
+            raise ValueError(
+                "benchmark input contract kind must be self_contained or inline_fixture"
+            )
+        if self.kind == "self_contained" and self.artifacts:
+            raise ValueError(
+                "self_contained benchmark input contracts cannot declare artifacts"
+            )
+        if self.kind == "inline_fixture" and not self.artifacts:
+            raise ValueError(
+                "inline_fixture benchmark input contracts require artifacts"
+            )
+        names = [item.name for item in self.artifacts]
+        if len(names) != len(set(names)):
+            raise ValueError("benchmark input artifact names must be unique")
+
+    @property
+    def digest(self) -> str:
+        return _canonical_digest(self.to_dict())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "network_allowed": self.network_allowed,
+            "artifacts": [item.to_dict() for item in self.artifacts],
+        }
 
 
 @dataclass(frozen=True)
@@ -33,6 +146,7 @@ class OutcomeBenchmarkCase:
     prompt: str
     goal: GoalContract
     tags: tuple[str, ...] = ()
+    input_contract: BenchmarkInputContract | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "OutcomeBenchmarkCase":
@@ -44,6 +158,11 @@ class OutcomeBenchmarkCase:
             prompt=str(data.get("prompt", "") or "").strip(),
             goal=goal,
             tags=tuple(str(item).strip() for item in data.get("tags", []) or [] if str(item).strip()),
+            input_contract=(
+                BenchmarkInputContract.from_dict(data["input_contract"])
+                if isinstance(data.get("input_contract"), Mapping)
+                else None
+            ),
         )
         case.validate()
         return case
@@ -60,7 +179,7 @@ class OutcomeBenchmarkCase:
         # wall-clock load time.
         goal.pop("created_at", None)
         goal.pop("updated_at", None)
-        return {
+        payload = {
             "case_id": self.case_id,
             "workload": self.workload,
             "title": self.title,
@@ -68,6 +187,9 @@ class OutcomeBenchmarkCase:
             "goal": goal,
             "tags": list(self.tags),
         }
+        if self.input_contract is not None:
+            payload["input_contract"] = self.input_contract.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -156,8 +278,14 @@ class OutcomeBenchmarkSuite:
 
     @property
     def digest(self) -> str:
+        # Input fixtures are execution bindings, not retroactive edits to the
+        # versioned outcome/rubric contract.  Their own SHA-256 identities and
+        # rendered contents are sealed by the campaign plan digest.
+        outcome_contract = self.to_dict()
+        for case in outcome_contract["cases"]:
+            case.pop("input_contract", None)
         encoded = json.dumps(
-            self.to_dict(),
+            outcome_contract,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -194,6 +322,111 @@ class OutcomeBenchmarkSuite:
             },
             "cases": [item.to_dict() for item in self.cases],
         }
+
+
+def case_execution_readiness(case: OutcomeBenchmarkCase) -> dict[str, Any]:
+    """Explain whether a case can be executed without inventing missing inputs."""
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    contract = case.input_contract
+    if contract is None:
+        blockers.append(
+            "input contract is missing; declare self_contained or bundle inline fixtures"
+        )
+    elif (
+        contract.kind == "self_contained"
+        and _UNBOUND_INPUT_REFERENCE.search(case.prompt)
+    ):
+        blockers.append(
+            "self_contained prompt refers to supplied, provided, attached, or "
+            "existing input that is not bundled"
+        )
+    if not case.goal.deliverables:
+        blockers.append("goal has no declared deliverables")
+    if not case.goal.acceptance_criteria:
+        blockers.append("goal has no acceptance criteria")
+    if not case.goal.evidence_requirements:
+        blockers.append("goal has no evidence requirements")
+    if contract is not None and contract.network_allowed:
+        warnings.append(
+            "network access is allowed; judges must verify that both arms used "
+            "the same time-bounded source policy"
+        )
+    return {
+        "case_id": case.case_id,
+        "workload": case.workload,
+        "execution_ready": not blockers,
+        "input_kind": contract.kind if contract is not None else "undeclared",
+        "input_contract_digest": contract.digest if contract is not None else "",
+        "artifact_count": len(contract.artifacts) if contract is not None else 0,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def suite_execution_readiness(
+    suite: OutcomeBenchmarkSuite,
+) -> dict[str, Any]:
+    """Return deterministic case-level preflight evidence for a suite."""
+
+    cases = [case_execution_readiness(case) for case in suite.cases]
+    blocked = [item for item in cases if not item["execution_ready"]]
+    input_bindings = {
+        item["case_id"]: item["input_contract_digest"] for item in cases
+    }
+    return {
+        "execution_ready": not blocked,
+        "input_binding_digest": _canonical_digest(input_bindings),
+        "ready_case_count": len(cases) - len(blocked),
+        "blocked_case_count": len(blocked),
+        "case_count": len(cases),
+        "blockers": [
+            f"{item['case_id']}: {blocker}"
+            for item in blocked
+            for blocker in item["blockers"]
+        ],
+        "warnings": [
+            f"{item['case_id']}: {warning}"
+            for item in cases
+            for warning in item["warnings"]
+        ],
+        "cases": cases,
+    }
+
+
+def render_benchmark_prompt(case: OutcomeBenchmarkCase) -> str:
+    """Bind sealed inline fixtures to the prompt seen by both benchmark arms."""
+
+    contract = case.input_contract
+    if contract is None or contract.kind == "self_contained":
+        return case.prompt
+    sections = [
+        case.prompt,
+        "",
+        "## Sealed benchmark inputs",
+        "Use only the immutable inputs below. Treat each named block as a file. "
+        "Do not replace missing facts with assumptions.",
+    ]
+    for artifact in contract.artifacts:
+        sections.extend(
+            [
+                "",
+                f"### {artifact.name}",
+                f"SHA-256: {artifact.sha256}",
+                "```",
+                artifact.content,
+                "```",
+            ]
+        )
+    if not contract.network_allowed:
+        sections.extend(
+            [
+                "",
+                "Network policy: offline. Do not browse or introduce external facts.",
+            ]
+        )
+    return "\n".join(sections)
 
 
 @dataclass(frozen=True)
@@ -370,6 +603,7 @@ def build_campaign_plan(
     suite: OutcomeBenchmarkSuite,
     *,
     campaign_id: str,
+    require_execution_ready: bool = False,
 ) -> dict[str, Any]:
     """Build a deterministic, counterbalanced execution matrix."""
 
@@ -378,6 +612,16 @@ def build_campaign_plan(
         raise ValueError(
             "benchmark campaign_id must be 1-64 safe filename characters"
         )
+    execution_preflight = suite_execution_readiness(suite)
+    if require_execution_ready and not execution_preflight["execution_ready"]:
+        summary = "; ".join(execution_preflight["blockers"][:5])
+        remaining = len(execution_preflight["blockers"]) - 5
+        if remaining > 0:
+            summary += f"; and {remaining} more blocker(s)"
+        raise ValueError(f"benchmark suite is not execution-ready: {summary}")
+    readiness_by_case = {
+        str(item["case_id"]): item for item in execution_preflight["cases"]
+    }
     pair_rows: list[tuple[str, OutcomeBenchmarkCase, int]] = []
     for case in suite.cases:
         for repetition in range(1, suite.repetitions + 1):
@@ -424,8 +668,19 @@ def build_campaign_plan(
                     "repetition": repetition,
                     "run_id": run_id,
                     "title": case.title,
-                    "prompt": case.prompt,
+                    "prompt": render_benchmark_prompt(case),
                     "goal": goal,
+                    "input_contract_digest": readiness_by_case[case.case_id][
+                        "input_contract_digest"
+                    ],
+                    "input_artifact_digests": {
+                        artifact.name: artifact.sha256
+                        for artifact in (
+                            case.input_contract.artifacts
+                            if case.input_contract is not None
+                            else ()
+                        )
+                    },
                     "artifact_directory": (
                         f"artifacts/{campaign}/{pair_id}/{mode}"
                     ),
@@ -450,6 +705,7 @@ def build_campaign_plan(
         "suite_digest": suite.digest,
         "baseline_mode": suite.baseline_mode,
         "candidate_mode": suite.candidate_mode,
+        "execution_preflight": execution_preflight,
         "counterbalance": {
             "strategy": "digest_order_alternating_first_mode",
             "baseline_first_pairs": sum(

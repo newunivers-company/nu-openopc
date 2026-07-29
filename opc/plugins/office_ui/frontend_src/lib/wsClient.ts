@@ -142,6 +142,10 @@ export interface MissionControlPayload {
   unmeasured_usage_events?: number
   provider_slo?: Record<string, MissionControlProviderSlo>
   provider_call_quotas?: Record<string, MissionControlProviderQuota>
+  evidence_funnel?: {
+    all_runs?: MissionControlEvidenceStage
+    benchmark?: MissionControlEvidenceStage
+  }
   judgment_queue?: Array<{
     run_id: string
     goal_id: string
@@ -152,6 +156,14 @@ export interface MissionControlPayload {
   alerts?: MissionControlAlert[]
   recommendations?: string[]
   generated_at?: string
+}
+
+export interface MissionControlEvidenceStage {
+  started?: number
+  completed?: number
+  scored?: number
+  accepted?: number
+  awaiting_judgment?: number
 }
 
 export interface CommsMessageItem {
