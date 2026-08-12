@@ -48,7 +48,7 @@ The source of truth for this table is `_SLASH_COMMANDS` in `opc/cli/app.py`.
 - `/org role add|update|delete|bulk-add` manages roles.
 - `/org policy update --payload ...` updates runtime policy.
 - `/org strategy update --final-decider <role>` updates organization strategy.
-- `/org saved list|save|load|delete` manages saved organization architectures.
+- `/org saved list|create|save|load|delete` manages saved organization architectures. `create` accepts repeated `--member` values as JSON or `name|responsibility|reports_to_index` plus an optional YAML/JSON `--members-file`.
 - `/agent list|detail|create|delete|move|import-employee` manages visual office agents.
 - `/talent list|employees|scan|import|import-repo|hire|employee|import-agent` manages talent templates and hired employees.
 - `/market browse|preview|list|presets|apply-preset|install|uninstall|export` manages architecture presets and `.opcpkg` packages.

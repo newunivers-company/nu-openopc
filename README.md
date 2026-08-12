@@ -177,7 +177,7 @@ can be measured against matched controls.
 
 OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events and an independently deployable fenced outbox worker, leases and bounded recovery, atomic goal settlement, plan-to-execution route contracts, explicit measured/unmeasured usage records, long-horizon provider readiness and failure drills, an approval-gated NU resource pipeline, quality-gated shadow experiments, authenticated Codex/Claude/Grok subscription routing for text-only work, immutable Self-Grown runtime snapshots, deterministic role-skill assembly, evidence-based staffing regret, and a digest-confirmed Mission Control action center.
 
-The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md). The current hardening evidence is in the [2026-07-30 validation report](docs/validation-2026-07-30.md); the [2026-07-28 report](docs/validation-2026-07-28.md), [2026-07-27 implementation report](docs/validation-2026-07-27.md), and [2026-07-23 live-provider report](docs/validation-2026-07-23.md) remain available for provenance.
+The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md). The current hardening evidence is in the [2026-08-12 validation report](docs/validation-2026-08-12.md); the [2026-07-30 report](docs/validation-2026-07-30.md), [2026-07-28 report](docs/validation-2026-07-28.md), [2026-07-27 implementation report](docs/validation-2026-07-27.md), and [2026-07-23 live-provider report](docs/validation-2026-07-23.md) remain available for provenance.
 
 ## Quick Start
 
@@ -250,6 +250,9 @@ uv run python -m playwright install chromium
 # Initialize local config, memory, skills, projects, and workspace folders
 uv run opc init
 
+# Diagnose config, databases, external agents, and channels without exposing secrets
+uv run opc doctor --json
+
 # Add an API key in .opc/config/llm_config.yaml
 # or configure the env var named by llm.api_key_env.
 
@@ -288,6 +291,20 @@ the sibling source checkouts, installed packages, and stable wheel facades
 match that release identity. OpenOPC consumes
 `ResourceGenerator.evaluate_prompt()` rather than an internal module path.
 
+The sibling paths under `[tool.uv.sources]` are development overrides. They may
+intentionally point at newer local work, but such a run is not release-equivalent.
+Check the complete release identity explicitly before recording validation
+evidence or cutting a package:
+
+```bash
+uv run python scripts/verify_nu_release_manifest.py \
+  --workspace-root .. --check-installed
+```
+
+This command is intentionally fail-closed. Do not move a sibling checkout with
+unpublished work merely to make it pass; use the pinned CI checkouts or clean
+Git worktrees at the manifest revisions instead.
+
 NU model routing is fail-open: explicit `llm.routing` entries remain
 authoritative, tool-calling turns stay on the configured OpenOPC model by
 default, and candidates without usable credentials are skipped. Resource
@@ -298,6 +315,27 @@ remain available without enabling billing.
 The CI workflow checks out both sibling repositories. If they are private,
 configure a read-only `NU_REPOS_READ_TOKEN` Actions secret with access to them;
 public repositories work with the normal workflow token.
+
+The `nu` packages are private release inputs and are not resolved from the
+default public package index. A wheel consumer must either configure the
+private index that hosts the two pinned versions or install all three release
+wheels together:
+
+```bash
+uv pip install --python .venv/bin/python \
+  '/path/to/opc-0.1.0-py3-none-any.whl[nu]' \
+  /path/to/nu_llm_routing_lib-0.4.0-py3-none-any.whl \
+  /path/to/nu_resource_gen_lib-0.2.4-py3-none-any.whl
+```
+
+Installing only `opc[nu]` against the default index is expected to fail while
+those private wheels are unavailable there. Build or download them from the
+immutable revisions in `config/nu_release_manifest.json`; do not substitute a
+newer sibling checkout when recording release-equivalent evidence.
+
+Deprecated aliases and wire compatibility are tracked in
+[`docs/compatibility.md`](docs/compatibility.md); compatibility paths have an
+explicit removal target and must not receive new behavior.
 
 ```bash
 # Interactive CLI
@@ -322,7 +360,7 @@ uv run opc exec -p demo --mode task --agent native --json "Summarize the current
 - See the official [`uv` installation](https://docs.astral.sh/uv/getting-started/installation/) and [Python management](https://docs.astral.sh/uv/guides/install-python/) docs for alternative package managers and managed Python details.
 - Node.js: `>=18` is needed when the Office UI frontend must be built.
 - `opc ui` auto-installs missing `aiohttp` / `aiosqlite` and auto-builds the frontend if needed.
-- If you have not installed external agent CLIs yet, run `opc init --no-external-agent-preflight` to skip the first-run external-agent checks.
+- If you have not installed external agent CLIs yet, run `opc init --no-external-agent-preflight`. On a fresh home, unavailable default adapters are saved as disabled so the initial `opc doctor --strict` result stays actionable; already initialized configurations are never rewritten by this shortcut. Re-enable an adapter later in `.opc/config/agent_config.yaml` after installing its CLI.
 - Browser tools are native Playwright tools. Install Chromium with `python -m playwright install chromium` before asking agents to browse pages.
 </details>
 
@@ -443,7 +481,7 @@ Company Mode turns one brief into a runtime session plus role-owned work items.
 | `Comms` | Role inboxes, unread/read/sent messages, meetings, decisions, and recent communication failures. |
 | `Team` | Runtime cockpit: teams, seats, approvals, unread communication, run state, and stop controls for the current run. |
 
-The top-level `Mission Control` page is project-scoped and model-free. It shows durable run/gate health, approval and delivery queues, provider SLOs, subscription call quotas, ordered alerts, and recommended next actions. Allowlisted recovery actions use a separate plan/review/confirm flow with an expiring SHA-256 digest and durable operator receipt. The page refreshes on entry, every 30 seconds while visible, and on demand.
+The top-level `Mission Control` page is project-scoped and model-free. It shows durable run/gate health, approval and delivery queues, provider SLOs, subscription call quotas, a dry-run storage inventory with generated-backup retention candidates, ordered alerts, and recommended next actions. Storage cleanup is never automatic and still requires a separate explicit `--apply`. Allowlisted recovery actions use a separate plan/review/confirm flow with an expiring SHA-256 digest and durable operator receipt. The page refreshes on entry, every 30 seconds while visible, and on demand.
 
 To inspect the detailed workflow for a role, open a company-mode session and click a role/work item in the `Chat` progress card or `Agents` tab. The Execution Progress panel shows each work item, its status, activity sections, tool progress, handoffs, review targets, and execution turn metadata.
 
@@ -543,7 +581,20 @@ opc comms state <task_id> -p demo
 # Recruitment
 opc talent import /path/to/agency-agents
 opc talent hire <template_id> <role_id> -p demo
+
+# Create and activate a saved organization, then apply a role preset to it
+opc org saved create "Research Lab" \
+  --member 'Lead|Own the final decision' \
+  --member 'Analyst|Research and synthesize evidence|0'
+opc market apply-preset vc_investment_firm
+
+# Read-only environment and integration diagnosis
+opc doctor --project demo --json
 ```
+
+Preset application reports `employees`/`persisted_employees` as the number
+actually retained in the saved organization. `runtime_default_employees`
+separately reports synthetic role placeholders available only at runtime.
 
 ### Interactive Slash Commands
 
@@ -576,7 +627,7 @@ See [`docs/cli-chat-slash.md`](docs/cli-chat-slash.md) for the full command tabl
 | `opc mode` | `show`, `set task`, `set company --profile corporate`, `set org --org <id>` for a saved-org company run |
 | `opc kanban` | `view`, `task create`, `task update`, `task move`, `task assign`, `task status`, `task delete --yes` |
 | `opc agent` | `list`, `create`, `create-from-template`, `import-employee`, `detail`, `move`, `delete --yes` |
-| `opc org` | `info`, `export`, `import`, `saved list/save/load/delete`, `role add/update/bulk-add/delete`, `policy update`, `strategy update`, `reset --yes` |
+| `opc org` | `info`, `export`, `import`, `saved list/create/save/load/delete`, `role add/update/bulk-add/delete`, `policy update`, `strategy update`, `reset --yes` |
 | `opc talent` | `list`, `employees`, `import`, `hire`, `scan`, `import-selected`, `employee-detail`, `import-agent` |
 | `opc market` | `presets`, `browse`, `preview`, `apply-preset`, `export`, `install`, `list`, `uninstall --yes` |
 | `opc runtime` | `status`, `checkpoints`, `logs`, `run` |
@@ -596,7 +647,7 @@ opc session create "Research sprint" -p demo --mode org --org hku_research_lab
 
 ## Configuration
 
-Run `opc init` once from the repo root. It creates `.opc/`, copies the template config from `config/`, creates memory/skills/log folders, and optionally creates the first project. Re-running `opc init --yes` preserves every existing config file byte-for-byte and installs only missing top-level templates, which safely repairs workspaces created by older partial initializers.
+Run `opc init` once from the repo root. It creates `.opc/`, copies the template config from `config/`, creates memory/skills/log folders, and optionally creates the first project. If an older or UI-created workspace has only part of the required config, run `opc init --repair`; repair preserves every existing config byte-for-byte and installs only missing top-level templates. Invalid existing YAML is reported and never overwritten. On a fresh home, `--no-external-agent-preflight` disables only unavailable default external-agent adapters; it does not modify an existing configuration. Use `opc doctor --json` for read-only initialization, filesystem, SQLite, external-agent, channel, and NU LLM routing diagnostics; add `--probe-agent-commands` only when command execution probes are intended. An enabled NU router without a usable configuration is reported as `fallback` when `fail_open` is true and does not fail `--strict`; the same condition is `blocked` and fails strict diagnostics when `fail_open` is false.
 
 <details>
 <summary><b>Expand configuration — config files, LLM keys, external agents, channels, browser/MCP, troubleshooting</b></summary>

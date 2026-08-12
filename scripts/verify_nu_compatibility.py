@@ -11,9 +11,20 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
-from scripts.verify_nu_release_manifest import DEFAULT_MANIFEST, load_manifest
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    # This verifier is intentionally executable from a wheel-only venv where
+    # OpenOPC itself is not installed. Make the sibling scripts namespace
+    # available without depending on editable-package side effects.
+    sys.path.insert(0, str(ROOT))
+
+from scripts.verify_nu_release_manifest import (  # noqa: E402
+    DEFAULT_MANIFEST,
+    load_manifest,
+)
 
 
 def verify(*, expected_llm: str, expected_resource: str) -> dict[str, Any]:

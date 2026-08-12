@@ -215,6 +215,26 @@ and authoritative Task/WorkItem references rather than copied member-session
 state. Re-run dry-run afterward; all eligible and compaction counts should be
 zero.
 
+Inventory the entire `.opc` tree and preview generated compaction-backup
+retention separately. The newest three backups in each project directory are
+always retained, and only older generated `tasks.db.backup-*` files beyond the
+age threshold become candidates:
+
+```bash
+uv run python -m opc.operations.storage_retention .opc \
+  --keep-latest 3 --max-age-days 30
+```
+
+The report includes total database, backup, and log bytes plus the twenty
+largest files. Deletion requires a separate explicit `--apply`; changed files,
+symlinks, manually named backups, and paths outside the inspected root are
+refused:
+
+```bash
+uv run python -m opc.operations.storage_retention .opc \
+  --keep-latest 3 --max-age-days 30 --apply
+```
+
 A stale worker cannot write with a fencing token after another owner takes over its expired lease. Dead-letter replay is intentionally not automatic: repair the consumer and replay with an explicit reason. Replay resets the delivery attempt budget and appends an `outbox.replayed` audit event in the same transaction.
 
 Project-store SQLite calls wait up to the configured busy timeout and retry only
@@ -570,20 +590,31 @@ failure drills for credential expiry, transport timeout, quota exhaustion, and
 model drift:
 
 ```bash
-uv run opc ops capability campaign-plan \
+uv run opc ops capability campaign-scaffold \
   --campaign-id subscription-readiness-2026q3 --provider codex \
-  --model gpt-5.6-sol --start-at 2026-07-28T03:00:00Z \
-  --output readiness-campaign.json
-uv run opc ops capability record-drill --provider codex \
-  --scenario credential_expiry --result drill-result.json --project demo
+  --model gpt-5.6-sol --request capability-request.json \
+  --output-dir readiness-campaign --project demo
+uv run opc ops capability campaign-run \
+  --plan readiness-campaign/plan.json \
+  --request readiness-campaign/request.json \
+  --iterations 12 --interval-seconds 300 --project demo
+# After independently executing and evidencing every drill template:
+uv run opc ops capability campaign-record-drills \
+  --plan readiness-campaign/plan.json \
+  --results-dir readiness-campaign --project demo
 uv run opc ops capability readiness --provider codex \
   --output readiness.json --fail-on-blocked --project demo
 ```
 
-Drill rows are stored with `mode=drill` and excluded from availability/latency
-SLO arithmetic. A drill passes only when actual injection, independent
-authority, durable evidence, expected failure, fallback, alerting, and recovery
-are all recorded.
+The scaffold seals a digest-bound plan, forces a status-only preferred-provider
+request, and creates fail-closed templates for all required drills. It neither
+generates content nor injects a failure. `campaign-run` verifies the plan digest
+before collecting genuine status samples. `campaign-record-drills` validates
+the entire result pack before writing any row, so a partial or fabricated pack
+cannot create misleading readiness evidence. Drill rows are stored with
+`mode=drill` and excluded from availability/latency SLO arithmetic. A drill
+passes only when actual injection, independent authority, durable evidence,
+expected failure, fallback, alerting, and recovery are all recorded.
 
 ### Keeping the readiness window filled without a resident engine
 
@@ -685,7 +716,7 @@ uv run opc ops staffing observe <decision-id> --observed-score 0.83 \
 
 ## Mission Control
 
-Mission Control is deterministic and model-free. It reports active/blocked runs, failed or missing scorecards, pending and dead-letter deliveries, approval checkpoints, deadlines, learning candidates, promoted assets, tracked score and cost, provider SLOs, long-window production readiness, and unmeasured usage. Alerts distinguish an SLO miss from incomplete observation/drill evidence and are ordered critical → high → medium → low.
+Mission Control is deterministic and model-free. It reports active/blocked runs, failed or missing scorecards, pending and dead-letter deliveries, approval checkpoints, deadlines, learning candidates, promoted assets, tracked score and cost, provider SLOs, long-window production readiness, unmeasured usage, and a dry-run inventory of the bound `.opc` storage root. Alerts distinguish an SLO miss from incomplete observation/drill evidence and are ordered critical → high → medium → low.
 
 Its evidence funnel separates `started → terminal → scored → accepted` runs and
 also shows completed benchmark slots still awaiting trusted judgment.
@@ -702,9 +733,12 @@ It is available through:
   plan-review-confirm receipt panel.
 
 The UI displays the evidence funnel, durable work, gate failures,
-delivery/approval queues, provider SLOs, subscription call quotas, ordered
-alerts, and deterministic next actions. A late WebSocket response is discarded
-after a project switch.
+delivery/approval queues, provider SLOs, subscription call quotas, storage
+footprint and retention candidates, ordered alerts, and deterministic next
+actions. Storage collection only reads file metadata and displays the explicit
+inspection command. Automatic cleanup is disabled; deletion still requires a
+separate reviewed invocation with `--apply`. A late WebSocket response is
+discarded after a project switch.
 
 Inspection commands such as `opc runtime status|checkpoints|logs`, communication
 state/read, and work-item list/show/logs/role-status open the store in read-only

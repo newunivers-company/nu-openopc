@@ -11,6 +11,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  python-compat:
+    name: Python ${{ matrix.python }} compatibility
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11"]
+    defaults:
+      run:
+        working-directory: nu-openopc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: nu-openopc
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.4"
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv sync --locked --extra dev --python ${{ matrix.python }}
+      - name: Exercise version-sensitive contracts
+        run: >
+          uv run --python ${{ matrix.python }} pytest -q -p no:cacheprovider
+          tests/test_operations_mode_advisor.py
+          tests/test_operations_campaign_runner.py
+          tests/test_operations_learning_effectiveness.py
+          tests/test_runtime_execution_environment.py
+
   python:
     runs-on: ubuntu-24.04
     defaults:
@@ -53,13 +81,44 @@ jobs:
       - name: Verify NU wheel-only package contracts
         run: |
           NU_WHEEL_ROOT="$RUNNER_TEMP/openopc-nu-wheels"
-          uv build --project ../nu-llm-routing-lib --wheel --out-dir "$NU_WHEEL_ROOT/llm"
-          uv build --project ../nu-resource-gen-lib --wheel --out-dir "$NU_WHEEL_ROOT/resource"
+          LLM_SOURCE_DATE_EPOCH="$(git -C ../nu-llm-routing-lib show -s --format=%ct HEAD)"
+          RESOURCE_SOURCE_DATE_EPOCH="$(git -C ../nu-resource-gen-lib show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$LLM_SOURCE_DATE_EPOCH" \
+            uv build --project ../nu-llm-routing-lib --wheel --out-dir "$NU_WHEEL_ROOT/llm"
+          SOURCE_DATE_EPOCH="$LLM_SOURCE_DATE_EPOCH" \
+            uv build --project ../nu-llm-routing-lib --wheel --out-dir "$NU_WHEEL_ROOT/llm-rebuild"
+          cmp "$NU_WHEEL_ROOT"/llm/*.whl "$NU_WHEEL_ROOT"/llm-rebuild/*.whl
+          SOURCE_DATE_EPOCH="$RESOURCE_SOURCE_DATE_EPOCH" \
+            uv build --project ../nu-resource-gen-lib --wheel --out-dir "$NU_WHEEL_ROOT/resource"
+          SOURCE_DATE_EPOCH="$RESOURCE_SOURCE_DATE_EPOCH" \
+            uv build --project ../nu-resource-gen-lib --wheel --out-dir "$NU_WHEEL_ROOT/resource-rebuild"
+          cmp "$NU_WHEEL_ROOT"/resource/*.whl "$NU_WHEEL_ROOT"/resource-rebuild/*.whl
           uv venv "$NU_WHEEL_ROOT/venv" --python 3.12
           uv pip install --python "$NU_WHEEL_ROOT/venv/bin/python" \
             "$NU_WHEEL_ROOT"/llm/*.whl "$NU_WHEEL_ROOT"/resource/*.whl
           "$NU_WHEEL_ROOT/venv/bin/python" scripts/verify_nu_compatibility.py
-      - run: uv run ruff check --select E9,F601,F63,F7,F82 opc tests scripts
+      - run: uv run ruff check opc tests scripts
+      - name: Type-check operations and extracted runtime boundaries
+        run: >
+          uv run mypy --ignore-missing-imports --follow-imports=skip
+          opc/operations
+          opc/layer2_organization/company_policy.py
+          opc/layer2_organization/company_execution_lifecycle.py
+          opc/database/schema_migrations.py
+          opc/plugins/office_ui/ws_protocol.py
+      - name: Enforce critical policy coverage floor
+        run: >
+          uv run pytest -q -p no:cacheprovider
+          --cov=opc.operations.mode_advisor
+          --cov=opc.operations.campaign_portfolio
+          --cov=opc.layer2_organization.company_policy
+          --cov=opc.operations.learning_effectiveness
+          --cov-report=term-missing
+          --cov-fail-under=80
+          tests/test_operations_mode_advisor.py
+          tests/test_operations_mission_control.py
+          tests/test_company_execution_policy.py
+          tests/test_operations_learning_effectiveness.py
       - run: uv run pytest -q -p no:cacheprovider
       - name: Validate versioned outcome benchmark contract
         run: uv run opc ops benchmark validate
@@ -82,7 +141,52 @@ jobs:
           --baseline tests/fixtures/operations_scorecard_baseline.json
           --candidate tests/fixtures/operations_scorecard_candidate.json
           --maximum-regression 0.05
-      - run: uv build
+      - name: Exercise independent product-promotion gates
+        run: >
+          uv run pytest -q -p no:cacheprovider
+          tests/test_operations_promotion.py
+          tests/test_operations_benchmarks.py
+          tests/test_operations_shadow_experiments.py
+          tests/test_operations_canary.py
+      - name: Verify committed Office UI bundle
+        run: uv run python scripts/verify_office_ui_bundle.py
+      - name: Build byte-reproducible OpenOPC distributions
+        run: |
+          OPC_SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          SOURCE_DATE_EPOCH="$OPC_SOURCE_DATE_EPOCH" uv build
+          SOURCE_DATE_EPOCH="$OPC_SOURCE_DATE_EPOCH" \
+            uv build --wheel --out-dir "$RUNNER_TEMP/openopc-wheel-rebuild"
+          cmp dist/*.whl "$RUNNER_TEMP"/openopc-wheel-rebuild/*.whl
+      - name: Verify Office UI assets in wheel
+        run: |
+          WHEEL_PATH="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$WHEEL_PATH"
+          uv run python scripts/verify_office_ui_bundle.py --wheel "$WHEEL_PATH"
+
+  platform-safety:
+    name: Runtime safety (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    defaults:
+      run:
+        working-directory: nu-openopc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: nu-openopc
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.4"
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked --extra dev --python 3.12
+      - run: >
+          uv run pytest -q -p no:cacheprovider
+          tests/test_runtime_execution_environment.py
+          tests/test_benchmark_execution_safety.py
 
   frontend:
     runs-on: ubuntu-24.04
@@ -102,5 +206,7 @@ jobs:
       - run: npm test
       - run: npm run typecheck
       - run: npm run build
+      - name: Ensure the committed production bundle is current
+        run: git diff --exit-code -- ../frontend_dist
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
