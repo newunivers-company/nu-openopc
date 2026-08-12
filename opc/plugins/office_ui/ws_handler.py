@@ -93,6 +93,13 @@ from opc.plugins.office_ui.org_architecture_snapshot import (
     apply_org_architecture_snapshot,
     parse_org_architecture_snapshot,
 )
+from opc.plugins.office_ui.ws_protocol import (
+    SUPPORTED_WS_PROTOCOL_VERSIONS,
+    VersionedWebSocketResponse,
+    WebSocketProtocolError,
+    parse_inbound_envelope,
+    version_outbound_envelope,
+)
 
 
 def _add_execution_turn_aliases(
@@ -1069,8 +1076,7 @@ class WSHandler:
 
     async def handle_ws(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
         """Handle a WebSocket connection."""
-        import aiohttp.web as web
-        ws = web.WebSocketResponse()
+        ws = VersionedWebSocketResponse()
         await ws.prepare(request)
         if bool(getattr(self, "_shutting_down", False)):
             await ws.close()
@@ -1171,6 +1177,7 @@ class WSHandler:
             self._clients -= disconnected
 
     def _prepare_outbound_envelope(self, envelope: dict[str, Any]) -> dict[str, Any] | None:
+        envelope = version_outbound_envelope(envelope)
         envelope_type = str(envelope.get("type", "") or "")
         explicit_project_id = str(envelope.get("project_id", "") or "").strip()
         payload = envelope.get("payload")
@@ -3282,13 +3289,17 @@ class WSHandler:
     async def _route_message(self, ws: Any, raw: str) -> None:
         """Parse and route an incoming WS message."""
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
+            data = parse_inbound_envelope(raw)
+        except WebSocketProtocolError as exc:
+            await self._send_ack(
+                ws,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                supported_protocol_versions=list(SUPPORTED_WS_PROTOCOL_VERSIONS),
+            )
             return
-        # ``json.loads`` succeeds for non-object frames (null/number/array/string);
-        # ``data.get`` would then raise AttributeError, escape this method, and drop the
-        # whole WS connection. Ignore anything that is not a JSON object.
-        if not isinstance(data, dict):
+        if data is None:
             return
 
         msg_type = data.get("type", "")
@@ -4434,7 +4445,7 @@ class WSHandler:
             self._clients.discard(ws)
             return False
         try:
-            result = ws.send_json(payload)
+            result = ws.send_json(version_outbound_envelope(payload))
             if inspect.isawaitable(result):
                 await result
             return True

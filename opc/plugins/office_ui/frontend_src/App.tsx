@@ -7,7 +7,6 @@ import {
   type MissionControlAlert,
   type MissionControlPayload,
 } from './lib/wsClient'
-import { PhaserGame } from './game/PhaserGame'
 import { GameBridge } from './game/GameBridge'
 import { registerTestRunner } from './game/test/eventTestRunner'
 import { getOffices, type OfficeConfig } from './game/map/OfficeStore'
@@ -32,6 +31,9 @@ import type { AgentAnimStatus, EmployeeAssignment, KanbanPhase, KanbanTask, Role
 
 const CollisionEditor = lazy(async () => ({
   default: (await import('./components/CollisionEditor')).CollisionEditor,
+}))
+const PhaserGame = lazy(async () => ({
+  default: (await import('./game/PhaserGame')).PhaserGame,
 }))
 const WorkspacePage = lazy(async () => ({
   default: (await import('./workspace/WorkspacePage')).WorkspacePage,
@@ -494,6 +496,7 @@ export default function App() {
   })
   const [eventTypeFilter, setEventTypeFilter] = useState('all')
   const [activePage, setActivePage] = useState<AppPage>('workspace')
+  const [officeVisited, setOfficeVisited] = useState(false)
   const [swarmAgents, setSwarmAgents] = useState<AgentInfo[]>([])
   const [showDevTools, setShowDevTools] = useState(false)
   const [lastTaskDoneAgent, setLastTaskDoneAgent] = useState<string | null>(null)
@@ -2442,7 +2445,13 @@ export default function App() {
                 return total > 0 ? <span className="nav-unread-badge">{total > 99 ? '99+' : total}</span> : null
               })()}
             </button>
-            <button className={`page-nav-btn${activePage === 'office' ? ' active' : ''}`} onClick={() => setActivePage('office')}>Office</button>
+            <button
+              className={`page-nav-btn${activePage === 'office' ? ' active' : ''}`}
+              onClick={() => {
+                setOfficeVisited(true)
+                setActivePage('office')
+              }}
+            >Office</button>
             <button className={`page-nav-btn${activePage === 'org' ? ' active' : ''}`} onClick={() => setActivePage('org')}>Org</button>
             <button
               className={`page-nav-btn page-nav-btn--operator${activePage === 'operations' ? ' active' : ''}`}
@@ -2664,11 +2673,14 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Grid */}
-      <main className={`main-grid${activePage !== 'office' ? ' hidden' : ''}${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+      {/* Main Grid: mounted only after the first Office visit, then retained so
+          Phaser can sleep/wake without losing scene state. */}
+      {officeVisited && <main className={`main-grid${activePage !== 'office' ? ' hidden' : ''}${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
         {/* Phaser Game Canvas */}
         <section className="canvas-wrap">
-          <PhaserGame bridge={bridgeRef.current} active={activePage === 'office'} />
+          <Suspense fallback={<PageLoading label="office" />}>
+            <PhaserGame bridge={bridgeRef.current} active={activePage === 'office'} />
+          </Suspense>
           <button className="canvas-float-btn" onClick={() => setShowSubagents((v) => !v)} title={showSubagents ? 'Hide sub-agents' : 'Show sub-agents'}>
             {showSubagents ? '👥' : '👤'}
           </button>
@@ -2838,7 +2850,7 @@ export default function App() {
               </div>
           </div>
         </aside>
-      </main>
+      </main>}
 
       {/* Developer Tools Overlay */}
       {showDevTools && (

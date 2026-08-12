@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { AttachmentRefMeta, ChatMessage, CheckpointReplyMetadata } from '../types/chat'
 import type { ProgressEntry, RoleWorkItemSummary, Session, WorkItemProgressEntry } from '../types/kanban'
+import { createLatestFrameScheduler } from '../lib/latestFrameScheduler'
 import { progressEntryKey } from '../lib/progressEntryKey'
 import { stableMessageTimelineKey } from '../lib/messageTimelineIdentity'
 import { isMessageVisibleAtDetailLevel, resultSurfaceDedupeKey } from '../lib/workItemSessions'
@@ -1693,21 +1694,31 @@ export const MessageList = React.memo(function MessageList({
     viewportSizeRef.current = { width: list.clientWidth, height: list.clientHeight }
     reconcileViewport()
     if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver((entries) => {
-      const viewportEntry = entries.find(entry => entry.target === list)
-      if (viewportEntry) {
+
+    const resizeScheduler = createLatestFrameScheduler(
+      () => {
         const previous = viewportSizeRef.current
         const next = { width: list.clientWidth, height: list.clientHeight }
         if (previous && (previous.width !== next.width || previous.height !== next.height)) {
           anchorRestorePendingRef.current = modeRef.current === 'browsing'
         }
         viewportSizeRef.current = next
-      }
-      reconcileViewport()
+        reconcileViewport()
+      },
+      (callback) => window.requestAnimationFrame(callback),
+      (handle) => window.cancelAnimationFrame(handle),
+    )
+    const observer = new ResizeObserver(() => {
+      // reconcileViewport may move scrollTop and update React state. Keep that
+      // work outside ResizeObserver delivery to avoid a resize feedback loop.
+      resizeScheduler.schedule(undefined)
     })
     observer.observe(list)
     observer.observe(content)
-    return () => observer.disconnect()
+    return () => {
+      observer.disconnect()
+      resizeScheduler.dispose()
+    }
   }, [reconcileViewport, scrollPolicy, scrollScope])
 
   useEffect(() => {

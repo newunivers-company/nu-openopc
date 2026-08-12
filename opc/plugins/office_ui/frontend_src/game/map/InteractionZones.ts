@@ -1,5 +1,5 @@
 import type { Direction, SeatDef, InteractableDef } from '../types'
-import { OFFICE_COLS, OFFICE_ROWS } from '../config'
+import { OFFICE_COLS, OFFICE_ROWS } from '../layout'
 import { getOffices, parseOfficeMapStr, type OfficeConfig } from './OfficeStore'
 
 export interface ZoneDef {

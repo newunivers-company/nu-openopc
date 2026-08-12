@@ -183,6 +183,15 @@ export function ModeAdvisorPanel({
         </div>
 
         <p>{result.summary}</p>
+        {result.observedEvidence.matchedTrustedPairs > 0 && (
+          <p>
+            {result.observedEvidence.matchedTrustedPairs} trusted pair(s) · quality delta{' '}
+            {result.observedEvidence.meanQualityDelta >= 0 ? '+' : ''}
+            {result.observedEvidence.meanQualityDelta.toFixed(2)} · duration{' '}
+            {result.observedEvidence.meanDurationRatio?.toFixed(1)}× · calls{' '}
+            {result.observedEvidence.meanExternalCallRatio?.toFixed(1)}×
+          </p>
+        )}
         {result.factors.length > 0 && (
           <ul>
             {result.factors.slice(0, 3).map(item => (

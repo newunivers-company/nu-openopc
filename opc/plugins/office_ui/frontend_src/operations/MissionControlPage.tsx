@@ -30,6 +30,25 @@ const percent = (value: number | undefined): string => (
   `${Math.round(numberOrZero(value) * 100)}%`
 )
 
+function formatBytes(value: number | undefined): string {
+  const bytes = Math.max(0, numberOrZero(value))
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let amount = bytes
+  let unit = -1
+  do {
+    amount /= 1024
+    unit += 1
+  } while (amount >= 1024 && unit < units.length - 1)
+  return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${units[unit]}`
+}
+
+function commandText(parts?: string[]): string {
+  return (parts ?? []).map(part => (
+    /^[A-Za-z0-9_./:-]+$/.test(part) ? part : JSON.stringify(part)
+  )).join(' ')
+}
+
 const severityRank: Record<string, number> = {
   critical: 0,
   high: 1,
@@ -143,6 +162,65 @@ function EvidenceFunnel({ data }: {
           <> {numberOrZero(scope?.awaiting_judgment)} completed run(s) still await judgment.</>
         )}
       </p>
+    </section>
+  )
+}
+
+function CampaignCockpit({ data }: {
+  data?: MissionControlPayload['campaign_portfolio']
+}) {
+  const campaign = data?.active_campaign
+  if (!campaign) return null
+  const gate = campaign.batch_expansion
+  const workloads = Object.entries(campaign.workloads ?? {})
+  return (
+    <section className="mc-campaign" aria-labelledby="mc-campaign-title">
+      <div className="mc-campaign-heading">
+        <div>
+          <span className="mc-section-index">00B</span>
+          <h2 id="mc-campaign-title">Campaign cockpit</h2>
+        </div>
+        <code>{campaign.campaign_id}</code>
+      </div>
+      <div className="mc-campaign-gate">
+        <div>
+          <span>Expansion phase</span>
+          <strong>{gate.phase.replaceAll('_', ' ')}</strong>
+        </div>
+        <div>
+          <span>Next pair budget</span>
+          <strong>{gate.next_pair_budget}</strong>
+        </div>
+        <div>
+          <span>Trusted pairs</span>
+          <strong>{campaign.trusted_pairs}</strong>
+        </div>
+        <div>
+          <span>Awaiting judgment</span>
+          <strong>{campaign.awaiting_judgment}</strong>
+        </div>
+      </div>
+      {workloads.length > 0 && (
+        <ul className="mc-campaign-workloads">
+          {workloads.map(([workload, stats]) => (
+            <li key={workload}>
+              <span>{workload}</span>
+              <strong>{stats.trusted_pairs} trusted pair(s)</strong>
+              <span>{stats.judged} / {stats.started} judged</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {(gate.blockers ?? []).length > 0 && (
+        <div className="mc-campaign-blockers">
+          Blocked by: {(gate.blockers ?? []).map(item => item.replaceAll('_', ' ')).join(', ')}
+        </div>
+      )}
+      <p><strong>Next authorized action:</strong> {gate.next_action}</p>
+      <small>
+        Repository-derived operating estimate only. Promotion still requires the
+        sealed observation ledger and independent dossier gates.
+      </small>
     </section>
   )
 }
@@ -309,6 +387,56 @@ function QuotaBlock({ quota }: { quota?: MissionControlProviderQuota }) {
   )
 }
 
+function StorageBlock({ storage }: { storage?: MissionControlPayload['storage'] }) {
+  if (!storage?.available) {
+    return (
+      <div className="mc-empty mc-empty--compact">
+        <strong>Storage inventory unavailable</strong>
+        <span>{storage?.reason ?? 'The runtime has not bound its storage root yet.'}</span>
+      </div>
+    )
+  }
+  const candidates = numberOrZero(storage.candidate_count)
+  const inspectCommand = commandText(storage.inspect_command)
+  return (
+    <div className="mc-storage">
+      <div className="mc-storage-total">
+        <div>
+          <span>Total footprint</span>
+          <strong>{formatBytes(storage.total_bytes)}</strong>
+        </div>
+        <span>{numberOrZero(storage.file_count)} files · dry-run only</span>
+      </div>
+      <dl className="mc-storage-breakdown">
+        <div><dt>Databases</dt><dd>{formatBytes(storage.database_bytes)}</dd></div>
+        <div><dt>Backups</dt><dd>{formatBytes(storage.backup_bytes)}</dd></div>
+        <div><dt>Logs</dt><dd>{formatBytes(storage.log_bytes)}</dd></div>
+        <div><dt>Reclaimable</dt><dd>{formatBytes(storage.candidate_bytes)}</dd></div>
+      </dl>
+      <div className={`mc-storage-candidates${candidates > 0 ? ' is-pending' : ''}`}>
+        <strong>{candidates} retention candidate{candidates === 1 ? '' : 's'}</strong>
+        <span>
+          Keep {storage.policy?.keep_latest ?? 3} newest · older than {storage.policy?.max_age_days ?? 30} days
+        </span>
+      </div>
+      {(storage.largest_files ?? []).length > 0 && (
+        <ul className="mc-storage-largest" aria-label="Largest storage files">
+          {(storage.largest_files ?? []).slice(0, 3).map(file => (
+            <li key={file.path}><code>{file.path}</code><span>{formatBytes(file.size_bytes)}</span></li>
+          ))}
+        </ul>
+      )}
+      {inspectCommand && (
+        <div className="mc-storage-command">
+          <span>Inspect again</span>
+          <code>{inspectCommand}</code>
+        </div>
+      )}
+      <small>Automatic cleanup is disabled. Applying retention always requires a separate explicit <code>--apply</code>.</small>
+    </div>
+  )
+}
+
 export function MissionControlPage({
   data,
   loading,
@@ -415,6 +543,7 @@ export function MissionControlPage({
       </section>
 
       <EvidenceFunnel data={data.evidence_funnel} />
+      <CampaignCockpit data={data.campaign_portfolio} />
 
       <div className="mc-content-grid">
         <section className="mc-section" aria-labelledby="mc-alerts-title">
@@ -477,10 +606,20 @@ export function MissionControlPage({
             )}
           </section>
 
-          <section className="mc-section" aria-labelledby="mc-next-title">
+          <section className="mc-section" aria-labelledby="mc-storage-title">
             <div className="mc-section-heading">
               <div>
                 <span className="mc-section-index">03</span>
+                <h2 id="mc-storage-title">Storage inventory</h2>
+              </div>
+            </div>
+            <StorageBlock storage={data.storage} />
+          </section>
+
+          <section className="mc-section" aria-labelledby="mc-next-title">
+            <div className="mc-section-heading">
+              <div>
+                <span className="mc-section-index">04</span>
                 <h2 id="mc-next-title">Recommended next</h2>
               </div>
             </div>
@@ -499,7 +638,7 @@ export function MissionControlPage({
           <section className="mc-section" aria-labelledby="mc-judgment-title">
             <div className="mc-section-heading">
               <div>
-                <span className="mc-section-index">04</span>
+                <span className="mc-section-index">05</span>
                 <h2 id="mc-judgment-title">Judgment queue</h2>
               </div>
               <span>{judgmentQueue.length} waiting</span>

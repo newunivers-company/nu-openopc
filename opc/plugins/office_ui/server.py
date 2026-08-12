@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -337,6 +338,26 @@ async def _on_shutdown(app: aiohttp.web.Application) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────
 
+def _install_sigterm_handler(stop_event: asyncio.Event) -> bool:
+    """Translate service-manager SIGTERM into the normal async cleanup path."""
+
+    def _request_shutdown() -> None:
+        logger.info("Office-UI received SIGTERM; starting graceful shutdown")
+        stop_event.set()
+
+    try:
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGTERM,
+            _request_shutdown,
+        )
+    except (NotImplementedError, RuntimeError, ValueError):
+        # Windows event loops and non-main-thread embeddings may not support
+        # asyncio signal handlers. Ctrl+C continues to use asyncio.run's
+        # portable cancellation path there.
+        return False
+    return True
+
+
 def run_server(
     host: str = "127.0.0.1",
     port: int = 8765,
@@ -355,6 +376,7 @@ def run_server(
     require_auth = not is_loopback_host(host) or bool(resolved_token)
 
     async def _start() -> None:
+        stop_event = asyncio.Event()
         app = await create_app(
             config=config,
             project_id=project_id,
@@ -366,16 +388,19 @@ def run_server(
         await runner.setup()
         site = aiohttp.web.TCPSite(runner, host, port)
         await site.start()
+        sigterm_handler_installed = _install_sigterm_handler(stop_event)
         logger.info(f"Office-UI running at http://{host}:{port}")
         if require_auth:
             logger.info("Office-UI authentication is enabled; open /auth?token=<configured-token> once")
         server_banner(host=host, port=port, project_id=project_id)
         # Keep running until interrupted
         try:
-            await asyncio.Event().wait()
+            await stop_event.wait()
         except asyncio.CancelledError:
             pass
         finally:
+            if sigterm_handler_installed:
+                asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
             await runner.cleanup()
 
     try:

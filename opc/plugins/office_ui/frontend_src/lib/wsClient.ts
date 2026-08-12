@@ -16,6 +16,7 @@ import type {
   WorkerNotificationPayload,
   WorkItemProgressPayload,
 } from '../types/visual'
+import { SOCKET_PROTOCOL_VERSION } from '../types/visual'
 import type { CheckpointReplyMetadata, OutgoingAttachmentPayload } from '../types/chat'
 import type { TaskPreferredAgent } from '../types/kanban'
 
@@ -124,6 +125,38 @@ export interface MissionControlProviderQuota {
   resets_at?: string | null
 }
 
+export interface MissionControlStorage {
+  available: boolean
+  reason?: string
+  root?: string
+  dry_run: boolean
+  automatic_cleanup: false
+  apply_requires_explicit_flag?: boolean
+  policy?: {
+    keep_latest: number
+    max_age_days: number
+    warning_bytes: number
+    critical_bytes: number
+  }
+  total_bytes?: number
+  database_bytes?: number
+  backup_bytes?: number
+  log_bytes?: number
+  file_count?: number
+  database_count?: number
+  backup_count?: number
+  candidate_count?: number
+  candidate_bytes?: number
+  candidates?: Array<{
+    path: string
+    size_bytes: number
+    modified_at: string
+  }>
+  largest_files?: Array<{ path: string; size_bytes: number }>
+  inspect_command?: string[]
+  apply_command?: string[]
+}
+
 export interface MissionControlPayload {
   available: boolean
   reason?: string
@@ -142,9 +175,16 @@ export interface MissionControlPayload {
   unmeasured_usage_events?: number
   provider_slo?: Record<string, MissionControlProviderSlo>
   provider_call_quotas?: Record<string, MissionControlProviderQuota>
+  storage?: MissionControlStorage
   evidence_funnel?: {
     all_runs?: MissionControlEvidenceStage
     benchmark?: MissionControlEvidenceStage
+  }
+  campaign_portfolio?: {
+    campaign_count: number
+    promotion_authority: false
+    active_campaign?: MissionControlCampaign | null
+    campaigns?: MissionControlCampaign[]
   }
   judgment_queue?: Array<{
     run_id: string
@@ -156,6 +196,40 @@ export interface MissionControlPayload {
   alerts?: MissionControlAlert[]
   recommendations?: string[]
   generated_at?: string
+}
+
+export interface MissionControlCampaign {
+  campaign_id: string
+  expected_slots: number
+  started: number
+  not_started: number
+  completed: number
+  failed: number
+  in_flight: number
+  judged: number
+  accepted: number
+  trusted_judgments: number
+  awaiting_judgment: number
+  untrusted_judgments: number
+  trusted_pairs: number
+  workloads?: Record<string, {
+    started: number
+    completed: number
+    judged: number
+    trusted_judgments: number
+    trusted_pairs: number
+  }>
+  batch_expansion: {
+    phase: string
+    expansion_ready: boolean
+    next_pair_budget: number
+    maximum_pairs_per_batch: number
+    missing_canary_workloads?: string[]
+    blockers?: string[]
+    next_action: string
+    promotion_authority: false
+    source: string
+  }
 }
 
 export interface MissionControlEvidenceStage {
@@ -356,7 +430,7 @@ export class VisualSocketClient {
     if (!this.ensureProjectScope(payload)) {
       return 'send-failed'
     }
-    const data = JSON.stringify(payload)
+    const data = this.serializeEnvelope(payload)
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       if (this.pendingQueue.length < PENDING_QUEUE_MAX) {
         this.pendingQueue.push(data)
@@ -607,7 +681,7 @@ export class VisualSocketClient {
         include: opts?.include,
         view_generation: opts?.viewGeneration,
       }
-      const wireData = JSON.stringify(payload)
+      const wireData = this.serializeEnvelope(payload)
       const request = {
         projectId: pid,
         taskId,
@@ -821,6 +895,13 @@ export class VisualSocketClient {
     return typeof value === 'string' ? value.trim() : ''
   }
 
+  private serializeEnvelope(payload: Record<string, unknown>): string {
+    return JSON.stringify({
+      ...payload,
+      protocol_version: SOCKET_PROTOCOL_VERSION,
+    })
+  }
+
   private requireProjectId(projectId: unknown, action: string): string {
     const pid = this.normalizeProjectId(projectId)
     if (!pid) {
@@ -856,6 +937,16 @@ export class VisualSocketClient {
       return
     }
     if (!parsed || typeof parsed !== 'object' || !('type' in parsed)) {
+      return
+    }
+    if (
+      parsed.protocol_version !== undefined
+      && parsed.protocol_version !== SOCKET_PROTOCOL_VERSION
+    ) {
+      this.handlers.onStatus?.(
+        'error',
+        `Unsupported WebSocket protocol version ${String(parsed.protocol_version)}`,
+      )
       return
     }
     try { switch (parsed.type) {

@@ -1,16 +1,35 @@
-import Phaser from 'phaser'
 import type { OfficeScene } from './scenes/OfficeScene'
 import type { VisualEvent, VisualSnapshot } from '../types/visual'
 import { getOffices, type OfficeConfig } from './map/OfficeStore'
 import { AgentState } from './types'
 
-export class GameBridge extends Phaser.Events.EventEmitter {
+type BridgeListener = (...args: any[]) => void
+
+export class GameBridge {
   private scene: OfficeScene | null = null
   private eventQueue: VisualEvent[] = []
   private snapshotQueue: VisualSnapshot[] = []
+  private listeners = new Map<string, Set<BridgeListener>>()
 
-  constructor() {
-    super()
+  on(event: string, listener: BridgeListener): this {
+    const listeners = this.listeners.get(event) ?? new Set<BridgeListener>()
+    listeners.add(listener)
+    this.listeners.set(event, listeners)
+    return this
+  }
+
+  off(event: string, listener: BridgeListener): this {
+    const listeners = this.listeners.get(event)
+    listeners?.delete(listener)
+    if (listeners?.size === 0) this.listeners.delete(event)
+    return this
+  }
+
+  emit(event: string, ...args: any[]): boolean {
+    const listeners = this.listeners.get(event)
+    if (!listeners?.size) return false
+    for (const listener of [...listeners]) listener(...args)
+    return true
   }
 
   setScene(scene: OfficeScene) {

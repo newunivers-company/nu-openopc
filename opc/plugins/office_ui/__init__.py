@@ -160,8 +160,17 @@ def register_cli(parent_app: typer.Typer) -> None:
         _ensure_frontend()
 
         from opc.core.config import OPCConfig, get_opc_home
+        from opc.core.initialization import inspect_initialization
 
         config_dir = get_opc_home() / "config"
+        initialization = inspect_initialization(get_opc_home())
+        if not initialization.ready:
+            detail = "Run `opc init --repair`." if initialization.state == "partial" else "Run `opc init`."
+            terminal_status(
+                f"OPC configuration is {initialization.state}",
+                kind="warning",
+                detail=detail,
+            )
         config = OPCConfig.load(config_dir) if config_dir.exists() else OPCConfig()
 
         from opc.plugins.office_ui.server import run_server

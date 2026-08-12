@@ -1,15 +1,6 @@
 import Phaser from 'phaser'
-
-export const TILE_SIZE = 32
-export const OFFICE_COLS = 20
-export const OFFICE_ROWS = 25
-export const GAP_COLS = 2
-export const OFFICE_COUNT = 3
-export const WORLD_COLS = OFFICE_COLS * OFFICE_COUNT + GAP_COLS * (OFFICE_COUNT - 1) // 64
-export const WORLD_ROWS = OFFICE_ROWS // 25
-
-export const MAP_COLS = WORLD_COLS
-export const MAP_ROWS = WORLD_ROWS
+import { TILE_SIZE } from './layout'
+export * from './layout'
 export const OUTDOOR_MARGIN_X = TILE_SIZE * 8
 export const OUTDOOR_MARGIN_TOP = TILE_SIZE * 4
 export const OUTDOOR_MARGIN_BOTTOM = TILE_SIZE * 20

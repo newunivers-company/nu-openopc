@@ -219,6 +219,46 @@ describe('MissionControlPage governed action flow', () => {
     expect(screen.getByText('Continue the codex readiness campaign.')).toBeInTheDocument()
   })
 
+  it('renders a dry-run storage inventory without an automatic cleanup control', () => {
+    renderPage({
+      data: {
+        available: true,
+        project_id: 'demo',
+        alerts: [],
+        storage: {
+          available: true,
+          root: '/tmp/.opc',
+          dry_run: true,
+          automatic_cleanup: false,
+          apply_requires_explicit_flag: true,
+          policy: {
+            keep_latest: 3,
+            max_age_days: 30,
+            warning_bytes: 1024,
+            critical_bytes: 2048,
+          },
+          total_bytes: 4096,
+          database_bytes: 2048,
+          backup_bytes: 1024,
+          log_bytes: 512,
+          file_count: 8,
+          candidate_count: 1,
+          candidate_bytes: 256,
+          largest_files: [{ path: 'projects/demo/tasks.db', size_bytes: 2048 }],
+          inspect_command: ['python', '-m', 'opc.operations.storage_retention', '/tmp/.opc'],
+          apply_command: ['python', '-m', 'opc.operations.storage_retention', '/tmp/.opc', '--apply'],
+        },
+      },
+    })
+
+    expect(screen.getByRole('heading', { name: 'Storage inventory' })).toBeInTheDocument()
+    expect(screen.getByText('1 retention candidate')).toBeInTheDocument()
+    expect(screen.getByText('4.00 KB')).toBeInTheDocument()
+    expect(screen.getByText('projects/demo/tasks.db')).toBeInTheDocument()
+    expect(screen.getByText(/Automatic cleanup is disabled/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /cleanup|retention/i })).toBeNull()
+  })
+
   it('renders benchmark evidence stages without implying trusted promotion', () => {
     renderPage({
       data: {
@@ -250,6 +290,61 @@ describe('MissionControlPage governed action flow', () => {
     expect(screen.getByRole('progressbar', { name: 'Accepted evidence' })).toHaveAttribute('aria-valuenow', '2')
     expect(screen.getByText(/does not imply trusted-pair validation/)).toBeInTheDocument()
     expect(screen.getByText(/2 completed run\(s\) still await judgment/)).toBeInTheDocument()
+  })
+
+  it('renders the bounded campaign expansion decision and next action', () => {
+    renderPage({
+      data: {
+        available: true,
+        project_id: 'demo',
+        alerts: [],
+        campaign_portfolio: {
+          campaign_count: 1,
+          promotion_authority: false,
+          active_campaign: {
+            campaign_id: 'vision-crossworkload-20260730',
+            expected_slots: 72,
+            started: 4,
+            not_started: 68,
+            completed: 4,
+            failed: 0,
+            in_flight: 0,
+            judged: 0,
+            accepted: 0,
+            trusted_judgments: 0,
+            awaiting_judgment: 4,
+            untrusted_judgments: 0,
+            trusted_pairs: 0,
+            workloads: {
+              content: {
+                started: 2,
+                completed: 2,
+                judged: 0,
+                trusted_judgments: 0,
+                trusted_pairs: 0,
+              },
+            },
+            batch_expansion: {
+              phase: 'blocked',
+              expansion_ready: false,
+              next_pair_budget: 0,
+              maximum_pairs_per_batch: 1,
+              missing_canary_workloads: ['content'],
+              blockers: ['awaiting_judgment'],
+              next_action: 'Resolve run and judgment blockers before starting another pair.',
+              promotion_authority: false,
+              source: 'repository_operational_estimate',
+            },
+          },
+        },
+      },
+    })
+
+    expect(screen.getByRole('heading', { name: 'Campaign cockpit' })).toBeInTheDocument()
+    expect(screen.getByText('vision-crossworkload-20260730')).toBeInTheDocument()
+    expect(screen.getByText('Blocked by: awaiting judgment')).toBeInTheDocument()
+    expect(screen.getByText(/Resolve run and judgment blockers/)).toBeInTheDocument()
+    expect(screen.getByText(/Promotion still requires the sealed observation ledger/)).toBeInTheDocument()
   })
 
   it('lists runs awaiting judgment with run id and benchmark slot', () => {

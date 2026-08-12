@@ -1,5 +1,7 @@
 import type { AgentAnimStatus, TaskPreferredAgent } from './kanban'
 
+export const SOCKET_PROTOCOL_VERSION = 1 as const
+
 export type RoleId = string & { readonly __brand: 'RoleId' }
 export type TemplateId = string & { readonly __brand: 'TemplateId' }
 export type EmployeeId = string & { readonly __brand: 'EmployeeId' }
@@ -65,7 +67,7 @@ export interface OrgSavedCreatePayload {
   error?: string
 }
 
-export type SocketEnvelope =
+export type SocketEnvelope = (
   | { type: 'snapshot'; payload: VisualSnapshot }
   | { type: 'event'; payload: VisualEvent }
   | { type: 'ack'; payload: Record<string, unknown> }
@@ -121,6 +123,7 @@ export type SocketEnvelope =
   | { type: 'comms_state_dirty'; payload: { project_id: string; [key: string]: unknown } }
   | { type: 'mission_control'; payload: Record<string, unknown> }
   | { type: 'mission_action'; payload: Record<string, unknown> }
+) & { readonly protocol_version?: typeof SOCKET_PROTOCOL_VERSION }
 
 export type SocketStatus = 'connecting' | 'connected' | 'disconnected' | 'error'
 

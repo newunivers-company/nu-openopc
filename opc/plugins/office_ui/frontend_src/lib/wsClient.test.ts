@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { VisualSocketClient } from './wsClient'
+import { SOCKET_PROTOCOL_VERSION } from '../types/visual'
 
 type TestSocketClient = {
   handleMessage: (raw: unknown) => void
@@ -42,6 +43,7 @@ const missionEnvelope = JSON.parse(
 ) as Record<string, unknown>
 assert.equal(missionEnvelope.type, 'mission_control')
 assert.equal(missionEnvelope.project_id, 'project-a')
+assert.equal(missionEnvelope.protocol_version, SOCKET_PROTOCOL_VERSION)
 ;(missionClient as unknown as TestSocketClient).handleMessage(JSON.stringify({
   type: 'mission_control',
   payload: { available: true, project_id: 'project-a', active_runs: 2 },
