@@ -271,7 +271,12 @@ class ToolExecutionEnvironmentTests(unittest.IsolatedAsyncioTestCase):
             env = dict(captured["kwargs"]["env"])
             self.assertEqual(args[0], "bwrap")
             self.assertIn("--unshare-net", args)
-            self.assertIn("powershell", " ".join(args).lower())
+            executable_names = {Path(str(arg)).name.lower() for arg in args}
+            self.assertTrue(
+                executable_names.intersection(
+                    {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+                )
+            )
             self.assertEqual(env["VIRTUAL_ENV"], str(venv))
             self.assertTrue(env["PATH"].startswith(str(python_path.parent)))
             self.assertEqual(result["sandbox"]["effective_wrapper"], "bwrap")
