@@ -140,6 +140,7 @@ def collect_workspace_artifacts(
 
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
+        relative_text = relative.as_posix()
         if any(part in _WORKSPACE_EXCLUDED_DIRS for part in relative.parts):
             continue
         if path.is_symlink() or not path.is_file():
@@ -150,28 +151,29 @@ def collect_workspace_artifacts(
             or path.suffix.lower() in _WORKSPACE_SECRET_SUFFIXES
             or normalized_name.startswith(".env.")
         ):
-            skipped.append({"path": str(relative), "reason": "secret_name"})
+            skipped.append({"path": relative_text, "reason": "secret_name"})
             continue
         if len(artifacts) >= policy.max_files:
-            skipped.append({"path": str(relative), "reason": "file_limit"})
+            skipped.append({"path": relative_text, "reason": "file_limit"})
             break
         size = path.stat().st_size
         if size > policy.max_file_bytes:
-            skipped.append({"path": str(relative), "reason": "file_too_large"})
+            skipped.append({"path": relative_text, "reason": "file_too_large"})
             continue
         if total_bytes + size > policy.max_total_bytes:
-            skipped.append({"path": str(relative), "reason": "total_size_limit"})
+            skipped.append({"path": relative_text, "reason": "total_size_limit"})
             break
         data = path.read_bytes()
         if b"\x00" in data:
-            skipped.append({"path": str(relative), "reason": "binary"})
+            skipped.append({"path": relative_text, "reason": "binary"})
             continue
         try:
             content = data.decode("utf-8")
         except UnicodeDecodeError:
-            skipped.append({"path": str(relative), "reason": "non_utf8"})
+            skipped.append({"path": relative_text, "reason": "non_utf8"})
             continue
-        artifacts[f"{WORKSPACE_ARTIFACT_PREFIX}/{relative.as_posix()}"] = content
+        content = content.replace("\r\n", "\n").replace("\r", "\n")
+        artifacts[f"{WORKSPACE_ARTIFACT_PREFIX}/{relative_text}"] = content
         total_bytes += len(data)
 
     return artifacts, {
@@ -204,7 +206,7 @@ def refresh_workspace_artifacts(
     for name, content in sorted(artifacts.items()):
         target = artifact_dir / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="\n")
 
     digest = write_artifact_index(artifact_dir)
     index = json.loads(
@@ -599,7 +601,7 @@ def write_artifact_index(artifact_dir: Path) -> str:
         data = path.read_bytes()
         entries.append(
             {
-                "path": str(path.relative_to(artifact_dir)),
+                "path": path.relative_to(artifact_dir).as_posix(),
                 "sha256": hashlib.sha256(data).hexdigest(),
                 "bytes": len(data),
             }

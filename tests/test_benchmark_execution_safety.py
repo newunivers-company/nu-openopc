@@ -26,8 +26,8 @@ class WorkspaceArtifactSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "src").mkdir()
-            (root / "src" / "deliverable.py").write_text(
-                "print('verified')\n", encoding="utf-8"
+            (root / "src" / "deliverable.py").write_bytes(
+                b"print('verified')\r\n"
             )
             (root / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
             (root / "private.pem").write_text("secret\n", encoding="utf-8")

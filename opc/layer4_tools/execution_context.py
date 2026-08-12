@@ -281,7 +281,7 @@ def _wrap_with_bwrap(
         "/",
         "/",
     ]
-    if not workspace_path.is_relative_to(Path("/tmp")):
+    if not workspace_path.is_relative_to(Path("/tmp").resolve()):
         # A private /tmp is safe only when it cannot hide the workspace, its
         # interpreter, or source paths. Workspaces below /tmp instead inherit
         # the host directory read-only and overlay only the workspace writable.
