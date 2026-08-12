@@ -649,6 +649,15 @@ class MemoryManager:
                     payload=payload,
                 )
             )
+        if self.history_compactor is not None:
+            try:
+                await self.history_compactor.maybe_compact_after_message(message)
+            except Exception:
+                # The transcript is authoritative and already persisted.  A
+                # summarizer/provider outage must not fail the user turn.
+                logger.opt(exception=True).warning(
+                    "Automatic history compaction failed; keeping raw transcript"
+                )
         return message
 
     async def append_session_part(

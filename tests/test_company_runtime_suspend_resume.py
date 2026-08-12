@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -9,6 +10,10 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+from opc.core.checkpoint_storage import (
+    compact_company_runtime_checkpoint_payload,
+    compact_work_item_checkpoint_metadata,
+)
 from opc.core.models import (
     CompanyMemberSession,
     DelegationRoleSession,
@@ -35,6 +40,36 @@ from opc.layer2_organization.org_work_item_planner import (
 
 
 class CompanyRuntimeSuspendResumeTests(unittest.IsolatedAsyncioTestCase):
+    def test_checkpoint_storage_policy_strips_non_authoritative_metadata(self) -> None:
+        assignment = {"employee_id": "employee-1", "agent": "codex"}
+        metadata = {
+            "employee_assignment": assignment,
+            "verification_evidence": {"raw_output": "x" * 100_000},
+            "delegation_playbook": {"prompt": "large"},
+        }
+
+        self.assertEqual(
+            compact_work_item_checkpoint_metadata(metadata),
+            {"employee_assignment": assignment},
+        )
+        compacted = compact_company_runtime_checkpoint_payload(
+            {
+                "version": 2,
+                "active_work_items": [{"metadata": metadata}],
+                "task_snapshots": [{"work_item": {"metadata": metadata}}],
+            }
+        )
+
+        self.assertEqual(compacted["version"], 3)
+        self.assertEqual(
+            compacted["active_work_items"][0]["metadata"],
+            {"employee_assignment": assignment},
+        )
+        self.assertEqual(
+            compacted["task_snapshots"][0]["work_item"]["metadata"],
+            {"employee_assignment": assignment},
+        )
+
     async def _store(self) -> OPCStore:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -210,7 +245,7 @@ class CompanyRuntimeSuspendResumeTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(len(checkpoints), 1)
                 payload = checkpoints[0].payload
-                self.assertEqual(payload["version"], 2)
+                self.assertEqual(payload["version"], 3)
                 self.assertEqual(payload["company_profile"], profile)
                 self.assertEqual(payload["parent_session_id"], f"sess-parent-{profile}")
                 self.assertEqual(payload["task_ids"], [task.id])
@@ -228,6 +263,56 @@ class CompanyRuntimeSuspendResumeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(refreshed_item.claimed_by_seat_id, "")
                 self.assertEqual(refreshed_item.metadata.get("dispatch_hold"), "company_runtime_suspended")
                 self.assertFalse(is_dispatchable(refreshed_item))
+
+    async def test_suspend_checkpoint_does_not_copy_unbounded_work_item_metadata(self) -> None:
+        store = await self._store()
+        _, task = await self._seed_runtime(store)
+        huge_verification_output = "provider-event-payload\n" * 100_000
+        await store.update_delegation_work_item(
+            "work-item-1",
+            metadata_updates={
+                "employee_assignment": {
+                    "employee_id": "employee-executor",
+                    "role_id": "executor",
+                },
+                "verification_evidence": {
+                    "status": "provided",
+                    "verdict": "pass",
+                    "raw_output": huge_verification_output,
+                },
+                "delegation_playbook": "large playbook\n" * 10_000,
+            },
+        )
+        engine = self._engine(store)
+
+        await engine.suspend_company_runtime(
+            origin_task_id=task.id,
+            session_id="sess-parent",
+            reason="user_stop",
+        )
+
+        checkpoint = (
+            await store.get_pending_checkpoints(
+                project_id="proj1",
+                session_id="sess-parent",
+                checkpoint_types=["company_runtime_suspended"],
+            )
+        )[0]
+        serialized = json.dumps(
+            checkpoint.payload,
+            ensure_ascii=False,
+            default=str,
+        )
+        snapshot = checkpoint.payload["active_work_items"][0]
+
+        self.assertEqual(checkpoint.payload["version"], 3)
+        self.assertLess(len(serialized), 100_000)
+        self.assertNotIn("provider-event-payload", serialized)
+        self.assertNotIn("delegation_playbook", snapshot["metadata"])
+        self.assertEqual(
+            snapshot["metadata"]["employee_assignment"]["employee_id"],
+            "employee-executor",
+        )
 
     async def test_continue_resumes_from_suspend_checkpoint_with_native_and_external_state(self) -> None:
         store = await self._store()
@@ -275,6 +360,11 @@ class CompanyRuntimeSuspendResumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed_item.phase, Phase.RUNNING)
         self.assertEqual(refreshed_item.metadata.get("dispatch_hold"), "")
         self.assertEqual(refreshed_item.claimed_by_role_runtime_session_id, "")
+        self.assertNotIn("progress_log", resumed_task.metadata)
+        self.assertEqual(
+            refreshed_item.metadata.get("progress_log", [])[-1],
+            "Resumed from company runtime suspend checkpoint.",
+        )
 
     async def test_second_stop_during_resumed_execution_restores_pending_checkpoint(self) -> None:
         store = await self._store()
@@ -1964,7 +2054,7 @@ class CompanyRuntimeSuspendResumeTests(unittest.IsolatedAsyncioTestCase):
         )
         runtime._claimed_task_ids.add(task.id)
         runtime._claimed_work_item_ids.add("work-item-1")
-        runtime.role_queues["executor"].append(f"work-item::work-item-1")
+        runtime.role_queues["executor"].append("work-item::work-item-1")
         captured: dict[str, Any] = {}
 
         class DummyCompanyExecutor:
@@ -2590,6 +2680,51 @@ class CompanyRuntimeSuspendResumeTests(unittest.IsolatedAsyncioTestCase):
         checkpoints = await store.get_execution_checkpoints("proj1")
         statuses = {item.checkpoint_id: item.status for item in checkpoints}
         self.assertEqual(statuses["cp-delivery"], "pending")
+
+    async def test_ignored_delivery_feedback_keeps_progress_on_work_item_owner(self) -> None:
+        store = await self._store()
+        _, task = await self._seed_runtime(store)
+        checkpoint = ExecutionCheckpoint(
+            checkpoint_id="cp-delivery-ignore",
+            project_id="proj1",
+            session_id=task.session_id,
+            task_id=task.id,
+            checkpoint_type="company_delivery_feedback",
+            payload={
+                "waiting_task_id": task.id,
+                "waiting_work_item_id": "work-item-1",
+                "task_ids": [task.id],
+                "feedback_scope": "final",
+            },
+        )
+        await store.save_execution_checkpoint(checkpoint)
+        engine = self._engine(store)
+
+        result = await engine.ignore_company_delivery_feedback_checkpoint(
+            checkpoint,
+            reply_metadata={"checkpoint_reply_kind": "ignore"},
+        )
+
+        refreshed_task = await store.get_task(task.id)
+        refreshed_item = await store.get_delegation_work_item("work-item-1")
+        refreshed_checkpoints = await store.get_execution_checkpoints(
+            project_id="proj1",
+        )
+        refreshed_checkpoint = next(
+            item
+            for item in refreshed_checkpoints
+            if item.checkpoint_id == checkpoint.checkpoint_id
+        )
+        assert refreshed_task is not None
+        assert refreshed_item is not None
+        self.assertEqual(result, "Self-evolution review ignored.")
+        self.assertNotIn("progress_log", refreshed_task.metadata)
+        self.assertEqual(
+            refreshed_item.metadata.get("progress_log", [])[-1],
+            "Delivery human review closed: self_evolution_review_ignored.",
+        )
+        self.assertEqual(refreshed_item.phase, Phase.APPROVED)
+        self.assertEqual(refreshed_checkpoint.status, "ignored")
 
     async def test_continue_clears_parent_runtime_stop_marker(self) -> None:
         store = await self._store()

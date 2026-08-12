@@ -1,0 +1,1 @@
+function i(r,s,a){let l=!0,e=null,t,n=!1;const f=()=>{if(e=null,!l||!n)return;const u=t;t=void 0,n=!1,r(u)};return{schedule(u){l&&(t=u,n=!0,e===null&&(e=s(f)))},dispose(){l&&(l=!1,t=void 0,n=!1,e!==null&&a(e),e=null)}}}export{i as c};

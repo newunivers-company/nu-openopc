@@ -1,4 +1,4 @@
-import { OFFICE_COLS, OFFICE_ROWS, GAP_COLS } from '../config'
+import { OFFICE_COLS, OFFICE_ROWS, GAP_COLS } from '../layout'
 
 export const DEFAULT_MAP_STR: string[] = [
   '####################',

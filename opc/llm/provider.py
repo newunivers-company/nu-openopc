@@ -1,13 +1,18 @@
 """LLM provider layer built on LiteLLM for unified model access."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Iterator, Mapping
 from urllib.parse import urlparse
 
 from opc.core.windows_ssl import sanitize_windows_sslkeylogfile
@@ -21,6 +26,7 @@ from opc.core.attachment_content import attachment_suffix
 from opc.core.attachment_store import AttachmentRef
 from opc.core.config import LLMConfig
 from opc.core.models import ModelCapabilitySet, RuntimeLLMEvent
+from opc.integrations.nu_llm_routing import NULlmRoutingBridge, RoutedLLMTarget
 
 litellm.suppress_debug_info = True
 litellm.drop_params = True
@@ -207,64 +213,218 @@ def _parse_tool_arguments(tool_name: str, arguments: Any) -> tuple[Any, str | No
 class LLMProvider:
     """Unified LLM interface via LiteLLM supporting tool calls."""
 
-    # Well-known provider API-key env vars that litellm reads directly when no
-    # explicit api_key is passed. Used only by ``has_credentials()`` to avoid a
-    # false "no credentials" verdict for env-based setups. Missing a provider
-    # here just preserves the old behavior (a real LLM attempt), never a wrong
-    # skip of a working key.
-    _CREDENTIAL_ENV_VARS = (
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "OPENROUTER_API_KEY",
-        "AZURE_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "MISTRAL_API_KEY",
-        "GROQ_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "TOGETHERAI_API_KEY",
-        "ARK_API_KEY",
-    )
-
     def __init__(self, config: LLMConfig, opc_home: Path | None = None) -> None:
         self.config = config
         self.opc_home = opc_home
         self._total_tokens_in = 0
         self._total_tokens_out = 0
         self._total_cost = 0.0
+        self._measured_calls = 0
+        self._unmeasured_calls = 0
+        self._calls_by_provider: dict[str, int] = {}
 
         self._api_key = config.api_key or (
             os.environ.get(config.api_key_env) if config.api_key_env else None
         ) or None
         self._api_base = config.api_base or None
+        self.nu_router = NULlmRoutingBridge(config.nu_routing, opc_home=opc_home)
+        self._last_route_target: RoutedLLMTarget | None = None
+        self._operations_service: Any | None = None
+        self._operations_project_id = "default"
+        self._operations_context: ContextVar[dict[str, Any]] = ContextVar(
+            f"openopc_llm_operations_context_{id(self)}",
+            default={},
+        )
+
+    def bind_operations_service(self, service: Any | None, *, project_id: str = "default") -> None:
+        """Route future public calls through the persisted operations contract."""
+
+        self._operations_service = service
+        self._operations_project_id = str(project_id or "default")
+
+    def inherit_operations_binding(self, source: "LLMProvider") -> None:
+        """Copy durable governance binding into a model-override child provider."""
+
+        self.bind_operations_service(
+            getattr(source, "_operations_service", None),
+            project_id=getattr(source, "_operations_project_id", "default"),
+        )
+
+    @contextmanager
+    def operations_call_context(
+        self,
+        context: Mapping[str, Any] | None = None,
+        **values: Any,
+    ) -> Iterator[None]:
+        """Attach task-local execution identity without leaking across coroutines."""
+
+        merged = {
+            **dict(self._operations_context.get()),
+            **dict(context or {}),
+            **values,
+        }
+        token = self._operations_context.set(merged)
+        try:
+            yield
+        finally:
+            self._operations_context.reset(token)
+
+    def _resolved_operations_context(
+        self,
+        explicit: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "project_id": self._operations_project_id,
+            **dict(self._operations_context.get()),
+            **dict(explicit or {}),
+        }
 
     def has_credentials(self) -> bool:
         """Whether an LLM call can plausibly authenticate.
 
-        True when a key is configured (``api_key`` / ``api_key_env``) or a
-        well-known provider env var is present. False only when no credential
-        is found anywhere — callers use that to skip LLM work that would
-        certainly fail (e.g. native agent selection when an external agent can
-        run the task instead). A False at worst degrades to rule-based behavior,
-        which stays functional; it never blocks execution.
+        True when an explicit key, an endpoint/model-matching provider env var,
+        a keyless local endpoint, or an authenticated NU subscription target is
+        available. Callers use False to skip work that would certainly fail;
+        the runtime can still degrade to rule-based behavior.
         """
-        if self._api_key:
-            return True
-        return any(os.environ.get(var) for var in self._CREDENTIAL_ENV_VARS)
+        return bool(
+            self.config.transport_readiness()["credential_ready"]
+            or self.nu_router.has_usable_target()
+        )
+
+    def default_transport_readiness(self) -> dict[str, bool]:
+        """Describe the configured LiteLLM fallback without making a model call."""
+        return self.config.transport_readiness()
 
     @property
     def stats(self) -> dict[str, Any]:
-        return {
+        stats: dict[str, Any] = {
             "tokens_in": self._total_tokens_in,
             "tokens_out": self._total_tokens_out,
             "estimated_cost": self._total_cost,
+            "measured_calls": self._measured_calls,
+            "unmeasured_calls": self._unmeasured_calls,
+            "calls_by_provider": dict(sorted(self._calls_by_provider.items())),
         }
+        if self._last_route_target is not None:
+            stats["nu_route_target"] = self._last_route_target.safe_dict()
+        return stats
+
+    def _configured_target(self, model: str) -> RoutedLLMTarget:
+        readiness = self.default_transport_readiness()
+        return RoutedLLMTarget(
+            provider="openopc_config",
+            model=model,
+            api_base=self._api_base or "",
+            api_key=self._api_key,
+            credential_configured=readiness["credential_ready"],
+            transport_ready=readiness["transport_ready"],
+        )
+
+    def _candidate_targets(
+        self,
+        task_type: str | None = None,
+        *,
+        has_tools: bool = False,
+    ) -> list[RoutedLLMTarget]:
+        if task_type and task_type in self.config.routing:
+            return [self._configured_target(self.config.routing[task_type])]
+        routed = list(self.nu_router.targets(task_type=task_type, has_tools=has_tools))
+        if routed:
+            return routed
+        return [self._configured_target(self.config.default_model)]
+
+    def _targets_for_execution_contract(
+        self,
+        targets: list[RoutedLLMTarget],
+        contract: Mapping[str, Any] | Any | None,
+    ) -> list[RoutedLLMTarget]:
+        if contract is None:
+            return targets
+        payload = (
+            dict(contract)
+            if isinstance(contract, Mapping)
+            else dict(contract.to_dict())
+            if callable(getattr(contract, "to_dict", None))
+            else {}
+        )
+        order = [
+            dict(item)
+            for item in payload.get("fallback_order", []) or []
+            if isinstance(item, Mapping)
+        ]
+        if not order:
+            primary = {
+                "provider": payload.get("planned_provider", payload.get("provider", "")),
+                "model": payload.get("planned_model", payload.get("model", "")),
+            }
+            order = [primary]
+            order.extend(
+                dict(item)
+                for item in payload.get("alternatives", []) or []
+                if isinstance(item, Mapping)
+            )
+        selected: list[RoutedLLMTarget] = []
+        for planned in order:
+            provider = str(planned.get("provider", "") or "")
+            model = str(planned.get("model", "") or "")
+            match = next(
+                (
+                    target
+                    for target in targets
+                    if target not in selected
+                    and target.provider == provider
+                    and (not model or target.model == model)
+                ),
+                None,
+            )
+            if match is not None:
+                selected.append(match)
+        if not selected:
+            raise RuntimeError("no currently available LLM target satisfies the execution contract")
+        return selected
+
+    def _select_target(
+        self,
+        task_type: str | None = None,
+        *,
+        has_tools: bool = False,
+    ) -> RoutedLLMTarget:
+        target = self._candidate_targets(task_type, has_tools=has_tools)[0]
+        self._last_route_target = target
+        return target
 
     def _select_model(self, task_type: str | None = None) -> str:
-        if task_type and task_type in self.config.routing:
-            return self.config.routing[task_type]
-        return self.config.default_model
+        return self._select_target(task_type).model
+
+    def _apply_target_transport(
+        self,
+        call_kwargs: dict[str, Any],
+        target: RoutedLLMTarget,
+    ) -> None:
+        if target.transport_kind in {"subscription_cli", "nu_native"}:
+            raise ValueError("native NU targets must execute through the NU router bridge")
+        api_base = target.api_base or self._api_base
+        if api_base:
+            call_kwargs["api_base"] = api_base
+        if target.provider == "openopc_config":
+            if target.api_key:
+                call_kwargs["api_key"] = target.api_key
+        else:
+            # A routed endpoint owns its authentication boundary.  In
+            # particular, never forward OpenOPC's default provider key to a
+            # keyless localhost target selected by the shared router.
+            call_kwargs.pop("api_key", None)
+            if target.api_key:
+                call_kwargs["api_key"] = target.api_key
+        if target.extra_body:
+            merged_extra_body = dict(target.extra_body)
+            existing = call_kwargs.get("extra_body")
+            if isinstance(existing, dict):
+                merged_extra_body.update(existing)
+            call_kwargs["extra_body"] = merged_extra_body
+        for parameter in target.unsupported_params:
+            call_kwargs.pop(parameter, None)
 
     def _config_context_window_override(self, model: str) -> int | None:
         """User-configured context window for models litellm cannot map.
@@ -291,14 +451,23 @@ class LLMProvider:
         return scalar if scalar > 0 else None
 
     def get_context_window(self, task_type: str | None = None, model: str | None = None) -> int | None:
-        resolved_model = model or self._select_model(task_type)
+        # Stream fallbacks pass the model resolved by the successful candidate.
+        # Preserve that candidate's transport metadata instead of selecting the
+        # first route again (which would also corrupt the reported last target).
+        target = (
+            self._last_route_target
+            if model is not None and task_type is None and self._last_route_target is not None
+            else self._select_target(task_type)
+        )
+        resolved_model = model or target.model
+        selected_api_base = target.api_base or self._api_base
         config_override = self._config_context_window_override(resolved_model)
         if config_override is not None:
             return config_override
-        poe_override = _poe_context_window_override(resolved_model) if _is_poe_base(self._api_base) else None
+        poe_override = _poe_context_window_override(resolved_model) if _is_poe_base(selected_api_base) else None
         if poe_override is not None:
             return poe_override
-        override = _context_window_override(resolved_model) if _is_official_openai_base(self._api_base) else None
+        override = _context_window_override(resolved_model) if _is_official_openai_base(selected_api_base) else None
         if override is not None:
             return override
         try:
@@ -312,6 +481,21 @@ class LLMProvider:
             reason = "model is not mapped in litellm"
         except Exception as e:
             reason = str(e)
+        # Subscription CLIs can legitimately return a provider-local alias
+        # (for example ``opus``) when their JSON payload omits the canonical
+        # model revision. LiteLLM cannot resolve those aliases, and there is no
+        # authoritative context-window value in the route contract. Keep the
+        # conservative denominator without presenting this expected transport
+        # limitation as a user configuration error.
+        if target.transport_kind == "subscription_cli":
+            logger.debug(
+                "Using conservative context window for subscription alias model={} "
+                "from provider={}: {}",
+                resolved_model,
+                target.provider,
+                reason,
+            )
+            return _CONTEXT_WINDOW_FALLBACK
         if resolved_model not in _context_window_fallback_warned:
             _context_window_fallback_warned.add(resolved_model)
             logger.warning(
@@ -331,7 +515,7 @@ class LLMProvider:
         task_type: str | None = None,
         model: str | None = None,
     ) -> int | None:
-        resolved_model = model or self._select_model(task_type)
+        resolved_model = model or self._select_target(task_type, has_tools=bool(tools)).model
         try:
             return int(litellm.token_counter(
                 model=resolved_model,
@@ -363,22 +547,25 @@ class LLMProvider:
         task_type: str | None = None,
         model: str | None = None,
     ) -> ModelCapabilitySet:
-        resolved_model = model or self._select_model(task_type)
+        target = self._select_target(task_type)
+        resolved_model = model or target.model
         normalized = _normalized_model_name(resolved_model)
         provider_family = resolved_model.split("/", 1)[0].strip().lower() if "/" in resolved_model else ""
         supports_thinking = any(hint in normalized for hint in ("o1", "o3", "o4", "gpt-5", "claude", "reason"))
         return ModelCapabilitySet(
             model=resolved_model,
-            supports_streaming=True,
-            supports_tool_calling=True,
-            supports_streaming_tool_calls=True,
+            supports_streaming=target.supports_streaming,
+            supports_tool_calling=target.supports_tools,
+            supports_streaming_tool_calls=target.supports_streaming and target.supports_tools,
             supports_thinking=supports_thinking,
             supports_multimodal=_looks_like_multimodal_model(resolved_model),
             supports_documents=_looks_like_document_capable_model(resolved_model),
             supports_video=_looks_like_video_capable_model(resolved_model),
             provider_family=provider_family,
             metadata={
-                "api_base": self._api_base or "",
+                "api_base": target.api_base or self._api_base or "",
+                "transport_kind": target.transport_kind,
+                "provider": target.provider,
             },
         )
 
@@ -508,45 +695,128 @@ class LLMProvider:
         task_type: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        route_contract: Mapping[str, Any] | Any | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        model = self._select_model(task_type)
+        operations_context = kwargs.pop("operations_context", None)
+        if route_contract is None and self._operations_service is not None:
+            context = self._resolved_operations_context(
+                operations_context if isinstance(operations_context, Mapping) else None
+            )
+            request = self._operations_service.create_llm_request(
+                messages=messages,
+                task_type=task_type,
+                tools=tools,
+                context=context,
+            )
+            governed_kwargs = dict(kwargs)
+            if tools is not None:
+                governed_kwargs["tools"] = tools
+            if temperature is not None:
+                governed_kwargs["temperature"] = temperature
+            if max_tokens is not None:
+                governed_kwargs["max_tokens"] = max_tokens
+            _route, result = await self._operations_service.execute_llm(
+                request,
+                self,
+                messages,
+                **governed_kwargs,
+            )
+            return result
+        targets = self._targets_for_execution_contract(
+            self._candidate_targets(task_type, has_tools=bool(tools)),
+            route_contract,
+        )
         temp = temperature if temperature is not None else self.config.temperature
-        max_tok = _clamp_max_tokens(model, max_tokens if max_tokens is not None else self.config.max_tokens)
+        requested_max = max_tokens if max_tokens is not None else self.config.max_tokens
+        timeout_seconds = float(kwargs.pop("timeout", kwargs.pop("timeout_seconds", 120.0)) or 120.0)
+        errors: list[tuple[str, Exception]] = []
+        for index, target in enumerate(targets):
+            self._last_route_target = target
+            model = target.model
+            max_tok = _clamp_max_tokens(model, requested_max)
+            logger.debug(
+                "LLM call: model={}, provider={}, transport={}, base={}, msgs={}, tools={}",
+                model,
+                target.provider,
+                target.transport_kind,
+                target.api_base or self._api_base or "default",
+                len(messages),
+                len(tools or []),
+            )
+            try:
+                if target.transport_kind in {"subscription_cli", "nu_native"}:
+                    if tools:
+                        raise ValueError("native NU LLM routes do not support tool calls")
+                    metadata = {
+                        key: value
+                        for key, value in kwargs.items()
+                        if key
+                        in {
+                            "reasoning_effort",
+                            "codex_reasoning_effort",
+                            "grok_reasoning_effort",
+                            "web_search",
+                        }
+                    }
+                    response = await asyncio.to_thread(
+                        self.nu_router.execute_text_target,
+                        target,
+                        messages=messages,
+                        temperature=temp,
+                        max_tokens=max_tok,
+                        timeout_seconds=timeout_seconds,
+                        metadata=metadata,
+                    )
+                    return self._normalize_subscription_response(response, target)
 
-        call_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temp,
-            "max_tokens": max_tok,
-            **kwargs,
-        }
-        if self._api_base:
-            call_kwargs["api_base"] = self._api_base
-        if self._api_key:
-            call_kwargs["api_key"] = self._api_key
-        if tools:
-            call_kwargs["tools"] = tools
-            call_kwargs["tool_choice"] = "auto"
-
-        logger.debug(f"LLM call: model={model}, base={self._api_base or 'default'}, msgs={len(messages)}, tools={len(tools or [])}")
-
-        try:
-            response = await litellm.acompletion(**call_kwargs)
-        except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            raise
+                call_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temp,
+                    "max_tokens": max_tok,
+                    "timeout": timeout_seconds,
+                    **kwargs,
+                }
+                self._apply_target_transport(call_kwargs, target)
+                if tools:
+                    call_kwargs["tools"] = tools
+                    call_kwargs["tool_choice"] = "auto"
+                response = await litellm.acompletion(**call_kwargs)
+                break
+            except Exception as exc:
+                errors.append((target.provider, exc))
+                if index + 1 < len(targets):
+                    logger.warning(
+                        "LLM route {} failed ({}); trying {}",
+                        target.provider,
+                        type(exc).__name__,
+                        targets[index + 1].provider,
+                    )
+                    continue
+                detail = "; ".join(
+                    f"{provider}: {type(error).__name__}: {error}"
+                    for provider, error in errors
+                )
+                logger.error("LLM call failed across {} route(s): {}", len(errors), detail)
+                raise exc
+        else:  # pragma: no cover - targets always contains at least the configured fallback
+            raise RuntimeError("no LLM targets available")
 
         usage = getattr(response, "usage", None)
         cost = 0.0
+        accounted_cost: float | None = None
         if usage:
             self._total_tokens_in += getattr(usage, "prompt_tokens", 0)
             self._total_tokens_out += getattr(usage, "completion_tokens", 0)
             try:
                 cost = litellm.completion_cost(completion_response=response)
+                accounted_cost = max(0.0, float(cost))
                 self._total_cost += cost
             except Exception:
                 pass
+        measured = usage is not None
+        self._record_call_accounting(target.provider, measured=measured)
 
         choice = response.choices[0]
         message = choice.message
@@ -556,10 +826,25 @@ class LLMProvider:
             "tool_calls": [],
             "finish_reason": choice.finish_reason,
             "model": model,
+            "provider": target.provider,
             "cost": cost,
             "usage": {
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
                 "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+            },
+            "usage_accounting": {
+                "measured": measured,
+                "source": "provider_reported" if measured else "unknown",
+                "input_tokens": getattr(usage, "prompt_tokens", None) if usage else None,
+                "output_tokens": getattr(usage, "completion_tokens", None) if usage else None,
+                "total_tokens": (
+                    int(getattr(usage, "prompt_tokens", 0) or 0)
+                    + int(getattr(usage, "completion_tokens", 0) or 0)
+                    if usage
+                    else None
+                ),
+                "cost_usd": accounted_cost,
+                "subscription_quota": {},
             },
         }
 
@@ -578,6 +863,58 @@ class LLMProvider:
                 result["tool_calls"].append(tool_call)
 
         return result
+
+    def _normalize_subscription_response(
+        self,
+        response: Any,
+        target: RoutedLLMTarget,
+    ) -> dict[str, Any]:
+        usage = dict(getattr(response, "usage", {}) or {})
+        measured = any(
+            key in usage
+            for key in ("input_tokens", "output_tokens", "total_tokens", "total_cost_usd")
+        )
+        prompt_tokens = int(usage.get("input_tokens", 0) or 0)
+        completion_tokens = int(usage.get("output_tokens", 0) or 0)
+        cost = float(usage.get("total_cost_usd", 0.0) or 0.0)
+        self._total_tokens_in += prompt_tokens
+        self._total_tokens_out += completion_tokens
+        self._total_cost += cost
+        self._record_call_accounting(target.provider, measured=measured)
+        quota = usage.get("subscription_quota")
+        return {
+            "content": str(getattr(response, "content", "") or ""),
+            "tool_calls": [],
+            "finish_reason": "stop",
+            "model": str(getattr(response, "model", "") or target.model),
+            "provider": str(getattr(response, "provider", "") or target.provider),
+            "cost": cost,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+            "usage_accounting": {
+                "measured": measured,
+                "source": (
+                    "provider_reported"
+                    if measured
+                    else "subscription_cli_unreported"
+                ),
+                "input_tokens": prompt_tokens if measured else None,
+                "output_tokens": completion_tokens if measured else None,
+                "total_tokens": prompt_tokens + completion_tokens if measured else None,
+                "cost_usd": cost if "total_cost_usd" in usage else None,
+                "subscription_quota": dict(quota) if isinstance(quota, dict) else {},
+            },
+        }
+
+    def _record_call_accounting(self, provider: str, *, measured: bool) -> None:
+        normalized = str(provider or "unknown")
+        self._calls_by_provider[normalized] = self._calls_by_provider.get(normalized, 0) + 1
+        if measured:
+            self._measured_calls += 1
+        else:
+            self._unmeasured_calls += 1
 
     def normalize_stream_event(
         self,
@@ -653,9 +990,98 @@ class LLMProvider:
         task_type: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        route_contract: Mapping[str, Any] | Any | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[RuntimeLLMEvent]:
-        model = self._select_model(task_type)
+        operations_context = kwargs.pop("operations_context", None)
+        if route_contract is None and self._operations_service is not None:
+            context = self._resolved_operations_context(
+                operations_context if isinstance(operations_context, Mapping) else None
+            )
+            request = self._operations_service.create_llm_request(
+                messages=messages,
+                task_type=task_type,
+                tools=tools,
+                context=context,
+            )
+            governed_kwargs = dict(kwargs)
+            if tools is not None:
+                governed_kwargs["tools"] = tools
+            if temperature is not None:
+                governed_kwargs["temperature"] = temperature
+            if max_tokens is not None:
+                governed_kwargs["max_tokens"] = max_tokens
+            governed_stream = self._operations_service.execute_llm_stream(
+                request,
+                self,
+                messages,
+                **governed_kwargs,
+            )
+            try:
+                async for event in governed_stream:
+                    yield event
+            finally:
+                await governed_stream.aclose()
+            return
+        targets = self._targets_for_execution_contract(
+            self._candidate_targets(task_type, has_tools=bool(tools)),
+            route_contract,
+        )
+        target = targets[0]
+        self._last_route_target = target
+        if target.transport_kind in {"subscription_cli", "nu_native"}:
+            try:
+                result = await self.chat(
+                    messages,
+                    tools=tools,
+                    task_type=task_type,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    route_contract=route_contract,
+                    **kwargs,
+                )
+            except Exception as exc:
+                yield RuntimeLLMEvent(
+                    event_type="error",
+                    model=target.model,
+                    payload={"message": str(exc)},
+                )
+                raise
+            resolved_model = str(result.get("model") or target.model)
+            yield RuntimeLLMEvent(
+                event_type="message_start",
+                model=resolved_model,
+                payload={"model": resolved_model, "provider": str(result.get("provider") or target.provider)},
+            )
+            content = str(result.get("content") or "")
+            if content:
+                yield RuntimeLLMEvent(
+                    event_type="assistant_delta",
+                    model=resolved_model,
+                    payload={"text": content},
+                )
+            usage = dict(result.get("usage", {}) or {})
+            yield RuntimeLLMEvent(
+                event_type="usage",
+                model=resolved_model,
+                payload={
+                    "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+                    "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+                    "estimated_cost_delta": float(result.get("cost", 0.0) or 0.0),
+                    "estimated_cost_total": self._total_cost,
+                    "context_window": self.get_context_window(model=resolved_model),
+                    "model": resolved_model,
+                    "provider": str(result.get("provider") or target.provider),
+                    "usage_accounting": dict(result.get("usage_accounting", {}) or {}),
+                },
+            )
+            yield RuntimeLLMEvent(
+                event_type="message_stop",
+                model=resolved_model,
+                payload={"finish_reason": str(result.get("finish_reason") or "stop")},
+            )
+            return
+        model = target.model
         temp = temperature if temperature is not None else self.config.temperature
         max_tok = _clamp_max_tokens(model, max_tokens if max_tokens is not None else self.config.max_tokens)
 
@@ -667,20 +1093,29 @@ class LLMProvider:
             "stream": True,
             **kwargs,
         }
-        if self._api_base:
-            call_kwargs["api_base"] = self._api_base
-        if self._api_key:
-            call_kwargs["api_key"] = self._api_key
+        self._apply_target_transport(call_kwargs, target)
         if tools:
             call_kwargs["tools"] = tools
             call_kwargs["tool_choice"] = "auto"
 
         logger.debug(
-            f"LLM stream call: model={model}, base={self._api_base or 'default'}, msgs={len(messages)}, tools={len(tools or [])}"
+            "LLM stream call: model={}, provider={}, base={}, msgs={}, tools={}",
+            model,
+            target.provider,
+            target.api_base or self._api_base or "default",
+            len(messages),
+            len(tools or []),
         )
 
         last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        yield RuntimeLLMEvent(event_type="message_start", model=model, payload={"model": model})
+        usage_observed = False
+        call_cost_total = 0.0
+        call_cost_known = True
+        yield RuntimeLLMEvent(
+            event_type="message_start",
+            model=model,
+            payload={"model": model, "provider": target.provider},
+        )
 
         try:
             stream = await litellm.acompletion(**call_kwargs)
@@ -688,13 +1123,14 @@ class LLMProvider:
                 async for chunk in stream:
                     for event in self.normalize_stream_event(chunk, model=model):
                         if event.event_type == "usage":
+                            usage_observed = True
                             total_prompt = int(event.payload.get("prompt_tokens", 0) or 0)
                             total_completion = int(event.payload.get("completion_tokens", 0) or 0)
                             delta_prompt = max(0, total_prompt - last_usage["prompt_tokens"])
                             delta_completion = max(0, total_completion - last_usage["completion_tokens"])
                             last_usage["prompt_tokens"] = total_prompt
                             last_usage["completion_tokens"] = total_completion
-                            cost = 0.0
+                            cost: float | None = None
                             try:
                                 prompt_cost, completion_cost = litellm.cost_per_token(
                                     model=model,
@@ -703,10 +1139,14 @@ class LLMProvider:
                                 )
                                 cost = float(prompt_cost or 0.0) + float(completion_cost or 0.0)
                             except Exception:
-                                cost = 0.0
+                                cost = None
                             self._total_tokens_in += delta_prompt
                             self._total_tokens_out += delta_completion
-                            self._total_cost += cost
+                            if cost is not None:
+                                self._total_cost += cost
+                                call_cost_total += cost
+                            else:
+                                call_cost_known = False
                             event.payload = {
                                 **dict(event.payload),
                                 "prompt_tokens": delta_prompt,
@@ -717,6 +1157,16 @@ class LLMProvider:
                                 "estimated_cost_total": self._total_cost,
                                 "context_window": event.payload.get("context_window") or self.get_context_window(model=model),
                                 "model": model,
+                                "provider": target.provider,
+                                "usage_accounting": {
+                                    "measured": True,
+                                    "source": "provider_reported",
+                                    "input_tokens": total_prompt,
+                                    "output_tokens": total_completion,
+                                    "total_tokens": total_prompt + total_completion,
+                                    "cost_usd": call_cost_total if call_cost_known else None,
+                                    "subscription_quota": {},
+                                },
                             }
                         yield event
             else:
@@ -742,7 +1192,8 @@ class LLMProvider:
                     )
                 usage = getattr(stream, "usage", None)
                 if usage:
-                    cost = 0.0
+                    usage_observed = True
+                    cost: float | None = None
                     prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                     completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
                     try:
@@ -753,10 +1204,11 @@ class LLMProvider:
                         )
                         cost = float(prompt_cost or 0.0) + float(completion_cost or 0.0)
                     except Exception:
-                        cost = 0.0
+                        cost = None
                     self._total_tokens_in += prompt_tokens
                     self._total_tokens_out += completion_tokens
-                    self._total_cost += cost
+                    if cost is not None:
+                        self._total_cost += cost
                     yield RuntimeLLMEvent(
                         event_type="usage",
                         model=model,
@@ -769,6 +1221,16 @@ class LLMProvider:
                             "estimated_cost_total": self._total_cost,
                             "context_window": self.get_context_window(model=model),
                             "model": model,
+                            "provider": target.provider,
+                            "usage_accounting": {
+                                "measured": True,
+                                "source": "provider_reported",
+                                "input_tokens": prompt_tokens,
+                                "output_tokens": completion_tokens,
+                                "total_tokens": prompt_tokens + completion_tokens,
+                                "cost_usd": cost,
+                                "subscription_quota": {},
+                            },
                         },
                     )
                 yield RuntimeLLMEvent(
@@ -776,7 +1238,9 @@ class LLMProvider:
                     model=model,
                     payload={"finish_reason": getattr(choice, "finish_reason", "stop")},
                 )
+            self._record_call_accounting(target.provider, measured=usage_observed)
         except Exception as e:
+            self._record_call_accounting(target.provider, measured=False)
             logger.error(f"LLM stream failed: {e}")
             yield RuntimeLLMEvent(
                 event_type="error",
@@ -790,12 +1254,18 @@ class LLMProvider:
         prompt: str,
         system: str | None = None,
         task_type: str | None = None,
+        *,
+        operations_context: Mapping[str, Any] | None = None,
     ) -> str:
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        result = await self.chat(messages, task_type=task_type)
+        result = await self.chat(
+            messages,
+            task_type=task_type,
+            operations_context=operations_context,
+        )
         return result["content"]
 
     def get_tool_definitions(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -1435,3 +1435,44 @@ class ReportCardRunnableFilterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReworkClaimReleaseTests(ReviewChainRecoveryTests):
+    """Claim-livelock variant 2 (2026-07-28 pilot): a child projected to
+    READY_FOR_REWORK kept its settled attempt's claim fields, so the
+    dispatcher's claim CAS refused forever while the enqueue gate kept
+    offering the card. The rework projection must release every claim."""
+
+    async def test_rework_projection_releases_child_claims(self) -> None:
+        _report_id, _review_id, review_task = await self._setup_running_review(
+            verdict={
+                "label": "reject",
+                "summary": "needs rework",
+                "blocking_issues": ["fix the defect"],
+                "followups": [],
+            }
+        )
+        stale_session = "role-runtime::stale-run::senior_engineer"
+        await self.store.update_delegation_work_item(
+            "wi-child",
+            claimed_by_role_runtime_session_id=stale_session,
+            claimed_by_seat_id="seat::team::cto::senior_engineer",
+            metadata_updates={
+                "claimed_by_role_session_id": stale_session,
+                "claimed_task_id": "task-settled-attempt",
+            },
+        )
+
+        await self.executor._finalize_review_work_item(review_task)
+
+        child = await self.store.get_delegation_work_item("wi-child")
+        self.assertEqual(child.phase, Phase.READY_FOR_REWORK)
+        self.assertEqual(
+            str(child.claimed_by_role_runtime_session_id or ""), ""
+        )
+        self.assertEqual(str(child.claimed_by_seat_id or ""), "")
+        metadata = dict(child.metadata or {})
+        self.assertEqual(
+            str(metadata.get("claimed_by_role_session_id", "") or ""), ""
+        )
+        self.assertEqual(str(metadata.get("claimed_task_id", "") or ""), "")

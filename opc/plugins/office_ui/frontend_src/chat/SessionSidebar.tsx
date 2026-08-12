@@ -232,6 +232,7 @@ export function SessionSidebar({ sessions, activeSessionId, activeChannel, secre
   const useVirtualRows = rows.length > 120
   const listRef = useRef<HTMLDivElement | null>(null)
   const rowVirtualizer = useVirtualizer({
+    enabled: useVirtualRows,
     count: rows.length,
     getScrollElement: () => listRef.current,
     estimateSize: (index) => {
@@ -241,6 +242,9 @@ export function SessionSidebar({ sessions, activeSessionId, activeChannel, secre
       return 54
     },
     overscan: 8,
+    // Measurements can update React layout. Deferring them prevents the
+    // observer callback from causing a second layout in the same delivery.
+    useAnimationFrameWithResizeObserver: true,
   })
 
   const renderPrimaryRow = useCallback((node: SessionTree) => {

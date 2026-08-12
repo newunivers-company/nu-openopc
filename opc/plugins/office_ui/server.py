@@ -4,10 +4,13 @@ Initializes OPCEngine, opens ui_state.db for agent/chat persistence,
 sets up the event adapter pipeline, and serves static files + WebSocket.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +27,13 @@ from opc.engine import OPCEngine
 from opc.plugins.office_ui.agent_store import AgentStore
 from opc.plugins.office_ui.chat_store import ChatStore
 from opc.plugins.office_ui.event_adapter import EventAdapter
+from opc.plugins.office_ui.security import (
+    UI_AUTH_COOKIE,
+    OfficeUISecurity,
+    is_loopback_host,
+    require_safe_binding,
+    resolve_auth_token,
+)
 from opc.plugins.office_ui.terminal import server_banner
 from opc.plugins.office_ui.terminal import status as terminal_status
 from opc.plugins.office_ui.ws_handler import WSHandler
@@ -38,6 +48,32 @@ _FRONTEND_NO_STORE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+}
+_UI_SECURITY_KEY = aiohttp.web.AppKey("ui_security", OfficeUISecurity)
+
+
+@aiohttp.web.middleware
+async def _security_middleware(
+    request: aiohttp.web.Request,
+    handler: Any,
+) -> aiohttp.web.StreamResponse:
+    security = request.app[_UI_SECURITY_KEY]
+    protected = request.path == "/ws" or request.path.startswith("/api/")
+    if protected and not security.is_authenticated(request):
+        raise aiohttp.web.HTTPUnauthorized(
+            text="Office UI authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if request.path == "/ws" and not security.origin_allowed(request):
+        raise aiohttp.web.HTTPForbidden(text="WebSocket origin is not allowed")
+    response = await handler(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
 
 
 def _is_under_path(path: Path, base: Path) -> bool:
@@ -88,10 +124,20 @@ def _acquire_single_instance_lock(opc_home: Path) -> Any | None:
 async def create_app(
     config: OPCConfig | None = None,
     project_id: str | None = None,
+    *,
+    auth_token: str | None = None,
+    require_auth: bool = False,
+    allowed_origins: list[str] | tuple[str, ...] | None = None,
 ) -> aiohttp.web.Application:
     """Build and return a fully-wired aiohttp Application."""
 
-    app = aiohttp.web.Application()
+    security = OfficeUISecurity.build(
+        auth_token=auth_token,
+        require_auth=require_auth,
+        allowed_origins=allowed_origins,
+    )
+    app = aiohttp.web.Application(middlewares=[_security_middleware])
+    app[_UI_SECURITY_KEY] = security
 
     # ── Load config from standard location if not provided ─────────
     if config is None:
@@ -162,6 +208,7 @@ async def create_app(
 
     # ── Routes ────────────────────────────────────────────────────────
     app.router.add_get("/ws", ws_handler.handle_ws)
+    app.router.add_get("/auth", _authenticate_browser)
 
     # Attachment download (must be registered before the SPA catch-all)
     app.router.add_get(
@@ -189,6 +236,26 @@ async def create_app(
 
 async def _serve_index(request: aiohttp.web.Request) -> aiohttp.web.FileResponse:
     return aiohttp.web.FileResponse(_STATIC_DIR / "index.html", headers=_FRONTEND_NO_STORE_HEADERS)
+
+
+async def _authenticate_browser(request: aiohttp.web.Request) -> aiohttp.web.StreamResponse:
+    """Exchange a one-time URL token for a same-site HttpOnly browser cookie."""
+
+    security = request.app[_UI_SECURITY_KEY]
+    token = str(request.query.get("token", "") or "").strip()
+    if not security.auth_token or not security.token_matches(token):
+        raise aiohttp.web.HTTPUnauthorized(text="Invalid Office UI authentication token")
+    response = aiohttp.web.Response(status=302, headers={"Location": "/"})
+    response.set_cookie(
+        UI_AUTH_COOKIE,
+        security.auth_token,
+        httponly=True,
+        secure=request.secure,
+        samesite="Strict",
+        max_age=12 * 60 * 60,
+        path="/",
+    )
+    return response
 
 
 async def _serve_asset(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -232,7 +299,7 @@ def _make_attachment_handler(engine: OPCEngine):
         if not _is_under_path(file_path.resolve(), att_store.base_dir.resolve()):
             return aiohttp.web.Response(status=403, text="Forbidden")
         ct, _ = _mt.guess_type(filename)
-        headers = {"Cache-Control": "public, max-age=86400"}
+        headers = {"Cache-Control": "private, no-store"}
         return aiohttp.web.FileResponse(file_path, headers=headers)
 
     return _handle
@@ -271,28 +338,69 @@ async def _on_shutdown(app: aiohttp.web.Application) -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────
 
+def _install_sigterm_handler(stop_event: asyncio.Event) -> bool:
+    """Translate service-manager SIGTERM into the normal async cleanup path."""
+
+    def _request_shutdown() -> None:
+        logger.info("Office-UI received SIGTERM; starting graceful shutdown")
+        stop_event.set()
+
+    try:
+        asyncio.get_running_loop().add_signal_handler(
+            signal.SIGTERM,
+            _request_shutdown,
+        )
+    except (NotImplementedError, RuntimeError, ValueError):
+        # Windows event loops and non-main-thread embeddings may not support
+        # asyncio signal handlers. Ctrl+C continues to use asyncio.run's
+        # portable cancellation path there.
+        return False
+    return True
+
+
 def run_server(
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8765,
     config: OPCConfig | None = None,
     project_id: str | None = None,
+    auth_token: str | None = None,
+    allowed_origins: list[str] | tuple[str, ...] | None = None,
 ) -> None:
     """Create and run the office-UI server (blocking)."""
 
+    resolved_token = resolve_auth_token(auth_token)
+    try:
+        require_safe_binding(host, resolved_token)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    require_auth = not is_loopback_host(host) or bool(resolved_token)
+
     async def _start() -> None:
-        app = await create_app(config=config, project_id=project_id)
+        stop_event = asyncio.Event()
+        app = await create_app(
+            config=config,
+            project_id=project_id,
+            auth_token=resolved_token,
+            require_auth=require_auth,
+            allowed_origins=allowed_origins,
+        )
         runner = aiohttp.web.AppRunner(app)
         await runner.setup()
         site = aiohttp.web.TCPSite(runner, host, port)
         await site.start()
+        sigterm_handler_installed = _install_sigterm_handler(stop_event)
         logger.info(f"Office-UI running at http://{host}:{port}")
+        if require_auth:
+            logger.info("Office-UI authentication is enabled; open /auth?token=<configured-token> once")
         server_banner(host=host, port=port, project_id=project_id)
         # Keep running until interrupted
         try:
-            await asyncio.Event().wait()
+            await stop_event.wait()
         except asyncio.CancelledError:
             pass
         finally:
+            if sigterm_handler_installed:
+                asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
             await runner.cleanup()
 
     try:

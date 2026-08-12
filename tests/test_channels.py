@@ -11,7 +11,6 @@ from opc.channels.manager import ChannelManager
 from opc.channels.session import ChannelSessionMapping
 from opc.core.config import OPCConfig
 from opc.core.models import SystemMessage, UserMessage
-from opc.engine import OPCEngine
 from opc.layer0_interaction.message_bus import MessageBus
 
 

@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from loguru import logger
 
 from opc.database.store import OPCStore
 from opc.core.events import EventBus

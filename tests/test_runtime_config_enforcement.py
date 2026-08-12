@@ -78,10 +78,10 @@ class RuntimeConfigEnforcementTests(unittest.IsolatedAsyncioTestCase):
 
     def test_external_agent_defaults_use_install_ready_modes(self) -> None:
         config = AgentsConfig()
-        self.assertEqual(config.agents["codex"].approval_mode, "auto")
-        self.assertEqual(config.agents["claude_code"].approval_mode, "full-auto")
-        self.assertEqual(config.agents["cursor"].approval_mode, "full-auto")
-        self.assertEqual(config.agents["opencode"].approval_mode, "full-auto")
+        self.assertEqual(config.agents["codex"].approval_mode, "user-settings")
+        self.assertEqual(config.agents["claude_code"].approval_mode, "user-settings")
+        self.assertEqual(config.agents["cursor"].approval_mode, "user-settings")
+        self.assertEqual(config.agents["opencode"].approval_mode, "user-settings")
         self.assertEqual(config.agents["opencode"].model, "")
 
     def test_load_migrates_legacy_external_agent_approval_modes_once(self) -> None:
@@ -107,15 +107,15 @@ class RuntimeConfigEnforcementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 {name: agent.approval_mode for name, agent in config.agents.agents.items()},
                 {
-                    "claude_code": "auto",
-                    "codex": "auto",
-                    "cursor": "auto",
-                    "opencode": "auto",
+                    "claude_code": "user-settings",
+                    "codex": "user-settings",
+                    "cursor": "user-settings",
+                    "opencode": "user-settings",
                 },
             )
             reloaded = yaml.safe_load(agent_config_path.read_text(encoding="utf-8"))
-            self.assertEqual(reloaded["external_agents"]["claude_code"]["approval_mode"], "auto")
-            self.assertEqual(reloaded["external_agents"]["codex"]["approval_mode"], "auto")
+            self.assertEqual(reloaded["external_agents"]["claude_code"]["approval_mode"], "user-settings")
+            self.assertEqual(reloaded["external_agents"]["codex"]["approval_mode"], "user-settings")
 
     def test_load_migrates_legacy_opencode_default_model(self) -> None:
         with _workspace_tempdir() as config_dir:
@@ -1032,6 +1032,65 @@ class RuntimeConfigEnforcementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AdapterRegistryConfigTests(unittest.IsolatedAsyncioTestCase):
+    async def test_subscription_health_probes_do_not_expose_account_identity(self) -> None:
+        codex = CodexAdapter(config=ExternalAgentConfig(command="codex"))
+        claude = ClaudeCodeAdapter(config=ExternalAgentConfig(command="claude"))
+        codex_result = SimpleNamespace(
+            returncode=0,
+            stdout="Logged in using ChatGPT as private@example.test",
+            stderr="",
+        )
+        claude_result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '{"loggedIn":true,"subscriptionType":"max",'
+                '"authMethod":"oauth","email":"private@example.test"}'
+            ),
+            stderr="",
+        )
+
+        with patch.object(codex, "resolve_binary", return_value="/usr/bin/codex"), patch(
+            "opc.layer3_agent.adapters.codex_adapter.subprocess.run",
+            return_value=codex_result,
+        ):
+            codex_health = await codex.probe_health()
+        with patch.object(claude, "resolve_binary", return_value="/usr/bin/claude"), patch(
+            "opc.layer3_agent.adapters.claude_code.subprocess.run",
+            return_value=claude_result,
+        ):
+            claude_health = await claude.probe_health()
+
+        self.assertTrue(codex_health["transport_ready"])
+        self.assertTrue(claude_health["transport_ready"])
+        self.assertNotIn("private@example.test", codex_health["detail"])
+        self.assertNotIn("private@example.test", claude_health["detail"])
+        self.assertIn("subscription=max", claude_health["detail"])
+
+    async def test_registry_uses_deep_transport_health_not_binary_presence(self) -> None:
+        config = AgentsConfig()
+        for name, agent_config in config.agents.items():
+            agent_config.enabled = name == "codex"
+        registry = AdapterRegistry(config)
+
+        with patch.object(
+            CodexAdapter,
+            "probe_health",
+            AsyncMock(
+                return_value={
+                    "available": True,
+                    "credential_ready": False,
+                    "transport_ready": False,
+                    "detail": "subscription login expired",
+                }
+            ),
+        ):
+            await registry.initialize()
+
+        self.assertEqual(registry.list_available(), [])
+        codex = next(item for item in registry.describe_all() if item["agent"] == "codex")
+        self.assertFalse(codex["available"])
+        self.assertEqual(codex["health"]["detail"], "subscription login expired")
+
     async def test_disabled_agents_are_not_marked_available(self) -> None:
         config = AgentsConfig()
         for agent_config in config.agents.values():

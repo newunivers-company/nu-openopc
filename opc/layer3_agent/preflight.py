@@ -285,7 +285,6 @@ def run_external_agent_preflight(
 def _describe_collaboration_rpc_transport() -> tuple[str, str]:
     from opc.layer4_tools.collaboration_rpc import (
         OPC_COLLAB_RPC_TRANSPORT,
-        default_collaboration_rpc_transport,
         resolve_collaboration_rpc_transport,
     )
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from opc.core.config import build_company_org_payload_from_config
+
 from .context import OfficeServiceContext
 from .models import ServiceError, ServiceEvent, ServiceResult
 
@@ -46,10 +48,21 @@ class MarketService:
         if strategy not in {"namespace", "overwrite"}:
             raise ServiceError("invalid_strategy", "Strategy must be namespace or overwrite")
         async with self.context.config_lock:
+            cfg_org = self.context.engine.config.org
+            active_identity = {
+                "organization_id": cfg_org.organization_id,
+                "organization_name": cfg_org.organization_name,
+                "organization_config_file": cfg_org.organization_config_file,
+                "company_name": cfg_org.company_name,
+            }
             info = apply_architecture_preset_to_config(self.context.engine.config, preset_id, strategy=strategy, clear_existing=True)
+            for field, value in active_identity.items():
+                setattr(self.context.engine.config.org, field, value)
+            self.context.engine.config.org.company_profile = "custom"
             role_ids = list(info.role_ids)
             work_item_template_ids = list(info.work_item_template_ids or info.template_ids)
             employee_ids = self._ensure_default_employees(role_ids)
+            persisted_employee_count = self._persisted_employee_count()
             self._persist_config()
         events = await self._reload_custom_agents_for_roles(role_ids)
         events.extend(await self._org_events())
@@ -60,7 +73,9 @@ class MarketService:
             "name": getattr(preset, "name", preset_id),
             "roles": len(role_ids),
             "work_item_templates": len(work_item_template_ids),
-            "employees": len(employee_ids),
+            "employees": persisted_employee_count,
+            "persisted_employees": persisted_employee_count,
+            "runtime_default_employees": len(employee_ids),
         }, events)
 
     async def list_installed(self) -> ServiceResult:
@@ -106,6 +121,7 @@ class MarketService:
         async with self.context.config_lock:
             info = loader.install(package, strategy=strategy)
             employee_ids = self._ensure_default_employees(list(info.role_ids))
+            persisted_employee_count = self._persisted_employee_count()
             self._persist_config()
         events = await self._reload_custom_agents_for_roles(list(info.role_ids))
         events.extend(await self._org_events())
@@ -116,7 +132,9 @@ class MarketService:
             "name": info.name,
             "roles": len(info.role_ids),
             "templates": len(info.template_ids),
-            "employees": len(employee_ids),
+            "employees": persisted_employee_count,
+            "persisted_employees": persisted_employee_count,
+            "runtime_default_employees": len(employee_ids),
             "warnings": list(report.warnings),
         }, events)
 
@@ -188,6 +206,17 @@ class MarketService:
             except Exception:
                 pass
         return employee_ids
+
+    def _persisted_employee_count(self) -> int:
+        """Count employees that the saved-org serializer will retain.
+
+        Runtime default employees are synthetic placeholders for vacant roles.
+        They are intentionally omitted from saved organization payloads, so the
+        public response must not present them as persisted hires.
+        """
+
+        payload = build_company_org_payload_from_config(self.context.engine.config)
+        return len(list(payload.get("employees", []) or []))
 
     async def _reload_custom_agents_for_roles(self, role_ids: list[str]) -> list[ServiceEvent]:
         if self.context.mode_state.exec_mode not in {"org", "custom"}:

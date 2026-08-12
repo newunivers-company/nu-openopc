@@ -134,9 +134,20 @@ def register_cli(parent_app: typer.Typer) -> None:
     @parent_app.command()
     def ui(
         port: int = _typer.Option(8765, "--port", "-p", help="Server port"),
-        host: str = _typer.Option("0.0.0.0", "--host", help="Bind address"),
+        host: str = _typer.Option("127.0.0.1", "--host", help="Bind address"),
         project: Optional[str] = _typer.Option(None, "--project", help="Project ID"),
         rebuild: bool = _typer.Option(False, "--rebuild", help="Force rebuild frontend"),
+        auth_token: Optional[str] = _typer.Option(
+            None,
+            "--auth-token",
+            envvar="OPC_UI_AUTH_TOKEN",
+            help="Required bearer/cookie token for non-loopback binds",
+        ),
+        allow_origin: Optional[list[str]] = _typer.Option(
+            None,
+            "--allow-origin",
+            help="Additional browser Origin allowed to open the WebSocket; repeatable",
+        ),
     ) -> None:
         """Launch the Office UI — visual frontend for OPC agents."""
         _sanitize_windows_ssl_env()
@@ -149,10 +160,26 @@ def register_cli(parent_app: typer.Typer) -> None:
         _ensure_frontend()
 
         from opc.core.config import OPCConfig, get_opc_home
+        from opc.core.initialization import inspect_initialization
 
         config_dir = get_opc_home() / "config"
+        initialization = inspect_initialization(get_opc_home())
+        if not initialization.ready:
+            detail = "Run `opc init --repair`." if initialization.state == "partial" else "Run `opc init`."
+            terminal_status(
+                f"OPC configuration is {initialization.state}",
+                kind="warning",
+                detail=detail,
+            )
         config = OPCConfig.load(config_dir) if config_dir.exists() else OPCConfig()
 
         from opc.plugins.office_ui.server import run_server
 
-        run_server(host=host, port=port, config=config, project_id=project)
+        run_server(
+            host=host,
+            port=port,
+            config=config,
+            project_id=project,
+            auth_token=auth_token,
+            allowed_origins=allow_origin,
+        )

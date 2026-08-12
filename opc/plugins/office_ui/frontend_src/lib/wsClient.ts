@@ -16,6 +16,7 @@ import type {
   WorkerNotificationPayload,
   WorkItemProgressPayload,
 } from '../types/visual'
+import { SOCKET_PROTOCOL_VERSION } from '../types/visual'
 import type { CheckpointReplyMetadata, OutgoingAttachmentPayload } from '../types/chat'
 import type { TaskPreferredAgent } from '../types/kanban'
 
@@ -58,6 +59,185 @@ interface SocketHandlers {
   onOrgSavedDelete?: (payload: { ok: boolean; name: string; error?: string }) => void
   onCommsState?: (payload: CommsStatePayload) => void
   onCommsMessage?: (payload: CommsMessagePayload) => void
+  onMissionControl?: (payload: MissionControlPayload) => void
+  onMissionAction?: (payload: MissionActionPayload) => void
+}
+
+export interface MissionControlAlert {
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info' | string
+  kind: string
+  title: string
+  detail: string
+  action?: string
+  run_id?: string
+  goal_id?: string
+  action_kind?: string
+  action_target_id?: string
+}
+
+export interface MissionOperatorAction {
+  action_id: string
+  project_id: string
+  kind: string
+  target_id: string
+  status: 'planned' | 'executing' | 'executed' | 'failed' | 'expired' | string
+  plan_digest: string
+  operator_id?: string
+  consequence: string
+  requires_confirmation: boolean
+  expires_at?: string | null
+  executed_at?: string | null
+  result?: Record<string, unknown>
+}
+
+export interface MissionActionPayload {
+  ok: boolean
+  phase: 'plan' | 'execute' | string
+  project_id: string
+  action?: MissionOperatorAction
+  error?: string
+}
+
+export interface MissionControlProviderSlo {
+  samples: number
+  successes?: number
+  availability: number
+  p95_latency_ms: number
+  target_met: boolean
+  production_ready?: boolean
+  readiness_state?: 'ready' | 'pending_evidence' | string
+  blockers?: string[]
+  observation_seconds?: number
+  minimum_observation_seconds?: number
+  latest_sample_age_seconds?: number | null
+  missing_failure_scenarios?: string[]
+  availability_target?: number
+  p95_latency_target_ms?: number
+}
+
+export interface MissionControlProviderQuota {
+  enabled: boolean
+  allowed: boolean
+  used: number
+  remaining: number
+  limit: number
+  window_seconds: number
+  resets_at?: string | null
+}
+
+export interface MissionControlStorage {
+  available: boolean
+  reason?: string
+  root?: string
+  dry_run: boolean
+  automatic_cleanup: false
+  apply_requires_explicit_flag?: boolean
+  policy?: {
+    keep_latest: number
+    max_age_days: number
+    warning_bytes: number
+    critical_bytes: number
+  }
+  total_bytes?: number
+  database_bytes?: number
+  backup_bytes?: number
+  log_bytes?: number
+  file_count?: number
+  database_count?: number
+  backup_count?: number
+  candidate_count?: number
+  candidate_bytes?: number
+  candidates?: Array<{
+    path: string
+    size_bytes: number
+    modified_at: string
+  }>
+  largest_files?: Array<{ path: string; size_bytes: number }>
+  inspect_command?: string[]
+  apply_command?: string[]
+}
+
+export interface MissionControlPayload {
+  available: boolean
+  reason?: string
+  project_id: string
+  active_goals?: number
+  active_runs?: number
+  blocked_runs?: number
+  failed_gates?: number
+  pending_outbox?: number
+  dead_letters?: number
+  pending_approvals?: number
+  learning_candidates?: number
+  promoted_assets?: number
+  average_score?: number
+  total_cost_usd?: number
+  unmeasured_usage_events?: number
+  provider_slo?: Record<string, MissionControlProviderSlo>
+  provider_call_quotas?: Record<string, MissionControlProviderQuota>
+  storage?: MissionControlStorage
+  evidence_funnel?: {
+    all_runs?: MissionControlEvidenceStage
+    benchmark?: MissionControlEvidenceStage
+  }
+  campaign_portfolio?: {
+    campaign_count: number
+    promotion_authority: false
+    active_campaign?: MissionControlCampaign | null
+    campaigns?: MissionControlCampaign[]
+  }
+  judgment_queue?: Array<{
+    run_id: string
+    goal_id: string
+    completed_at?: string
+    benchmark_slot_id?: string
+    benchmark_campaign_id?: string
+  }>
+  alerts?: MissionControlAlert[]
+  recommendations?: string[]
+  generated_at?: string
+}
+
+export interface MissionControlCampaign {
+  campaign_id: string
+  expected_slots: number
+  started: number
+  not_started: number
+  completed: number
+  failed: number
+  in_flight: number
+  judged: number
+  accepted: number
+  trusted_judgments: number
+  awaiting_judgment: number
+  untrusted_judgments: number
+  trusted_pairs: number
+  workloads?: Record<string, {
+    started: number
+    completed: number
+    judged: number
+    trusted_judgments: number
+    trusted_pairs: number
+  }>
+  batch_expansion: {
+    phase: string
+    expansion_ready: boolean
+    next_pair_budget: number
+    maximum_pairs_per_batch: number
+    missing_canary_workloads?: string[]
+    blockers?: string[]
+    next_action: string
+    promotion_authority: false
+    source: string
+  }
+}
+
+export interface MissionControlEvidenceStage {
+  started?: number
+  completed?: number
+  scored?: number
+  accepted?: number
+  awaiting_judgment?: number
 }
 
 export interface CommsMessageItem {
@@ -169,6 +349,8 @@ const PROJECT_SCOPED_MESSAGE_TYPES = new Set([
   'project_index',
   'comms_state',
   'comms_read_message',
+  'mission_control',
+  'mission_action',
 ])
 
 const SESSION_DETAIL_REQUEST_TIMEOUT_MS = 30_000
@@ -248,7 +430,7 @@ export class VisualSocketClient {
     if (!this.ensureProjectScope(payload)) {
       return 'send-failed'
     }
-    const data = JSON.stringify(payload)
+    const data = this.serializeEnvelope(payload)
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       if (this.pendingQueue.length < PENDING_QUEUE_MAX) {
         this.pendingQueue.push(data)
@@ -356,6 +538,46 @@ export class VisualSocketClient {
     this.send({ type: 'project_index', project_id: pid, switch_seq: switchSeq, view_generation: viewGeneration })
   }
 
+  missionControl(projectId: string): void {
+    const pid = this.requireProjectId(projectId, 'mission_control')
+    this.send({ type: 'mission_control', project_id: pid })
+  }
+
+  missionActionPlan(
+    projectId: string,
+    kind: string,
+    targetId: string,
+    reason: string,
+  ): void {
+    const pid = this.requireProjectId(projectId, 'mission_action')
+    this.send({
+      type: 'mission_action',
+      phase: 'plan',
+      project_id: pid,
+      kind,
+      target_id: targetId,
+      reason,
+    })
+  }
+
+  missionActionExecute(
+    projectId: string,
+    actionId: string,
+    planDigest: string,
+    operatorId: string,
+  ): void {
+    const pid = this.requireProjectId(projectId, 'mission_action')
+    this.send({
+      type: 'mission_action',
+      phase: 'execute',
+      project_id: pid,
+      action_id: actionId,
+      plan_digest: planDigest,
+      operator_id: operatorId,
+      confirmed: true,
+    })
+  }
+
   // ── Session protocol ───────────────────────────────────────────────────
 
   createSession(projectId: string, title?: string, execMode?: string, companyProfile?: string, preferredAgent?: TaskPreferredAgent, orgId?: string): void {
@@ -459,7 +681,7 @@ export class VisualSocketClient {
         include: opts?.include,
         view_generation: opts?.viewGeneration,
       }
-      const wireData = JSON.stringify(payload)
+      const wireData = this.serializeEnvelope(payload)
       const request = {
         projectId: pid,
         taskId,
@@ -607,6 +829,7 @@ export class VisualSocketClient {
     execution_strategy?: string
     preferred_external_agent?: string | null
     prompt_refs?: string[]
+    skill_refs?: string[]
     tools?: string[]
   }): void {
     this.send({ type: 'update_role', role_id: roleId, ...updates })
@@ -672,6 +895,13 @@ export class VisualSocketClient {
     return typeof value === 'string' ? value.trim() : ''
   }
 
+  private serializeEnvelope(payload: Record<string, unknown>): string {
+    return JSON.stringify({
+      ...payload,
+      protocol_version: SOCKET_PROTOCOL_VERSION,
+    })
+  }
+
   private requireProjectId(projectId: unknown, action: string): string {
     const pid = this.normalizeProjectId(projectId)
     if (!pid) {
@@ -707,6 +937,16 @@ export class VisualSocketClient {
       return
     }
     if (!parsed || typeof parsed !== 'object' || !('type' in parsed)) {
+      return
+    }
+    if (
+      parsed.protocol_version !== undefined
+      && parsed.protocol_version !== SOCKET_PROTOCOL_VERSION
+    ) {
+      this.handlers.onStatus?.(
+        'error',
+        `Unsupported WebSocket protocol version ${String(parsed.protocol_version)}`,
+      )
       return
     }
     try { switch (parsed.type) {
@@ -796,6 +1036,12 @@ export class VisualSocketClient {
         break
       case 'comms_message':
         this.handlers.onCommsMessage?.(parsed.payload as unknown as CommsMessagePayload)
+        break
+      case 'mission_control':
+        this.handlers.onMissionControl?.(parsed.payload as unknown as MissionControlPayload)
+        break
+      case 'mission_action':
+        this.handlers.onMissionAction?.(parsed.payload as unknown as MissionActionPayload)
         break
       case 'comms_state_dirty':
         // Server pushed a "something changed" hint after a comms message

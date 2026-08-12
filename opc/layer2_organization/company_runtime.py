@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from contextvars import ContextVar, Token
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
@@ -27,7 +29,6 @@ from opc.layer2_organization.collaboration_policy import render_ownership_contra
 from opc.layer2_organization.phase import (
     IN_REVIEW_PHASES,
     is_dispatchable,
-    is_report_execution_work_item_metadata,
     is_review_execution_work_item_metadata,
 )
 from opc.layer2_organization.metadata_ownership import sync_work_item_current_turn_mode
@@ -73,6 +74,7 @@ class CompanyRuntimeState:
     queued_work_item_ids: set[str] = field(default_factory=set)
     claimed_work_item_ids: set[str] = field(default_factory=set)
     home_team_instance_by_role: dict[str, str] = field(default_factory=dict)
+    inbox_state_fingerprints: dict[str, str] = field(default_factory=dict)
 
 
 # ── Canonical role_runtime_session_id generator ──────────────────────────
@@ -211,6 +213,11 @@ class CompanyRuntime:
         # two parallel team_instances with the same role name
         # (multi-branch) don't collide. Populated in bootstrap.
         self._home_team_instance_by_role = {}
+        # Consecutive store-CAS claim losses per work_item_id. Repeated
+        # losses on the same card indicate the dispatcher is operating on a
+        # stale projection (the claim-livelock signature from the 2026-07-28
+        # pilot) and must surface at WARNING, not drown at DEBUG.
+        self._claim_loss_counts: dict[str, int] = {}
 
     def create_state(self) -> CompanyRuntimeState:
         return CompanyRuntimeState()
@@ -223,6 +230,10 @@ class CompanyRuntime:
 
     def _state(self) -> CompanyRuntimeState:
         return self._state_var.get() or self._default_state
+
+    @property
+    def _inbox_state_fingerprints(self) -> dict[str, str]:
+        return self._state().inbox_state_fingerprints
 
     @property
     def member_sessions(self) -> dict[str, CompanyMemberSession]:
@@ -1055,7 +1066,12 @@ class CompanyRuntime:
                         seen_ids.add(msg_id)
                 session.pending_inbox = [dict(item) for item in actionable_chat[:8]]
                 session.resume_state = dict(session.resume_state)
-                session.resume_state["seen_inbox_message_ids"] = sorted(seen_ids)
+                if seen_ids:
+                    session.resume_state["seen_inbox_message_ids"] = sorted(
+                        seen_ids
+                    )
+                else:
+                    session.resume_state.pop("seen_inbox_message_ids", None)
                 session.inbox_cursor = len(seen_ids)
             session.current_work_item = self._build_current_work_item(session, representative_task)
             await self._refresh_manager_board_state(session, representative_task)
@@ -1083,18 +1099,49 @@ class CompanyRuntime:
                 role_session.current_work_item = dict(session.current_work_item or {})
                 role_session.latest_notification = dict(session.latest_notification or {})
                 role_session.manager_digest = dict(session.manager_digest or {})
-                role_session.updated_at = datetime.now()
-                if self.store and bool(getattr(self.store, "is_ready", False)) and hasattr(self.store, "save_delegation_role_session"):
-                    await self.store.save_delegation_role_session(role_session)
+            fingerprint_payload = self._serialize_session(session)
+            fingerprint_payload.pop("created_at", None)
+            fingerprint_payload.pop("updated_at", None)
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    fingerprint_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                self._inbox_state_fingerprints.get(session.member_session_id)
+                == fingerprint
+            ):
+                continue
+
+            updated_at = datetime.now()
+            session.updated_at = updated_at
+            if role_session is not None:
+                role_session.updated_at = updated_at
             if representative_task is not None:
-                representative_task.metadata = dict(representative_task.metadata)
-                representative_task.metadata["current_turn_mode"] = str(session.current_turn_mode or "").strip()
-                representative_task.metadata["member_session_state"] = self._serialize_session(session)
-                representative_task.context_snapshot = dict(representative_task.context_snapshot)
-                representative_task.context_snapshot["current_turn_mode"] = str(session.current_turn_mode or "").strip()
-                representative_task.context_snapshot["member_session"] = self._serialize_session(session)
-            session.updated_at = datetime.now()
+                serialized_session = self._serialize_session(session)
+                representative_task.metadata = dict(
+                    representative_task.metadata
+                )
+                representative_task.metadata["current_turn_mode"] = str(
+                    session.current_turn_mode or ""
+                ).strip()
+                representative_task.metadata["member_session_state"] = (
+                    serialized_session
+                )
+                representative_task.context_snapshot = dict(
+                    representative_task.context_snapshot
+                )
+                representative_task.context_snapshot["current_turn_mode"] = str(
+                    session.current_turn_mode or ""
+                ).strip()
+                representative_task.context_snapshot["member_session"] = (
+                    serialized_session
+                )
             await self._persist_session(session, task=representative_task)
+            self._inbox_state_fingerprints[session.member_session_id] = fingerprint
             await self._emit(
                 "member_inbox_updated",
                 {
@@ -1408,12 +1455,51 @@ class CompanyRuntime:
                             fresh_work_item = await get_work_item(work_item_id)
                         if fresh_work_item is not None:
                             work_item_map[work_item_id] = fresh_work_item
+                            # Patch the SHARED object in place, not just the
+                            # per-call map: the caller's work-item list feeds
+                            # the next tick's enqueue gate, and a stale copy
+                            # there (old phase, missing dispatch_hold/claims)
+                            # re-enqueues a non-dispatchable card every tick —
+                            # the claim livelock observed in the 2026-07-28
+                            # pilot (1,769 losses on one card at ~1/s).
+                            work_item.phase = fresh_work_item.phase
+                            work_item.metadata = dict(fresh_work_item.metadata or {})
+                            work_item.role_runtime_session_id = (
+                                fresh_work_item.role_runtime_session_id
+                            )
+                            work_item.claimed_by_role_runtime_session_id = (
+                                fresh_work_item.claimed_by_role_runtime_session_id
+                            )
+                            work_item.claimed_by_seat_id = (
+                                fresh_work_item.claimed_by_seat_id
+                            )
+                        losses = self._claim_loss_counts.get(work_item_id, 0) + 1
+                        self._claim_loss_counts[work_item_id] = losses
+                        if losses in {3, 10} or losses % 100 == 0:
+                            logger.warning(
+                                "WorkItem claim lost {} consecutive times — "
+                                "dispatcher projection is stale for {} "
+                                "(fresh phase={}, dispatch_hold={!r})",
+                                losses,
+                                work_item_id,
+                                getattr(
+                                    getattr(fresh_work_item, "phase", None),
+                                    "value",
+                                    None,
+                                ),
+                                str(
+                                    (getattr(fresh_work_item, "metadata", {}) or {}).get(
+                                        "dispatch_hold", ""
+                                    )
+                                ),
+                            )
                         _skip(
                             "atomic WorkItem claim lost to a phase/hold/owner update",
                             session=session_label,
                             work_item_id=work_item_id,
                         )
                         continue
+                    self._claim_loss_counts.pop(work_item_id, None)
                     self._claimed_work_item_ids.add(work_item_id)
                 if can_soft_wake and (
                     bool((task.metadata or {}).get("review_task", False))

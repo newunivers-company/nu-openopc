@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import shutil
-import tempfile
 import unittest
 import uuid
 from pathlib import Path

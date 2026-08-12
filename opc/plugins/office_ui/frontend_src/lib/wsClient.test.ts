@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { VisualSocketClient } from './wsClient'
+import { SOCKET_PROTOCOL_VERSION } from '../types/visual'
 
 type TestSocketClient = {
   handleMessage: (raw: unknown) => void
@@ -29,6 +30,55 @@ const flushPromises = async () => {
 }
 
 const client = new VisualSocketClient('ws://unit.test', {})
+
+// Mission Control is project-scoped and its snapshot response reaches the
+// dedicated handler without falling through the generic collaboration path.
+const missionPayloads: Array<Record<string, unknown>> = []
+const missionClient = new VisualSocketClient('ws://unit.test', {
+  onMissionControl: payload => missionPayloads.push(payload as unknown as Record<string, unknown>),
+})
+missionClient.missionControl('project-a')
+const missionEnvelope = JSON.parse(
+  (missionClient as unknown as TestSocketClient).pendingQueue.pop() ?? '{}',
+) as Record<string, unknown>
+assert.equal(missionEnvelope.type, 'mission_control')
+assert.equal(missionEnvelope.project_id, 'project-a')
+assert.equal(missionEnvelope.protocol_version, SOCKET_PROTOCOL_VERSION)
+;(missionClient as unknown as TestSocketClient).handleMessage(JSON.stringify({
+  type: 'mission_control',
+  payload: { available: true, project_id: 'project-a', active_runs: 2 },
+}))
+assert.equal(missionPayloads[0]?.project_id, 'project-a')
+assert.equal(missionPayloads[0]?.active_runs, 2)
+
+const actionPayloads: Array<Record<string, unknown>> = []
+const actionClient = new VisualSocketClient('ws://unit.test', {
+  onMissionAction: payload => actionPayloads.push(payload as unknown as Record<string, unknown>),
+})
+actionClient.missionActionPlan(
+  'project-a',
+  'recover_run',
+  'run-1',
+  'reviewed stalled run',
+)
+const planEnvelope = JSON.parse(
+  (actionClient as unknown as TestSocketClient).pendingQueue.pop() ?? '{}',
+) as Record<string, unknown>
+assert.equal(planEnvelope.type, 'mission_action')
+assert.equal(planEnvelope.phase, 'plan')
+assert.equal(planEnvelope.project_id, 'project-a')
+assert.equal(planEnvelope.kind, 'recover_run')
+actionClient.missionActionExecute('project-a', 'action-1', 'd'.repeat(64), 'owner')
+const executeEnvelope = JSON.parse(
+  (actionClient as unknown as TestSocketClient).pendingQueue.pop() ?? '{}',
+) as Record<string, unknown>
+assert.equal(executeEnvelope.phase, 'execute')
+assert.equal(executeEnvelope.confirmed, true)
+;(actionClient as unknown as TestSocketClient).handleMessage(JSON.stringify({
+  type: 'mission_action',
+  payload: { ok: true, phase: 'execute', project_id: 'project-a' },
+}))
+assert.equal(actionPayloads[0]?.phase, 'execute')
 
 // Company Continue keeps the selected UI channel task separate from the
 // durable runtime identity used by the checkpoint handoff.

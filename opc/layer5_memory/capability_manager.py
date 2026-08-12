@@ -6,9 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from loguru import logger
 
-from opc.core.config import CapabilityConfig, RoleConfig
+from opc.core.config import CapabilityConfig
 from opc.layer5_memory.skill_library import SkillLibrary, Skill
 
 

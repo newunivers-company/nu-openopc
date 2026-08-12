@@ -42,6 +42,14 @@ _DEFAULT_EMPLOYEE_PROMPT_REF = "prompts/talent/general-default-employee.md"
 _FALLBACK_EMPLOYEE_TEMPLATE_ID = "fallback-empty-employee"
 TASK_MODE_GENERAL_ROLE_ID = "task_generalist"
 TASK_MODE_COMPANY_ONLY_TOOLS = frozenset(COMPANY_APPROVAL_EXEMPT_TOOL_NAMES)
+
+# A role nobody was staffed into has two synthetic placeholder ids in flight:
+# ``{role}-default-employee`` is auto-provisioned onto the WorkItem by
+# ``ensure_default_employee_for_role`` (and therefore lands in the resume
+# checkpoint), while the live role runtime session falls back to
+# ``{role}-default-session``. Both denote "no real employee here", so identity
+# checks must treat them as the same placeholder instead of a mismatch.
+_SYNTHETIC_DEFAULT_EMPLOYEE_SUFFIXES = ("-default-employee", "-default-session")
 _DEFAULT_TASK_MODE_TOOLS = [
     "request_user_input",
     "shell_exec",
@@ -76,6 +84,30 @@ _DEFAULT_TASK_MODE_TOOLS = [
     "agent_send",
     "agent_list",
 ]
+
+
+def _synthetic_default_employee_role(employee_id: str) -> str:
+    value = str(employee_id or "").strip().lower()
+    for suffix in _SYNTHETIC_DEFAULT_EMPLOYEE_SUFFIXES:
+        if value.endswith(suffix):
+            return value[: -len(suffix)]
+    return ""
+
+
+def is_same_default_employee_identity(left: str, right: str) -> bool:
+    """True when both ids are synthetic default placeholders for one role.
+
+    Resume compares the checkpoint's employee id (taken from the WorkItem)
+    against the live role session's. For a staffed role both sides carry the
+    real employee id and compare equal. For an unstaffed role the two sides
+    legitimately hold different placeholder spellings, and treating that as an
+    identity mismatch aborts the whole resume with an unrecoverable
+    ``company runtime resume identity mismatch``.
+    """
+    left_role = _synthetic_default_employee_role(left)
+    if not left_role:
+        return False
+    return left_role == _synthetic_default_employee_role(right)
 
 
 class OrgEngine:

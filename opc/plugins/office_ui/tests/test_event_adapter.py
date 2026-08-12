@@ -22,9 +22,6 @@ from typing import Any
 from opc.plugins.office_ui.event_adapter import (
     EventAdapter,
     AgentAnimState,
-    TOOL_MAP,
-    COLLAB_SKIP_TOOLS,
-    COLLAB_DIRECT_MAP,
 )
 
 
@@ -97,7 +94,7 @@ class TestScenario1_SingleAgentBugFix:
         # 1. Agent becomes active
         ve = self._bootstrap()
         events.extend(ve)
-        assert types(ve) == ["agent_active"]
+        assert types(ve) == ["agent_active", "agent_runtime_update"]
         assert ve[0]["agent_id"] == self.agent_id
 
         # 2. First thinking iteration (iter=1) → message_in + reflect_start
@@ -106,7 +103,7 @@ class TestScenario1_SingleAgentBugFix:
             {"task_id": self.task_id, "status": "thinking", "iteration": 1},
         ))
         events.extend(ve)
-        assert types(ve) == ["message_in", "reflect_start"]
+        assert types(ve) == ["message_in", "reflect_start", "agent_runtime_update"]
 
         # 3. Executing file_read → reflect_done + tool_start(read)
         ve = self.adapter.translate(FakeEvent(
@@ -114,7 +111,7 @@ class TestScenario1_SingleAgentBugFix:
             {"task_id": self.task_id, "status": "executing", "tool": "file_read"},
         ))
         events.extend(ve)
-        assert types(ve) == ["reflect_done", "tool_start"]
+        assert types(ve) == ["reflect_done", "tool_start", "agent_runtime_update"]
         assert ve[1]["data"]["tool_name"] == "read"
 
         # 4. Thinking iter=2 → tool_done(read) + reflect_start
@@ -123,7 +120,7 @@ class TestScenario1_SingleAgentBugFix:
             {"task_id": self.task_id, "status": "thinking", "iteration": 2},
         ))
         events.extend(ve)
-        assert types(ve) == ["tool_done", "reflect_start"]
+        assert types(ve) == ["tool_done", "reflect_start", "agent_runtime_update"]
         assert ve[0]["data"]["tool_name"] == "read"
 
         # 5. Executing file_edit → reflect_done + tool_start(edit)
@@ -132,7 +129,7 @@ class TestScenario1_SingleAgentBugFix:
             {"task_id": self.task_id, "status": "executing", "tool": "file_edit"},
         ))
         events.extend(ve)
-        assert types(ve) == ["reflect_done", "tool_start"]
+        assert types(ve) == ["reflect_done", "tool_start", "agent_runtime_update"]
         assert ve[1]["data"]["tool_name"] == "edit"
 
         # 6. Thinking iter=3 → tool_done(edit) + reflect_start
@@ -141,7 +138,7 @@ class TestScenario1_SingleAgentBugFix:
             {"task_id": self.task_id, "status": "thinking", "iteration": 3},
         ))
         events.extend(ve)
-        assert types(ve) == ["tool_done", "reflect_start"]
+        assert types(ve) == ["tool_done", "reflect_start", "agent_runtime_update"]
 
         # 7. Executing shell_exec (pytest) → reflect_done + tool_start(shell)
         ve = self.adapter.translate(FakeEvent(
@@ -149,7 +146,7 @@ class TestScenario1_SingleAgentBugFix:
             {"task_id": self.task_id, "status": "executing", "tool": "shell_exec"},
         ))
         events.extend(ve)
-        assert types(ve) == ["reflect_done", "tool_start"]
+        assert types(ve) == ["reflect_done", "tool_start", "agent_runtime_update"]
         assert ve[1]["data"]["tool_name"] == "shell"
 
         # 8. Thinking iter=4 (final) → tool_done(shell) + reflect_start
@@ -158,7 +155,7 @@ class TestScenario1_SingleAgentBugFix:
             {"task_id": self.task_id, "status": "thinking", "iteration": 4},
         ))
         events.extend(ve)
-        assert types(ve) == ["tool_done", "reflect_start"]
+        assert types(ve) == ["tool_done", "reflect_start", "agent_runtime_update"]
 
         # 9. Agent goes idle → reflect_done + waiting
         ve = self.adapter.translate(FakeEvent(
@@ -166,7 +163,7 @@ class TestScenario1_SingleAgentBugFix:
             {"role_id": self.agent_id, "status": "idle"},
         ))
         events.extend(ve)
-        assert types(ve) == ["reflect_done", "waiting"]
+        assert types(ve) == ["reflect_done", "waiting", "agent_runtime_update"]
 
         # Verify final tracker state
         tracker = self.adapter._get_tracker(self.agent_id)
@@ -840,7 +837,7 @@ class TestScenario11_EdgeCases:
             "agent_status_changed",
             {"role_id": "dev", "status": "idle"},
         ))
-        assert types(ve) == ["tool_done", "waiting"]
+        assert types(ve) == ["tool_done", "waiting", "agent_runtime_update"]
         assert ve[0]["data"]["tool_name"] == "shell"
 
     def test_consecutive_thinking_closes_previous(self):
@@ -860,7 +857,7 @@ class TestScenario11_EdgeCases:
             {"task_id": "t1", "status": "thinking", "iteration": 2},
         ))
         # Should emit reflect_done (closing first) then reflect_start (opening second)
-        assert types(ve) == ["reflect_done", "reflect_start"]
+        assert types(ve) == ["reflect_done", "reflect_start", "agent_runtime_update"]
 
     def test_unknown_tool_passes_through(self):
         """Tool not in TOOL_MAP uses raw name."""

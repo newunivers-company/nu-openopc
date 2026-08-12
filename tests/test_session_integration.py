@@ -933,8 +933,6 @@ class TestWSHandlerSessionSend(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_send_passes_session_id_to_engine(self) -> None:
         """_process_session_message should pass session_id to engine.process_message."""
-        ws = MagicMock()
-
         # Instead of mocking _track, let _process_session_message run directly
         await self.handler._process_session_message(
             self.task_id, "test content", session_id=self.session_id
@@ -6008,7 +6006,7 @@ class TestWSHandlerProgressRouting(unittest.IsolatedAsyncioTestCase):
         self.adapter.update_role_map({"executor": "agent-executor"})
 
         await self.handler.on_progress(
-            "[External status] codex started pid=42",
+            "[External:codex:stdout] applying patch",
             task_id="work-item-1",
             agent_role_id="executor",
         )
@@ -7359,6 +7357,122 @@ class TestWSHandlerCommsState(unittest.IsolatedAsyncioTestCase):
             roles = {role["role_id"]: role for role in payload.get("roles", [])}
             self.assertIn("executor", roles)
             self.assertEqual(roles["executor"]["unread_count"], 1)
+
+    async def test_mission_control_returns_project_scoped_operations_snapshot(self) -> None:
+        from opc.plugins.office_ui.ws_handler import WSHandler
+
+        engine = _make_engine()
+        summary = AsyncMock(
+            return_value={
+                "available": False,
+                "project_id": "stale-project",
+                "active_runs": 2,
+                "alerts": [],
+            }
+        )
+        engine.operations = SimpleNamespace(
+            mission_control=SimpleNamespace(summary=summary)
+        )
+        handler = WSHandler(engine, MagicMock(), MagicMock(), MagicMock())
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        await handler._handle_mission_control(
+            ws,
+            {"project_id": "test-project"},
+        )
+
+        summary.assert_awaited_once_with(project_id="test-project")
+        envelope = ws.send_json.await_args.args[0]
+        self.assertEqual(envelope["type"], "mission_control")
+        self.assertTrue(envelope["payload"]["available"])
+        self.assertEqual(envelope["payload"]["project_id"], "test-project")
+        self.assertEqual(envelope["payload"]["active_runs"], 2)
+
+    async def test_mission_control_reports_disabled_operations_without_crashing(self) -> None:
+        from opc.plugins.office_ui.ws_handler import WSHandler
+
+        engine = _make_engine()
+        engine.operations = None
+        handler = WSHandler(engine, MagicMock(), MagicMock(), MagicMock())
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        await handler._handle_mission_control(
+            ws,
+            {"project_id": "test-project"},
+        )
+
+        payload = ws.send_json.await_args.args[0]["payload"]
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["project_id"], "test-project")
+        self.assertIn("not enabled", payload["reason"])
+
+    async def test_mission_action_plans_then_executes_exact_confirmed_digest(self) -> None:
+        from opc.plugins.office_ui.ws_handler import WSHandler
+
+        engine = _make_engine()
+        plan = AsyncMock(
+            return_value={
+                "action_id": "action-1",
+                "plan_digest": "d" * 64,
+                "status": "planned",
+            }
+        )
+        execute = AsyncMock(
+            return_value={
+                "action_id": "action-1",
+                "plan_digest": "d" * 64,
+                "status": "executed",
+            }
+        )
+        engine.operations = SimpleNamespace(
+            operator_actions=SimpleNamespace(plan=plan, execute=execute)
+        )
+        handler = WSHandler(engine, MagicMock(), MagicMock(), MagicMock())
+        ws = MagicMock()
+        ws.send_json = AsyncMock()
+
+        await handler._handle_mission_action(
+            ws,
+            {
+                "phase": "plan",
+                "project_id": "test-project",
+                "kind": "recover_run",
+                "target_id": "run-1",
+                "reason": "reviewed stalled run",
+            },
+        )
+        plan.assert_awaited_once_with(
+            project_id="test-project",
+            kind="recover_run",
+            target_id="run-1",
+            reason="reviewed stalled run",
+            idempotency_key="",
+        )
+        self.assertEqual(ws.send_json.await_args.args[0]["type"], "mission_action")
+
+        await handler._handle_mission_action(
+            ws,
+            {
+                "phase": "execute",
+                "project_id": "test-project",
+                "action_id": "action-1",
+                "plan_digest": "d" * 64,
+                "operator_id": "owner",
+                "confirmed": True,
+            },
+        )
+        execute.assert_awaited_once_with(
+            project_id="test-project",
+            action_id="action-1",
+            plan_digest="d" * 64,
+            operator_id="owner",
+            confirmed=True,
+        )
+        payload = ws.send_json.await_args.args[0]["payload"]
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["action"]["status"], "executed")
 
 
 if __name__ == "__main__":

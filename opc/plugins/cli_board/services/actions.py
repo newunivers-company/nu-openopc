@@ -32,6 +32,7 @@ class BoardActions:
         engine = await self.facade.ensure_ready()
         async with OfficeServiceFactory(
             config=getattr(engine, "config", None),
+            engine=engine,
             project_id=self._project_id,
             on_progress=getattr(self.facade, "_progress_callback", None),
             on_runtime_event=getattr(self.facade, "_event_callback", None),
@@ -157,6 +158,14 @@ class BoardActions:
                         company_profile=send_profile,
                     )
                 )
+                refreshed = await engine.store.get_task(task_id)
+                if refreshed is not None and refreshed.status not in {
+                    TaskStatus.DONE,
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
+                }:
+                    refreshed.status = TaskStatus.IDLE
+                    await engine.store.save_task(refreshed)
                 return str(result.payload.get("response", "") or "")
             except asyncio.CancelledError:
                 await self._mark_related_tasks(task_id, TaskStatus.CANCELLED)
@@ -202,6 +211,7 @@ class BoardActions:
             await asyncio.sleep(0)
 
         await self._run_office_service(lambda svc: svc.session.stop(project_id=self._project_id, task_id=task_id))
+        await self._mark_related_tasks(task_id, TaskStatus.CANCELLED)
         await self._resolve_related_checkpoints(task_id, status="cancelled")
 
     async def approve_checkpoint(self, task_id: str, *, approved: bool = True, reply: str | None = None) -> str:

@@ -362,10 +362,17 @@ def deserialize_recruitment_plan(data: dict[str, Any]) -> RecruitmentPlan:
 class CompanyRecruiter:
     """Generate runtime recruitment proposals before company execution."""
 
-    def __init__(self, llm: Any, org_engine: Any, talent_market: Any) -> None:
+    def __init__(
+        self,
+        llm: Any,
+        org_engine: Any,
+        talent_market: Any,
+        staffing_optimizer: Any | None = None,
+    ) -> None:
         self.llm = llm
         self.org_engine = org_engine
         self.talent_market = talent_market
+        self.staffing_optimizer = staffing_optimizer
 
     def _build_organization_payload(self) -> dict[str, Any]:
         agents = list(self.org_engine.list_agents()) if self.org_engine else []
@@ -467,6 +474,37 @@ class CompanyRecruiter:
         for item in prepared_needs:
             item["candidates"] = candidate_pool
             item["employee_pool"] = employee_pool
+            if (
+                self.staffing_optimizer is not None
+                and employee_pool
+                and str(item.get("triage_action", "")) != "direct_role_execution"
+            ):
+                need = item["need"]
+                summaries = [
+                    self._build_existing_employee_summary(
+                        employee,
+                        role_id=need.role_id,
+                        domains=list(item.get("selected_categories") or domains),
+                        project_id=project_id,
+                    )
+                    for employee in employee_pool
+                ]
+                try:
+                    decision = await self.staffing_optimizer.recommend_from_employee_pool(
+                        role_id=need.role_id,
+                        employees=employee_pool,
+                        summaries=summaries,
+                        required_domains=list(item.get("selected_categories") or domains),
+                        project_id=project_id,
+                        run_id=str(getattr(runtime_spec, "metadata", {}).get("run_id", "") or ""),
+                    )
+                    item["staffing_optimizer_decision"] = decision
+                except Exception:
+                    logger.opt(exception=True).warning(
+                        "Evidence-based staffing recommendation failed for role {}; "
+                        "continuing with recruiter evidence",
+                        need.role_id,
+                    )
         if active_llm:
             proposals = await self._recruit_globally(
                 prepared_needs,
@@ -708,6 +746,9 @@ class CompanyRecruiter:
             "selected_categories": selected_categories,
             "category_rationale": category_rationale,
         }
+        optimizer_decision = item.get("staffing_optimizer_decision")
+        if optimizer_decision is not None:
+            metadata["staffing_optimizer"] = optimizer_decision.to_dict()
         role_labels = [need.role_name] if need.role_name else []
         if triage_action == "direct_role_execution":
             return RecruitmentProposal(
@@ -728,14 +769,33 @@ class CompanyRecruiter:
                 )
                 for employee in employee_pool
             ]
-            selected = max(existing_payload, key=lambda item: float(item.get("experience_score", 0.0)))
+            optimizer_employee_id = str(
+                getattr(optimizer_decision, "selected_employee_id", "") or ""
+            ).strip()
+            selected = next(
+                (
+                    payload
+                    for payload in existing_payload
+                    if payload.get("employee_id") == optimizer_employee_id
+                ),
+                None,
+            )
+            if selected is None:
+                selected = max(
+                    existing_payload,
+                    key=lambda item: float(item.get("experience_score", 0.0)),
+                )
             employee = next(item for item in employee_pool if item.employee_id == selected["employee_id"])
             recommendation = self._make_existing_employee_recommendation(
                 employee,
                 role_id=need.role_id,
                 domains=[],
                 project_id=project_id,
-                rationale="Selected heuristically because an existing experienced employee was available.",
+                rationale=(
+                    "Selected by the evidence-based staffing optimizer."
+                    if optimizer_decision is not None
+                    else "Selected heuristically because an existing experienced employee was available."
+                ),
             )
             return RecruitmentProposal(
                 role_id=need.role_id,
@@ -744,7 +804,14 @@ class CompanyRecruiter:
                 role_labels=role_labels,
                 existing_employee=recommendation,
                 existing_employee_ids=[item.employee_id for item in existing_employees],
-                metadata={**metadata, "selection_source": "heuristic_existing"},
+                metadata={
+                    **metadata,
+                    "selection_source": (
+                        "staffing_optimizer"
+                        if optimizer_decision is not None
+                        else "heuristic_existing"
+                    ),
+                },
             )
         if candidates:
             candidate = candidates[0]
@@ -825,6 +892,11 @@ class CompanyRecruiter:
                     "selected_categories": list(item.get("selected_categories") or []),
                     "category_rationale": str(item.get("category_rationale", "") or ""),
                     "existing_employees": existing_payload,
+                    "staffing_optimizer_recommendation": (
+                        item["staffing_optimizer_decision"].to_dict()
+                        if item.get("staffing_optimizer_decision") is not None
+                        else None
+                    ),
                     "current_role_employee_ids": [
                         str(employee.get("employee_id", "") or "").strip()
                         for employee in existing_payload
@@ -946,6 +1018,8 @@ class CompanyRecruiter:
                 "selected_categories": list(item.get("selected_categories") or []),
                 "category_rationale": str(item.get("category_rationale", "") or ""),
             }
+            if item.get("staffing_optimizer_decision") is not None:
+                metadata["staffing_optimizer"] = item["staffing_optimizer_decision"].to_dict()
             rationale = str(raw_item.get("rationale", "") or "").strip()
             role_labels = [need.role_name] if need.role_name else []
             existing_employee_ids = list(employee_by_id)

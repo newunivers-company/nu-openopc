@@ -7,7 +7,7 @@ from rich.panel import Panel
 from rich.text import Text
 from textual.widgets import Static
 
-from ..state.models import OrgEmployeeView, OrgRoleView, OrgSnapshotView
+from ..state.models import OrgRoleView, OrgSnapshotView
 from ..state.store import BoardStateStore
 from .render_utils import truncate_text
 

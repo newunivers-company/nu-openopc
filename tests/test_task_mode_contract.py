@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from opc.core.config import OPCConfig
-from opc.core.models import AgentInfo, AgentStatus, ExecutionMode, Task, TaskResult, TaskStatus
+from opc.core.models import AgentInfo, AgentStatus, ExecutionMode, Task
 from opc.layer2_organization.org_engine import TASK_MODE_GENERAL_ROLE_ID
 from opc.layer3_agent.native_agent import NativeAgent
 from opc.layer4_tools.registry import ToolDefinition, ToolRegistry
@@ -42,6 +42,34 @@ class _StubSkills:
     ) -> str:
         _ = (project_id, execution_mode, role_id, user_facing, final_decider_role_id)
         return ""
+
+    def build_role_skill_pack(
+        self,
+        skill_refs: list[str],
+        **kwargs,
+    ) -> dict:
+        _ = kwargs
+        selected = [
+            {
+                "name": name,
+                "content_digest": "d" * 64,
+                "source_path": f"/skills/{name}/SKILL.md",
+                "level": "system",
+            }
+            for name in skill_refs
+            if name == "release-check"
+        ]
+        return {
+            "content": (
+                "## Role-Assigned Skills\nRun focused and full release tests."
+                if selected
+                else ""
+            ),
+            "skills": selected,
+            "missing": [
+                name for name in skill_refs if name != "release-check"
+            ],
+        }
 
 
 class _StubMemory:
@@ -115,6 +143,7 @@ def _make_role(
     can_spawn: list[str] | None = None,
     role_type: str = "worker",
     prompt_refs: list[str] | None = None,
+    skill_refs: list[str] | None = None,
 ) -> AgentInfo:
     return AgentInfo(
         role_id=role_id,
@@ -124,6 +153,7 @@ def _make_role(
         can_spawn=list(can_spawn or []),
         tools=list(tools or []),
         prompt_refs=list(prompt_refs or []),
+        skill_refs=list(skill_refs or []),
         runtime_policy={"role_type": role_type},
     )
 
@@ -163,6 +193,30 @@ def _registry_with_tools(names: list[str]) -> ToolRegistry:
 
 
 class TaskModeNativeAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_role_assigned_skills_are_injected_with_version_evidence(self) -> None:
+        agent = _make_native_agent(
+            _make_role(skill_refs=["release-check", "missing-skill"])
+        )
+        task = Task(
+            title="Verify release",
+            description="Run the release checks.",
+            project_id="proj1",
+            metadata={
+                "mode": "task",
+                "execution_mode": ExecutionMode.TASK_MODE.value,
+            },
+        )
+
+        context_messages = await agent._build_context_messages(task)
+        context = "\n".join(
+            str(item.get("content", "")) for item in context_messages
+        )
+
+        self.assertIn("Role-Assigned Skills", context)
+        self.assertIn("full release tests", context)
+        self.assertEqual(task.metadata["role_skill_versions"], {"release-check": "d" * 64})
+        self.assertEqual(task.metadata["missing_role_skill_refs"], ["missing-skill"])
+
     async def test_context_messages_skip_session_history_with_explicit_flag(self) -> None:
         memory = _TrackingMemory()
         agent = _make_native_agent_with_memory(_make_role(), memory)

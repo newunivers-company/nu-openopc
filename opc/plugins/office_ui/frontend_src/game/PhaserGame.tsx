@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import Phaser from 'phaser'
 import { createGameConfig } from './config'
 import type { GameBridge } from './GameBridge'
+import { createLatestFrameScheduler } from '../lib/latestFrameScheduler'
 import { BootScene } from './scenes/BootScene'
 import { OfficeScene } from './scenes/OfficeScene'
 
@@ -68,28 +69,41 @@ export function PhaserGame({ bridge, active = true }: Props) {
       }
     }
 
+    const resizeScheduler = createLatestFrameScheduler(
+      (size: readonly [number, number]) => {
+        const [w, h] = size
+        if (!gameRef.current) {
+          createGame(w, h)
+        } else {
+          // In RESIZE scale mode the game follows parentSize, which Phaser only
+          // re-measures on its 500ms poll — and scale.resize() gets clobbered by
+          // that stale value. Re-measure the parent, then refresh.
+          const scale = gameRef.current.scale
+          scale.getParentBounds()
+          scale.refresh()
+        }
+      },
+      (callback) => window.requestAnimationFrame(callback),
+      (handle) => window.cancelAnimationFrame(handle),
+    )
+
     // The office page can start hidden (display:none → 0×0). Never create or
     // resize the game at zero size; wait for the first real layout instead.
+    // Apply the latest measurement on the next animation frame: synchronously
+    // refreshing Phaser from a ResizeObserver callback can mutate the observed
+    // layout and make Chromium report an undelivered-notification loop.
     const observer = new ResizeObserver((entries) => {
       const rect = entries[entries.length - 1].contentRect
       const w = Math.floor(rect.width)
       const h = Math.floor(rect.height)
       if (w < 1 || h < 1) return // hidden — keep last known size
-      if (!gameRef.current) {
-        createGame(w, h)
-      } else {
-        // In RESIZE scale mode the game follows parentSize, which Phaser only
-        // re-measures on its 500ms poll — and scale.resize() gets clobbered by
-        // that stale value. Re-measure the parent, then refresh.
-        const scale = gameRef.current.scale
-        scale.getParentBounds()
-        scale.refresh()
-      }
+      resizeScheduler.schedule([w, h])
     })
     observer.observe(wrapper)
 
     return () => {
       observer.disconnect()
+      resizeScheduler.dispose()
       gameRef.current?.destroy(true)
       gameRef.current = null
     }

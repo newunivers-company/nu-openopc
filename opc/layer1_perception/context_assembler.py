@@ -11,7 +11,7 @@ from opc.core.company_tools import (
     company_collaboration_enabled_for_task,
     resolve_company_turn_mode,
 )
-from opc.core.models import Phase, Task, TaskStatus
+from opc.core.models import Task, TaskStatus
 from opc.layer2_organization import comms as _comms
 from opc.layer2_organization.collaboration_policy import render_ownership_contract
 from opc.layer2_organization.prompt_contract import (

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from opc.core.config import ExternalAgentConfig
@@ -1506,7 +1507,7 @@ class ExternalAgentMonitoringTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("## Skill: memory", worker_task.description)
             self.assertIn("## Skill: memory", final_task.description)
 
-    async def test_engine_stages_uploaded_attachments_for_external_resume_prompt(self) -> None:
+    async def test_engine_materializes_uploaded_attachments_for_external_resume_prompt(self) -> None:
         engine = OPCEngine()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2485,14 +2486,16 @@ class ExternalAgentMonitoringTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    def test_codex_adapter_auto_uses_danger_full_access_sandbox_without_full_auto_flag(self) -> None:
-        adapter = CodexAdapter()
+    def test_codex_adapter_auto_uses_workspace_write_sandbox_without_full_auto_flag(self) -> None:
+        adapter = CodexAdapter(
+            config=ExternalAgentConfig(command="codex", approval_mode="auto")
+        )
         task = Task(title="demo", description="body")
 
         cmd, metadata = adapter.build_interactive_invocation(task, workspace_path="/repo")
 
         self.assertIn("--sandbox", cmd)
-        self.assertEqual(cmd[cmd.index("--sandbox") + 1], "danger-full-access")
+        self.assertEqual(cmd[cmd.index("--sandbox") + 1], "workspace-write")
         self.assertNotIn("--full-auto", cmd)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", cmd)
         self.assertNotIn("sandbox_workspace_write.network_access=true", cmd)
@@ -2550,6 +2553,7 @@ class ExternalAgentMonitoringTests(unittest.IsolatedAsyncioTestCase):
                 command="codex",
                 session_mode="resume",
                 session_id="thread_1",
+                approval_mode="auto",
             )
         )
         task = Task(title="demo", description="body")
@@ -2564,7 +2568,7 @@ class ExternalAgentMonitoringTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--add-dir", cmd)
         self.assertNotIn("--sandbox", cmd)
         self.assertIn("-c", cmd)
-        self.assertIn('sandbox_mode="danger-full-access"', cmd)
+        self.assertIn('sandbox_mode="workspace-write"', cmd)
 
     def test_codex_adapter_adds_comms_workspace_root_when_present(self) -> None:
         adapter = CodexAdapter()

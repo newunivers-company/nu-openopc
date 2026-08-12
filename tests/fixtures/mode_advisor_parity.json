@@ -1,0 +1,81 @@
+[
+  {
+    "name": "bounded-task",
+    "request": {
+      "goal": "Ship a bounded fix",
+      "deliverable_count": 1,
+      "role_count": 1,
+      "independent_workstreams": 1,
+      "dependency_count": 0,
+      "bounded_scope": true,
+      "input_complete": true,
+      "requirements_stable": true,
+      "independent_review_required": false,
+      "final_integration_required": false,
+      "risk_level": "low",
+      "estimated_duration_minutes": 20
+    },
+    "expected": {
+      "recommendation": "task",
+      "company_benefit_score": 0,
+      "evidence_veto": false
+    }
+  },
+  {
+    "name": "structural-company",
+    "request": {
+      "goal": "Ship an integrated release",
+      "deliverable_count": 4,
+      "role_count": 4,
+      "independent_workstreams": 3,
+      "dependency_count": 3,
+      "bounded_scope": false,
+      "input_complete": true,
+      "requirements_stable": true,
+      "independent_review_required": true,
+      "final_integration_required": true,
+      "risk_level": "high",
+      "estimated_duration_minutes": 240
+    },
+    "expected": {
+      "recommendation": "company",
+      "company_benefit_score": 10,
+      "evidence_veto": false
+    }
+  },
+  {
+    "name": "evidence-veto",
+    "request": {
+      "goal": "Research with observed evidence",
+      "deliverable_count": 4,
+      "role_count": 4,
+      "independent_workstreams": 3,
+      "dependency_count": 3,
+      "bounded_scope": false,
+      "input_complete": true,
+      "requirements_stable": true,
+      "independent_review_required": true,
+      "final_integration_required": true,
+      "risk_level": "medium",
+      "estimated_duration_minutes": 240,
+      "workload_key": "research",
+      "outcome_observations": [
+        {
+          "workload_key": "research",
+          "authority": "human_confirmed",
+          "task_quality": 0.94,
+          "company_quality": 0.91,
+          "task_duration_seconds": 196,
+          "company_duration_seconds": 1870,
+          "task_external_calls": 2,
+          "company_external_calls": 28
+        }
+      ]
+    },
+    "expected": {
+      "recommendation": "task",
+      "company_benefit_score": 7,
+      "evidence_veto": true
+    }
+  }
+]

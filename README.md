@@ -4,11 +4,11 @@
   <b>English</b> | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-🏗️ **Self-Built** — Fully automated to recruit role-specific AI employees and build the org.
+🏗️ **Self-Built** — Proposes the roles, employees, and skills a goal needs, with explicit operator review.
 
-⚙️ **Self-Run** — Fully automated to assign tasks, drive handoffs, and keep moving toward your goal.
+⚙️ **Self-Run** — Assigns work, drives handoffs, recovers durable runs, and escalates only when human authority is required.
 
-🌱 **Self-Grown** — Learns from every task, builds organizational memory, always delivers smarter.
+🌱 **Self-Grown** — Turns reviewed outcomes into governed organizational memory and measures whether later runs improve.
 
 <p align="center">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white">
@@ -32,6 +32,7 @@
 - [When To Use OpenOPC](#when-to-use-openopc)
 - [Demos](#demos)
 - [How OpenOPC Works](#how-openopc-works)
+- [Outcome-Driven Operations](#outcome-driven-operations)
 - [Quick Start](#quick-start)
 - [Office UI Guide](#office-ui-guide)
 - [CLI Guide](#cli-guide)
@@ -42,52 +43,34 @@
 
 ## When to Use OpenOPC
 
-**OpenOPC** covers nine core verticals — from AI development and software engineering to finance, sales, media, e-commerce, and education. Whatever the industry, OpenOPC assembles the right team and delivers end-to-end.
+OpenOPC's current product and outcome-validation focus is deliberately narrow:
+**software delivery, content production, and evidence-backed research**. These
+workloads exercise the same core company loop while remaining concrete enough
+to benchmark against Task Mode.
 
-<table>
-  <tr>
-    <td width="33%" valign="top">
-      <br><strong>🤖 AI Tech & Research</strong>
-      <br><sub>Model training & evaluation, Agent development, LLM apps & AI infrastructure</sub>
-    </td>
-    <td width="33%" valign="top">
-      <br><strong>💻 Software Development</strong>
-      <br><sub>Android apps, SaaS MVPs, websites, mini programs & game development</sub>
-    </td>
-    <td width="33%" valign="top">
-      <br><strong>📈 Financial Investment</strong>
-      <br><sub>Investment memos, market maps, due diligence & IC decision packages</sub>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>🚀 Sales Growth</strong>
-      <br><sub>Outbound sales, deal strategy, proposals & channel expansion</sub>
-    </td>
-    <td valign="top">
-      <strong>🎬 Content & Media</strong>
-      <br><sub>Video production, short-form content, scripts, storyboards & multi-platform cuts</sub>
-    </td>
-    <td valign="top">
-      <strong>🤝 Industry Assistants</strong>
-      <br><sub>Copilots for support, real estate, legal intake, HR onboarding, retail</sub>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>🧾 Accounting & Finance</strong>
-      <br><sub>Bookkeeping, financial reporting, tax compliance, budgeting & risk review</sub>
-    </td>
-    <td valign="top">
-      <strong>🛍️ Brand & E-commerce</strong>
-      <br><sub>Brand planning, product selection, store ops, user growth & retention</sub>
-    </td>
-    <td valign="top">
-      <strong>🎓 Education & Training</strong>
-      <br><sub>Curriculum design, knowledge base, learner management & content production</sub>
-    </td>
-  </tr>
-</table>
+| Current focus | Good fits |
+|---|---|
+| **💻 Software delivery** | Features, fixes, migrations, tests, release evidence, operational recovery |
+| **🎬 Content production** | Scripts, storyboards, campaign packages, release-ready multi-format assets |
+| **🔎 Research** | Cited briefs, market maps, technical comparisons, investment and decision packages |
+
+Use **Task Mode** for direct, bounded work where one execution agent is enough.
+Use **Company Mode** when the work materially benefits from decomposition,
+parallel roles, independent review, and a final integrator.
+
+For an auditable recommendation before execution, `opc ops mode assess` accepts
+explicit scope, input-readiness, workstream, role, dependency, review, and
+integration evidence. It returns `task`, `company`, or `clarify`; the assessment
+is advisory and never starts work or changes the project default.
+
+Finance, sales, e-commerce, education, and other organization packages remain
+extension targets. OpenOPC does not treat an available template or demo as
+evidence that Company Mode is production-ready for that domain. Product claims
+remain gated by the checked-in Task-versus-Company benchmark and promotion
+dossier.
+
+See [Product Vision](docs/product-vision.md) for the current product contract,
+north-star outcomes, and explicit non-goals.
 
 ## Demos
 
@@ -119,7 +102,11 @@
 
 ## How OpenOPC Works
 
-OpenOPC assembles a AI company around complex, real-world tasks — through three tightly coupled mechanisms: **Self-Built** staffs the organisation, **Self-Run** executes the work, and **Self-Grown** learns from the outcome.
+OpenOPC assembles an AI company around complex, real-world tasks through three
+tightly coupled mechanisms: **Self-Built** staffs the organisation,
+**Self-Run** executes the work, and **Self-Grown** learns from reviewed
+outcomes. Autonomy is bounded by evidence, budget, permissions, and human
+authority rather than measured by how rarely the system asks for help.
 
 <p align="center">
   <img src="docs/assets/video.png" alt="An OpenOPC company: roles, reporting lines, and the employee staffed into each role" width="100%">
@@ -130,7 +117,8 @@ OpenOPC assembles a AI company around complex, real-world tasks — through thre
 Before any work begins, the right people must be in place. Given a goal, OpenOPC:
 
 - 🌿 Drafts the org chart — deriving the roles and reporting structure the task demands.
-- 🎯 Fills each role — a recruiter agent chooses between reusing an existing employee (shaped by prior projects) and onboarding a fresh hire from the talent pool.
+- 🎯 Proposes staffing — a recruiter compares existing employees, fresh hires, experience, reliability, and cost before an operator confirms the run.
+- 🧩 Assembles role skills — a deterministic installed-catalog planner recommends content-addressed skills and reports uncovered capabilities before an operator assigns them.
 
 💡 Experienced employees carry accumulated context; fresh hires offer a clean slate when a role demands it.
 
@@ -160,7 +148,10 @@ A manager decomposes items, assigns, and reviews results — accepting, reworkin
 
 **🌱 3. Self-Grown — Learning from the Run**
 
-Execution generates raw experience; Self-Grown turns it into lasting improvement, guided by two principles.
+Execution generates raw experience; reviewed execution turns it into lasting
+improvement. Candidate memories, skills, and policies must pass offline,
+shadow, and canary evidence before promotion, and their effect on later runs
+can be measured against matched controls.
 
 🏅 Attributing outcomes to the right roles. Crediting the whole company teaches nothing. Instead, OpenOPC:
 
@@ -178,9 +169,15 @@ Execution generates raw experience; Self-Grown turns it into lasting improvement
 - `Org -> Employees` hires talent into vacant roles.
 - `Team Roster -> Deploy` turns a hired employee into a visible office agent.
 - The Workspace composer selects the Task Mode execution agent.
-- The role inspector can set runtime policy and preferred external agent for Company Mode roles.
+- The role inspector can set runtime policy, preferred external agent, and installed `skill_refs` for Company Mode roles.
 - During execution, Workspace `Agents` and the Execution Progress panel show which role is active, which work item it owns, and which execution agent is doing the concrete work.
 </details>
+
+## Outcome-Driven Operations
+
+OpenOPC can now bind work to a versioned goal contract, persist a reproducible run manifest, and accept delivery only through an evidence- and budget-aware scorecard. Its durable operating kernel adds transactional events and an independently deployable fenced outbox worker, leases and bounded recovery, atomic goal settlement, plan-to-execution route contracts, explicit measured/unmeasured usage records, long-horizon provider readiness and failure drills, an approval-gated NU resource pipeline, quality-gated shadow experiments, authenticated Codex/Claude/Grok subscription routing for text-only work, immutable Self-Grown runtime snapshots, deterministic role-skill assembly, evidence-based staffing regret, and a digest-confirmed Mission Control action center.
+
+The complete contract formats, CLI workflow, recovery runbook, learning gates, capability policy, database migration, and CI regression gate are documented in [Outcome-Driven Operations](docs/operations.md). The current hardening evidence is in the [2026-08-12 validation report](docs/validation-2026-08-12.md); the [2026-07-30 report](docs/validation-2026-07-30.md), [2026-07-28 report](docs/validation-2026-07-28.md), [2026-07-27 implementation report](docs/validation-2026-07-27.md), and [2026-07-23 live-provider report](docs/validation-2026-07-23.md) remain available for provenance.
 
 ## Quick Start
 
@@ -253,6 +250,9 @@ uv run python -m playwright install chromium
 # Initialize local config, memory, skills, projects, and workspace folders
 uv run opc init
 
+# Diagnose config, databases, external agents, and channels without exposing secrets
+uv run opc doctor --json
+
 # Add an API key in .opc/config/llm_config.yaml
 # or configure the env var named by llm.api_key_env.
 
@@ -261,6 +261,81 @@ uv run opc ui
 ```
 
 Open `http://localhost:8765` by default.
+
+### NewUnivers routing and resource generation (optional)
+
+OpenOPC can use `nu-llm-routing-lib` for credential-aware model routing and
+`nu-resource-gen-lib` for policy-guarded image, video, audio, and VLM resource
+plans. Keep all three repositories next to each other and install the `nu`
+extra with Python 3.11 or newer:
+
+```text
+newunivers-company/
+├── nu-openopc/
+├── nu-llm-routing-lib/
+└── nu-resource-gen-lib/
+```
+
+```bash
+cd nu-openopc
+uv sync --extra dev --extra nu
+
+# Read-only diagnostics: no provider call and no billable generation
+uv run opc chat -p demo --mode task \
+  "Run nu_llm_route_diagnostics and list the available NU resource candidates"
+```
+
+The exact `nu` dependency versions and immutable source revisions are declared
+once in `config/nu_release_manifest.json`; CI verifies that `pyproject.toml`,
+the sibling source checkouts, installed packages, and stable wheel facades
+match that release identity. OpenOPC consumes
+`ResourceGenerator.evaluate_prompt()` rather than an internal module path.
+
+The sibling paths under `[tool.uv.sources]` are development overrides. They may
+intentionally point at newer local work, but such a run is not release-equivalent.
+Check the complete release identity explicitly before recording validation
+evidence or cutting a package:
+
+```bash
+uv run python scripts/verify_nu_release_manifest.py \
+  --workspace-root .. --check-installed
+```
+
+This command is intentionally fail-closed. Do not move a sibling checkout with
+unpublished work merely to make it pass; use the pinned CI checkouts or clean
+Git worktrees at the manifest revisions instead.
+
+NU model routing is fail-open: explicit `llm.routing` entries remain
+authoritative, tool-calling turns stay on the configured OpenOPC model by
+default, and candidates without usable credentials are skipped. Resource
+generation is fail-closed: live calls require an enabled candidate allowlist
+and an explicit human confirmation; dry-run planning and the execution ledger
+remain available without enabling billing.
+
+The CI workflow checks out both sibling repositories. If they are private,
+configure a read-only `NU_REPOS_READ_TOKEN` Actions secret with access to them;
+public repositories work with the normal workflow token.
+
+The `nu` packages are private release inputs and are not resolved from the
+default public package index. A wheel consumer must either configure the
+private index that hosts the two pinned versions or install all three release
+wheels together:
+
+```bash
+uv pip install --python .venv/bin/python \
+  '/path/to/opc-0.1.0-py3-none-any.whl[nu]' \
+  /path/to/nu_llm_routing_lib-0.4.0-py3-none-any.whl \
+  /path/to/nu_resource_gen_lib-0.2.4-py3-none-any.whl
+```
+
+Installing only `opc[nu]` against the default index is expected to fail while
+those private wheels are unavailable there. Build or download them from the
+immutable revisions in `config/nu_release_manifest.json`; do not substitute a
+newer sibling checkout when recording release-equivalent evidence.
+
+Deprecated aliases and wire compatibility are tracked in
+[`docs/compatibility.md`](docs/compatibility.md); compatibility paths have an
+explicit removal target and must not receive new behavior.
 
 ```bash
 # Interactive CLI
@@ -285,7 +360,7 @@ uv run opc exec -p demo --mode task --agent native --json "Summarize the current
 - See the official [`uv` installation](https://docs.astral.sh/uv/getting-started/installation/) and [Python management](https://docs.astral.sh/uv/guides/install-python/) docs for alternative package managers and managed Python details.
 - Node.js: `>=18` is needed when the Office UI frontend must be built.
 - `opc ui` auto-installs missing `aiohttp` / `aiosqlite` and auto-builds the frontend if needed.
-- If you have not installed external agent CLIs yet, run `opc init --no-external-agent-preflight` to skip the first-run external-agent checks.
+- If you have not installed external agent CLIs yet, run `opc init --no-external-agent-preflight`. On a fresh home, unavailable default adapters are saved as disabled so the initial `opc doctor --strict` result stays actionable; already initialized configurations are never rewritten by this shortcut. Re-enable an adapter later in `.opc/config/agent_config.yaml` after installing its CLI.
 - Browser tools are native Playwright tools. Install Chromium with `python -m playwright install chromium` before asking agents to browse pages.
 </details>
 
@@ -297,7 +372,8 @@ python -m pip install -e .
 python -m pytest
 
 cd opc/plugins/office_ui/frontend_src
-npm install
+npm ci
+npm test
 npm run typecheck
 npm run build
 ```
@@ -317,6 +393,18 @@ opc ui
 opc ui --port 9000 --project demo
 opc ui --rebuild
 ```
+
+The server binds to `127.0.0.1` by default. A non-loopback bind is refused
+unless an authentication token is configured:
+
+```bash
+OPC_UI_AUTH_TOKEN="replace-with-a-long-random-token" \
+  opc ui --host 0.0.0.0 --allow-origin https://office.example.com
+```
+
+Send the token as `Authorization: Bearer ...`, `X-OPC-Auth-Token`, or open
+`/auth?token=...` once to exchange it for an HttpOnly session cookie. Add each
+trusted browser origin explicitly with a repeated `--allow-origin` option.
 
 ### Visual Tour
 
@@ -392,6 +480,8 @@ Company Mode turns one brief into a runtime session plus role-owned work items.
 | `Info` | Status, assignees, role identity, employee assignment, selected execution agent, timing, and developer details. |
 | `Comms` | Role inboxes, unread/read/sent messages, meetings, decisions, and recent communication failures. |
 | `Team` | Runtime cockpit: teams, seats, approvals, unread communication, run state, and stop controls for the current run. |
+
+The top-level `Mission Control` page is project-scoped and model-free. It shows durable run/gate health, approval and delivery queues, provider SLOs, subscription call quotas, a dry-run storage inventory with generated-backup retention candidates, ordered alerts, and recommended next actions. Storage cleanup is never automatic and still requires a separate explicit `--apply`. Allowlisted recovery actions use a separate plan/review/confirm flow with an expiring SHA-256 digest and durable operator receipt. The page refreshes on entry, every 30 seconds while visible, and on demand.
 
 To inspect the detailed workflow for a role, open a company-mode session and click a role/work item in the `Chat` progress card or `Agents` tab. The Execution Progress panel shows each work item, its status, activity sections, tool progress, handoffs, review targets, and execution turn metadata.
 
@@ -491,7 +581,20 @@ opc comms state <task_id> -p demo
 # Recruitment
 opc talent import /path/to/agency-agents
 opc talent hire <template_id> <role_id> -p demo
+
+# Create and activate a saved organization, then apply a role preset to it
+opc org saved create "Research Lab" \
+  --member 'Lead|Own the final decision' \
+  --member 'Analyst|Research and synthesize evidence|0'
+opc market apply-preset vc_investment_firm
+
+# Read-only environment and integration diagnosis
+opc doctor --project demo --json
 ```
+
+Preset application reports `employees`/`persisted_employees` as the number
+actually retained in the saved organization. `runtime_default_employees`
+separately reports synthetic role placeholders available only at runtime.
 
 ### Interactive Slash Commands
 
@@ -524,7 +627,7 @@ See [`docs/cli-chat-slash.md`](docs/cli-chat-slash.md) for the full command tabl
 | `opc mode` | `show`, `set task`, `set company --profile corporate`, `set org --org <id>` for a saved-org company run |
 | `opc kanban` | `view`, `task create`, `task update`, `task move`, `task assign`, `task status`, `task delete --yes` |
 | `opc agent` | `list`, `create`, `create-from-template`, `import-employee`, `detail`, `move`, `delete --yes` |
-| `opc org` | `info`, `export`, `import`, `saved list/save/load/delete`, `role add/update/bulk-add/delete`, `policy update`, `strategy update`, `reset --yes` |
+| `opc org` | `info`, `export`, `import`, `saved list/create/save/load/delete`, `role add/update/bulk-add/delete`, `policy update`, `strategy update`, `reset --yes` |
 | `opc talent` | `list`, `employees`, `import`, `hire`, `scan`, `import-selected`, `employee-detail`, `import-agent` |
 | `opc market` | `presets`, `browse`, `preview`, `apply-preset`, `export`, `install`, `list`, `uninstall --yes` |
 | `opc runtime` | `status`, `checkpoints`, `logs`, `run` |
@@ -544,7 +647,7 @@ opc session create "Research sprint" -p demo --mode org --org hku_research_lab
 
 ## Configuration
 
-Run `opc init` once from the repo root. It creates `.opc/`, copies the template config from `config/`, creates memory/skills/log folders, and optionally creates the first project.
+Run `opc init` once from the repo root. It creates `.opc/`, copies the template config from `config/`, creates memory/skills/log folders, and optionally creates the first project. If an older or UI-created workspace has only part of the required config, run `opc init --repair`; repair preserves every existing config byte-for-byte and installs only missing top-level templates. Invalid existing YAML is reported and never overwritten. On a fresh home, `--no-external-agent-preflight` disables only unavailable default external-agent adapters; it does not modify an existing configuration. Use `opc doctor --json` for read-only initialization, filesystem, SQLite, external-agent, channel, and NU LLM routing diagnostics; add `--probe-agent-commands` only when command execution probes are intended. An enabled NU router without a usable configuration is reported as `fallback` when `fail_open` is true and does not fail `--strict`; the same condition is `blocked` and fails strict diagnostics when `fail_open` is false.
 
 <details>
 <summary><b>Expand configuration — config files, LLM keys, external agents, channels, browser/MCP, troubleshooting</b></summary>
@@ -799,9 +902,11 @@ OpenOPC is moving quickly. The areas below reflect active development priorities
 
 | Area | Planned direction |
 |---|---|
-| **Role-level skills** | Role config already carries `skill_refs`, and the Org UI surfaces skill metadata today. The next step is letting users select which skills mount to which roles directly from the Org page — feeding into a broader self-evolving skill ecosystem. |
-| **Secretary settings** | The secretary will grow into a stronger configuration and memory steward: owning OPC system memory, analysing and comparing projects, and providing guided setup for OpenOPC YAML configuration. |
-| **Company-mode channels** | External channels will evolve beyond simple chat entrypoints into richer company-mode workflows — with role-aware notifications, structured approvals, and cross-platform collaboration. |
+| **Outcome proof** | The paired software/content/research campaign now seals the full acceptance contract, captures bounded workspace evidence, enforces absolute slot/call/process budgets, and stops batch expansion while execution or trusted-judgment work is open. Next: complete human/independent review and the remaining trusted Task-versus-Company pairs, then publish quality, success, duration, cost, and intervention deltas. |
+| **Self-Grown effectiveness** | Exact assets are pinned into run manifests; release-playbook experiments seal alternating matched controls, activation metadata, provenance, contamination guards, and no-auto-promotion policy. Next: execute representative treated/control cohorts and feed only trusted lift reports into normal learning promotion evidence. |
+| **Role-level skills** | Role assignment, deterministic goal-to-skill recommendations, content digests, and Native/external runtime mounting are implemented. Next: searchable marketplace selection, signed packages, and richer capability metadata. |
+| **Secretary settings** | The secretary now consumes deterministic Mission Control and read-only skill-assembly context without auto-executing operator actions. Next: cross-project comparison and guided YAML setup. |
+| **Company-mode channels** | Every configured channel supports model-free `/opc status`, `/opc skills`, and two-phase governed actions under its sender allowlist. Next: role-aware notifications and richer structured approval cards. |
 | **CLI parity** | The CLI is functional today, but the Office UI remains the more complete surface. Upcoming work targets org editing, company-mode inspection, failure recovery, and long-running runtime control from the terminal. |
 | **TUI** | A full terminal UI is under consideration once CLI parity matures. The Office UI remains the primary interface in the meantime. |
 | **Market and presets** | More architecture presets, recruitable talent packs, import/export workflows, and a package marketplace for sharing and discovering community-built components. |

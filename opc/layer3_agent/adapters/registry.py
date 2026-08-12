@@ -27,24 +27,39 @@ class AdapterRegistry:
         self.config = config
         self._adapters: dict[str, ExternalAgentAdapter] = {}
         self._available: dict[str, bool] = {}
+        self._health: dict[str, dict[str, object]] = {}
 
     async def initialize(self) -> None:
         """Discover and initialize available external agents."""
         self._adapters = {}
         self._available = {}
+        self._health = {}
         for agent_type, adapter_cls in ADAPTER_CLASSES.items():
             agent_config = self.config.agents.get(agent_type)
             adapter = adapter_cls(config=agent_config)
             self._adapters[agent_type] = adapter
             if agent_config and not agent_config.enabled:
                 self._available[agent_type] = False
+                self._health[agent_type] = {
+                    "available": False,
+                    "credential_ready": False,
+                    "transport_ready": False,
+                    "detail": "disabled in config",
+                }
                 logger.info(f"External agent {agent_type}: disabled in config")
                 continue
 
-            available = await adapter.is_available()
+            health = await adapter.probe_health()
+            self._health[agent_type] = dict(health)
+            available = bool(health.get("available") and health.get("transport_ready"))
             self._available[agent_type] = available
-            status = "available" if available else "not found"
-            logger.info(f"External agent {agent_type}: {status}")
+            status = "ready" if available else "unavailable"
+            logger.info(
+                "External agent {}: {} ({})",
+                agent_type,
+                status,
+                str(health.get("detail") or "no detail"),
+            )
 
     def get(self, agent_type: str) -> ExternalAgentAdapter | None:
         if agent_type in self._adapters and self._available.get(agent_type):
@@ -86,6 +101,7 @@ class AdapterRegistry:
         for agent_type, adapter in self._adapters.items():
             profile = adapter.describe()
             profile["available"] = self._available.get(agent_type, False)
+            profile["health"] = dict(self._health.get(agent_type, {}))
             profiles.append(profile)
         return profiles
 

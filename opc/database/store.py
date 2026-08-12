@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import inspect
+import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import partial
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -26,7 +29,6 @@ from opc.core.models import (
     CostEvent,
     DelegationCell,
     DelegationEvent,
-    DelegationRoleSession,
     DelegationRun,
     DelegationWorkItem,
     ExecutionCheckpoint,
@@ -65,19 +67,22 @@ from opc.core.models import (
     normalize_role_runtime_status,
 )
 from opc.core.models import Phase
+from opc.core.checkpoint_storage import compact_execution_checkpoint_payload
 from opc.core.transcript_visibility import (
     normalize_transcript_detail_level,
     transcript_visibility_sql,
+)
+from opc.database.schema_migrations import (
+    complete_component_migration,
+    prepare_component_migration,
 )
 from opc.layer2_organization.phase import (
     DONE_PHASES,
     IN_PROGRESS_PHASES,
     IN_REVIEW_PHASES,
     InvalidPhaseTransition,
-    TODO_PHASES,
     coerce_phase,
     is_stale_claim_releasable,
-    is_terminal,
     kanban_column,
     on_phase_transition,
     validate_transition,
@@ -89,7 +94,6 @@ from opc.layer2_organization.work_item_identity import (
     projection_id_for_work_item,
 )
 from opc.layer2_organization.work_item_links import (
-    linked_work_item_id_for_task,
     set_linked_work_item_id,
 )
 from opc.layer2_organization.work_item_runtime import (
@@ -99,6 +103,13 @@ from opc.layer2_organization.work_item_runtime import (
 from opc.layer2_organization.work_item_runtime_invariants import (
     validate_work_item_runtime_projection,
 )
+
+
+CORE_SCHEMA_VERSION = 1
+
+_SQLITE_LOCK_RETRY_ATTEMPTS = 2
+_SQLITE_LOCK_RETRY_BASE_DELAY_SECONDS = 0.25
+_SQLITE_LOCK_ERROR_MARKERS = ("database is locked", "database table is locked")
 
 
 def _json_dumps(value: Any) -> str:
@@ -127,21 +138,22 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 
 class _SQLiteCursorAdapter:
-    def __init__(self, cursor: sqlite3.Cursor) -> None:
+    def __init__(self, connection: "_SQLiteConnectionAdapter", cursor: sqlite3.Cursor) -> None:
+        self._connection = connection
         self._cursor = cursor
 
     async def __aenter__(self) -> "_SQLiteCursorAdapter":
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
-        self._cursor.close()
+        await self._connection._call(self._cursor.close)
         return False
 
     async def fetchone(self) -> Any:
-        return self._cursor.fetchone()
+        return await self._connection._call(self._cursor.fetchone)
 
     async def fetchall(self) -> list[Any]:
-        return self._cursor.fetchall()
+        return await self._connection._call(self._cursor.fetchall)
 
     @property
     def description(self) -> Any:
@@ -153,52 +165,122 @@ class _SQLiteCursorAdapter:
 
 
 class _SQLiteExecuteResult:
-    def __init__(self, connection: sqlite3.Connection, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> None:
+    def __init__(
+        self,
+        connection: "_SQLiteConnectionAdapter",
+        sql: str,
+        params: tuple[Any, ...] | list[Any] = (),
+    ) -> None:
         self._connection = connection
         self._sql = sql
         self._params = tuple(params)
-        self._cursor: sqlite3.Cursor | None = None
+        self._cursor: _SQLiteCursorAdapter | None = None
+
+    async def _run(self) -> _SQLiteCursorAdapter:
+        connection = await self._connection._ensure_connected()
+        cursor = await self._connection._call(connection.cursor)
+        try:
+            await self._connection._call(cursor.execute, self._sql, self._params)
+        except Exception:
+            await self._connection._call(cursor.close)
+            raise
+        return _SQLiteCursorAdapter(self._connection, cursor)
 
     def __await__(self):
-        async def _run() -> _SQLiteCursorAdapter:
-            cursor = self._connection.cursor()
-            cursor.execute(self._sql, self._params)
-            return _SQLiteCursorAdapter(cursor)
-
-        return _run().__await__()
+        return self._run().__await__()
 
     async def __aenter__(self) -> _SQLiteCursorAdapter:
-        cursor = self._connection.cursor()
-        cursor.execute(self._sql, self._params)
-        self._cursor = cursor
-        return _SQLiteCursorAdapter(cursor)
+        self._cursor = await self._run()
+        return self._cursor
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         if self._cursor is not None:
-            self._cursor.close()
+            await self._cursor.__aexit__(exc_type, exc, tb)
         return False
 
 
 class _SQLiteConnectionAdapter:
     def __init__(self, db_path: str) -> None:
-        self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30.0)
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=30000")
+        self._db_path = str(db_path)
+        self._conn: sqlite3.Connection | None = None
+        self._connect_lock = asyncio.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="opc-sqlite")
+
+    async def _call(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        attempts = _SQLITE_LOCK_RETRY_ATTEMPTS + 1
+        for attempt in range(attempts):
+            try:
+                return await loop.run_in_executor(self._executor, partial(fn, *args))
+            except sqlite3.OperationalError as exc:
+                locked = any(
+                    marker in str(exc).strip().lower()
+                    for marker in _SQLITE_LOCK_ERROR_MARKERS
+                )
+                if not locked or attempt + 1 >= attempts:
+                    raise
+                delay = _SQLITE_LOCK_RETRY_BASE_DELAY_SECONDS * (2**attempt)
+                logger.warning(
+                    "Transient sqlite lock for {}; retrying in {:.2f}s "
+                    "(attempt {}/{})",
+                    self._db_path,
+                    delay,
+                    attempt + 2,
+                    attempts,
+                )
+                await asyncio.sleep(delay)
+        raise AssertionError("sqlite call retry loop exhausted unexpectedly")
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self._db_path,
+            check_same_thread=False,
+            timeout=30.0,
+        )
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=30000")
+        return connection
+
+    async def _ensure_connected(self) -> sqlite3.Connection:
+        if self._conn is not None:
+            return self._conn
+        async with self._connect_lock:
+            if self._conn is None:
+                self._conn = await self._call(self._connect)
+        assert self._conn is not None
+        return self._conn
 
     def execute(self, sql: str, parameters: tuple[Any, ...] | list[Any] = ()) -> _SQLiteExecuteResult:
-        return _SQLiteExecuteResult(self._conn, sql, parameters)
+        return _SQLiteExecuteResult(self, sql, parameters)
 
     async def executescript(self, script: str) -> None:
-        self._conn.executescript(script)
+        connection = await self._ensure_connected()
+        await self._call(connection.executescript, script)
 
     async def commit(self) -> None:
-        self._conn.commit()
+        connection = await self._ensure_connected()
+        await self._call(connection.commit)
 
     async def rollback(self) -> None:
-        self._conn.rollback()
+        connection = await self._ensure_connected()
+        await self._call(connection.rollback)
 
     async def close(self) -> None:
-        self._conn.close()
+        if self._conn is not None:
+            await self._call(self._conn.close)
+            self._conn = None
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def __del__(self) -> None:
+        # Test doubles historically did not need to close the synchronous
+        # adapter.  Keep that compatibility without leaking a worker thread.
+        try:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
 
 class OPCStore:
@@ -248,7 +330,7 @@ class OPCStore:
         """Whether the SQLite connection has been initialized."""
         return self._db is not None
 
-    def _require_db(self) -> aiosqlite.Connection:
+    def _require_db(self) -> _SQLiteConnectionAdapter:
         """Return the active DB connection or raise a descriptive error."""
         if self._db is None:
             raise RuntimeError(
@@ -280,6 +362,11 @@ class OPCStore:
             return
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
+        core_migration = await prepare_component_migration(
+            self._db,
+            component="openopc_core",
+            target_version=CORE_SCHEMA_VERSION,
+        )
         await self._create_tables()
         await self._ensure_schema()
         await self._sweep_stale_claims()
@@ -297,6 +384,7 @@ class OPCStore:
         await self._purge_cross_project_runtime_rows()
         await self._validate_work_item_runtime_links()
         await self._ensure_indexes()
+        await complete_component_migration(self._db, core_migration)
 
     async def _table_columns(self, table: str) -> list[str]:
         assert self._db is not None
@@ -1437,6 +1525,9 @@ class OPCStore:
                 timestamp TEXT NOT NULL
             );
         """)
+        from opc.operations.repository import create_operations_schema
+
+        await create_operations_schema(self._db)
         await self._db.commit()
 
     async def _ensure_schema(self) -> None:
@@ -2031,6 +2122,13 @@ class OPCStore:
                     full_run_ids,
                 )
             )
+
+        # A WorkItem is the business source of truth and its runtime Task is a
+        # replaceable projection.  Deleting a standalone projected Task must
+        # therefore remove the link, but keep the WorkItem available for
+        # rematerialization.  Session deletion still removes its full run.
+        if not clean_session_id and not full_run_ids:
+            work_item_ids.clear()
 
         if work_item_ids:
             role_runtime_session_ids.update(
@@ -4553,7 +4651,9 @@ class OPCStore:
             """SELECT work_item_id, phase, metadata
                FROM delegation_work_items
                WHERE claimed_by_role_runtime_session_id != ''
-                  OR claimed_by_seat_id != ''"""
+                  OR claimed_by_seat_id != ''
+                  OR COALESCE(json_extract(metadata, '$.claimed_by_role_session_id'), '') != ''
+                  OR COALESCE(json_extract(metadata, '$.claimed_task_id'), '') != ''"""
         ) as cursor:
             rows = await cursor.fetchall()
         cleared = 0
@@ -5583,6 +5683,12 @@ class OPCStore:
         target = coerce_phase(target_phase)
         validate_transition(Phase.AWAITING_MANAGER_REVIEW, target)
         expected_source = str(source_report_work_item_id or "").strip()
+        # A card projected back into a fresh-runnable phase must be claimable
+        # by its next attempt. Residual claim fields from the settled attempt
+        # make the dispatcher's claim CAS refuse forever while the enqueue
+        # gate keeps offering the card — the claim-livelock variant observed
+        # in the 2026-07-28 pilot (thousands of losses on one rework card).
+        release_claims = target in {Phase.READY, Phase.READY_FOR_REWORK}
         db = self._require_db()
 
         for _attempt in range(3):
@@ -5591,6 +5697,9 @@ class OPCStore:
                 return None
             metadata = dict(item.metadata or {})
             metadata.update(dict(metadata_updates or {}))
+            if release_claims:
+                metadata["claimed_by_role_session_id"] = ""
+                metadata["claimed_task_id"] = ""
             if (
                 self._metadata_has_work_item_projection_identity(metadata)
                 or str(item.projection_id or "").strip()
@@ -5605,9 +5714,16 @@ class OPCStore:
                 )
             previous_updated_at = item.updated_at.isoformat()
             updated_at = datetime.now()
+            claim_clause = (
+                """,
+                       claimed_by_role_runtime_session_id = '',
+                       claimed_by_seat_id = ''"""
+                if release_claims
+                else ""
+            )
             cursor = await db.execute(
-                """UPDATE delegation_work_items
-                   SET phase = ?, blocked_reason = ?, metadata = ?, updated_at = ?
+                f"""UPDATE delegation_work_items
+                   SET phase = ?, blocked_reason = ?, metadata = ?, updated_at = ?{claim_clause}
                    WHERE work_item_id = ?
                      AND phase = ?
                      AND updated_at = ?
@@ -7181,8 +7297,29 @@ class OPCStore:
 
     # --- Execution checkpoints ---
 
+    async def _execution_checkpoint_storage_row(
+        self,
+        checkpoint_id: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        assert self._db
+        async with self._db.execute(
+            """SELECT checkpoint_type, payload
+               FROM execution_checkpoints
+               WHERE checkpoint_id = ?""",
+            (checkpoint_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return str(row[0] or ""), _json_loads(row[1], {})
+
     async def save_execution_checkpoint(self, checkpoint: ExecutionCheckpoint) -> None:
         assert self._db
+        checkpoint.payload = compact_execution_checkpoint_payload(
+            checkpoint.checkpoint_type,
+            checkpoint.payload,
+            status=checkpoint.status,
+        )
         await self._db.execute(
             """INSERT OR REPLACE INTO execution_checkpoints
             (checkpoint_id, project_id, session_id, checkpoint_type, status, task_id, payload, created_at, updated_at)
@@ -7228,6 +7365,11 @@ class OPCStore:
         project_id = str(checkpoint.project_id or "default").strip() or "default"
         session_id = str(checkpoint.session_id or "").strip()
         checkpoint_type = str(checkpoint.checkpoint_type or "").strip()
+        checkpoint.payload = compact_execution_checkpoint_payload(
+            checkpoint_type,
+            checkpoint.payload,
+            status=checkpoint.status,
+        )
         if not session_id:
             raise ValueError("active execution checkpoint requires session_id")
         if checkpoint_type not in clean_types:
@@ -7262,6 +7404,11 @@ class OPCStore:
                     payload = _json_loads(duplicate.get("payload"), {})
                     payload["superseded_at"] = now
                     payload["superseded_by_checkpoint_id"] = winner_id
+                    payload = compact_execution_checkpoint_payload(
+                        str(duplicate.get("checkpoint_type", "") or ""),
+                        payload,
+                        status="superseded",
+                    )
                     await self._db.execute(
                         """UPDATE execution_checkpoints
                         SET status = 'superseded', payload = ?, updated_at = ?
@@ -7372,6 +7519,13 @@ class OPCStore:
         ]
         if not checkpoint_id or not expected:
             return False
+        storage_row = await self._execution_checkpoint_storage_row(checkpoint_id)
+        checkpoint_type = storage_row[0] if storage_row is not None else ""
+        compacted_payload = compact_execution_checkpoint_payload(
+            checkpoint_type,
+            payload,
+            status=status,
+        )
         placeholders = ", ".join("?" for _ in expected)
         cursor = await self._db.execute(
             f"""UPDATE execution_checkpoints
@@ -7379,7 +7533,7 @@ class OPCStore:
             WHERE checkpoint_id = ? AND status IN ({placeholders})""",
             (
                 str(status or "").strip(),
-                _json_dumps(dict(payload or {})),
+                _json_dumps(compacted_payload),
                 (updated_at or datetime.now()).isoformat(),
                 checkpoint_id,
                 *expected,
@@ -7419,6 +7573,15 @@ class OPCStore:
         now = updated_at or datetime.now()
         try:
             await self._db.execute("BEGIN IMMEDIATE")
+            storage_row = await self._execution_checkpoint_storage_row(
+                checkpoint_id
+            )
+            checkpoint_type = storage_row[0] if storage_row is not None else ""
+            compacted_payload = compact_execution_checkpoint_payload(
+                checkpoint_type,
+                payload,
+                status=status,
+            )
             cursor = await self._db.execute(
                 """UPDATE execution_checkpoints
                 SET status = ?, payload = ?, updated_at = ?
@@ -7428,7 +7591,7 @@ class OPCStore:
                   AND status = ?""",
                 (
                     status,
-                    _json_dumps(dict(payload or {})),
+                    _json_dumps(compacted_payload),
                     now.isoformat(),
                     checkpoint_id,
                     project_id,
@@ -7521,9 +7684,24 @@ class OPCStore:
 
     async def resolve_execution_checkpoint(self, checkpoint_id: str, status: str = "resolved") -> None:
         assert self._db
+        storage_row = await self._execution_checkpoint_storage_row(checkpoint_id)
+        if storage_row is None:
+            return
+        payload = compact_execution_checkpoint_payload(
+            storage_row[0],
+            storage_row[1],
+            status=status,
+        )
         await self._db.execute(
-            "UPDATE execution_checkpoints SET status = ?, updated_at = ? WHERE checkpoint_id = ?",
-            (status, datetime.now().isoformat(), checkpoint_id),
+            """UPDATE execution_checkpoints
+               SET status = ?, payload = ?, updated_at = ?
+               WHERE checkpoint_id = ?""",
+            (
+                status,
+                _json_dumps(payload),
+                datetime.now().isoformat(),
+                checkpoint_id,
+            ),
         )
         await self._db.commit()
 

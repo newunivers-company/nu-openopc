@@ -63,6 +63,15 @@ from opc.plugins.office_ui.execution_identity import (
     normalize_exec_mode,
     normalize_preferred_agent,
 )
+from opc.presentation.kanban import (
+    STATUS_TO_COLUMN,
+    build_base_task_payload,
+    build_board_columns,
+    build_company_board_columns,
+    datetime_to_timestamp,
+    priority_to_label,
+)
+from opc.layer3_agent.adapters.codex_adapter import CodexAdapter
 
 
 # The frontend's KanbanColumn definitions use hyphenated ids
@@ -86,15 +95,6 @@ def _runtime_status_from_member_meta(member_session_meta: dict[str, Any]) -> str
         member_session_meta.get("status") or member_session_meta.get("resident_status"),
         member_session_meta.get("focused_work_item_id"),
     )
-from opc.presentation.kanban import (
-    STATUS_TO_COLUMN,
-    build_base_task_payload,
-    build_board_columns,
-    build_company_board_columns,
-    datetime_to_timestamp,
-    priority_to_label,
-)
-from opc.layer3_agent.adapters.codex_adapter import CodexAdapter
 
 if TYPE_CHECKING:
     from opc.engine import OPCEngine
@@ -3815,7 +3815,6 @@ async def build_collab_sync(
             "message_count": msg_count,
             # Company Mode metadata
             **identity_payload,
-            "company_profile": resolved_company_profile,
             **({} if is_task_mode_runtime else _work_item_role_payload(identity_task)),
             "work_item_gate": None if is_task_mode_runtime else (identity_meta.get("work_item_gate") or t_meta.get("work_item_gate")),
             "employee_assignment": employee_assignment or None,

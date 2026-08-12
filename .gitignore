@@ -39,7 +39,6 @@ benchmarks/
 __pycache__/
 *.py[cod]
 *$py.class
-uv.lock
 *.egg-info/
 *.egg
 dist/
@@ -66,7 +65,9 @@ logs/
 
 # Task/demo artifacts
 artifacts/
+.artifacts/
 /sessions/
+/outputs/
 
 # Temporary Node/MCP artifacts
 node_modules/

@@ -15,7 +15,10 @@ from opc.core.models import CompanyMemberSession, Task, TaskResult, TaskStatus
 from opc.engine import OPCEngine
 from opc.layer2_organization.company_mode import CompanyWorkItemExecutor
 from opc.layer2_organization.company_runtime_identity import is_company_runtime_task
-from opc.layer2_organization.org_work_item_planner import CompanyWorkItemRuntimePlan
+from opc.layer2_organization.org_work_item_planner import (
+    CompanyWorkItemRuntimePlan,
+    WorkItemProjectionSpec,
+)
 
 
 def _async_test(func):
@@ -478,9 +481,21 @@ async def test_company_executor_driver_ownership_covers_idle_scheduler_window() 
         metadata={"work_item_runtime": True},
     )
     execution = asyncio.create_task(
-        executor.execute(CompanyWorkItemRuntimePlan(), [task])
+        executor.execute(
+            CompanyWorkItemRuntimePlan(
+                projections=[
+                    WorkItemProjectionSpec(
+                        projection_id="driver-work-item",
+                        turn_type="execute",
+                        role_id="engineer",
+                        title="Driver work item",
+                    )
+                ]
+            ),
+            [task],
+        )
     )
-    await entered.wait()
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
 
     assert registry.is_active("project-a", task.id)
     allow_exit.set()

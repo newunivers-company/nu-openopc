@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { chromium, type Browser, type Page } from 'playwright'
+import { chromium, type Browser, type Page, type Request, type Response } from 'playwright'
 import { createServer, type ViteDevServer } from 'vite'
 
 // Run from frontend_src:
@@ -51,8 +51,34 @@ async function gotoFixture(
   extraQuery = '',
 ): Promise<void> {
   const suffix = extraQuery ? `&${extraQuery}` : ''
-  await page.goto(`${baseUrl}tests/message-list-scroll.html?policy=${policy}${suffix}`)
-  await page.waitForFunction(() => window.__messageListFixtureReady === true)
+  const url = `${baseUrl}tests/message-list-scroll.html?policy=${policy}${suffix}`
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const optimizerRestarts: string[] = []
+    const onRequestFailed = (request: Request) => {
+      const error = request.failure()?.errorText ?? ''
+      if (error.includes('ERR_NETWORK_CHANGED')) optimizerRestarts.push(`${error} ${request.url()}`)
+    }
+    const onResponse = (response: Response) => {
+      if (response.status() === 504 && response.url().includes('/node_modules/.vite/deps/')) {
+        optimizerRestarts.push(`504 ${response.url()}`)
+      }
+    }
+    page.on('requestfailed', onRequestFailed)
+    page.on('response', onResponse)
+    try {
+      await page.goto(url)
+      await page.waitForFunction(() => window.__messageListFixtureReady === true)
+      break
+    } catch (error) {
+      if (attempt > 0 || optimizerRestarts.length === 0) throw error
+      // A fresh Vite dependency optimization can restart its module graph
+      // after the document loads. Retry exactly once for that observed
+      // transition; ordinary fixture and application errors still fail.
+    } finally {
+      page.off('requestfailed', onRequestFailed)
+      page.off('response', onResponse)
+    }
+  }
   await page.waitForSelector('.msg-list')
   await settle(page, 150)
 }

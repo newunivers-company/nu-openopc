@@ -801,6 +801,7 @@
   letter-spacing: 0.6px;
 }
 .ri-field-control { display: flex; flex-direction: column; gap: 4px; }
+.ri-field-hint { color: var(--text-dim); font-size: 9px; line-height: 1.4; }
 
 .ri-text-input, .ri-select, .ri-textarea {
   width: 100%;

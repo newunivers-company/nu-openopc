@@ -7,7 +7,9 @@ import contextlib
 import json
 import os
 import shutil
+import subprocess
 import uuid
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -44,6 +46,52 @@ class CodexAdapter(ExternalAgentAdapter):
     async def is_available(self) -> bool:
         return self.resolve_binary() is not None
 
+    async def probe_health(self) -> dict[str, Any]:
+        binary = self.resolve_binary()
+        if not binary:
+            return {
+                "available": False,
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": "codex executable unavailable",
+            }
+
+        def _probe() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [binary, "login", "status"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+
+        try:
+            completed = await asyncio.to_thread(_probe)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {
+                "available": False,
+                "credential_ready": False,
+                "transport_ready": False,
+                "detail": f"codex login probe failed: {type(exc).__name__}: {exc}"[:500],
+            }
+        raw = "\n".join(
+            part for part in (completed.stdout, completed.stderr) if part
+        ).strip()
+        ready = completed.returncode == 0 and "logged in" in raw.lower()
+        return {
+            "available": ready,
+            "credential_ready": ready,
+            "transport_ready": ready,
+            # Login status output is not retained because future CLI versions
+            # may add account identifiers to it.
+            "detail": (
+                "codex subscription login ready"
+                if ready
+                else f"codex login unavailable (exit={completed.returncode})"
+            ),
+        }
+
     async def get_status(self) -> AgentStatus:
         if self._process and self._process.returncode is None:
             return AgentStatus.RUNNING
@@ -73,8 +121,6 @@ class CodexAdapter(ExternalAgentAdapter):
         # provider settings as the CLI the user runs directly. Prefer
         # symlinks so rotations are tracked; fall back to copying on
         # Windows/filesystems where symlink creation is blocked.
-        from pathlib import Path
-
         user_home = Path.home() / ".codex"
         target_home = Path(home)
         target_home.mkdir(parents=True, exist_ok=True)
@@ -642,6 +688,7 @@ class CodexAdapter(ExternalAgentAdapter):
                 return proc
             if isinstance(launch_metadata, dict):
                 self._record_stdin_policy_metadata(launch_metadata, stdin_policy)
+                launch_metadata["interactive_input_channel"] = "inherit"
                 launch_metadata["interactive_input_limitation"] = (
                     "stdin is inherited for argv prompt delivery on PTY-less platforms; "
                     "live approval replies require a PTY-capable platform"
@@ -903,7 +950,7 @@ class CodexAdapter(ExternalAgentAdapter):
             return []
         if mode == "full-auto":
             return ["--dangerously-bypass-approvals-and-sandbox"]
-        return ["--sandbox", "danger-full-access"]
+        return ["--sandbox", "workspace-write"]
 
     def _build_resume_approval_args(self) -> list[str]:
         common_args = self.build_common_args()
@@ -918,7 +965,7 @@ class CodexAdapter(ExternalAgentAdapter):
 
         # `codex exec resume` does not accept the `--sandbox` flag that plain
         # `codex exec` supports, but it does accept config overrides.
-        return ["-c", 'sandbox_mode="danger-full-access"']
+        return ["-c", 'sandbox_mode="workspace-write"']
 
     def _review_decision_payload(
         self,

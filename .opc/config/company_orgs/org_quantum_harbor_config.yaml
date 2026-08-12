@@ -1,0 +1,104 @@
+schema_version: 2
+kind: opc_org_architecture
+organization_id: quantum_harbor
+organization_name: Quantum Harbor Research Studio
+company:
+  name: Quantum Harbor Research Studio
+  topology: Research and Investment Studio
+  company_profile: custom
+  execution_model: actor_runtime
+  final_decider_role_id: founder_ceo
+  company_profiles:
+    - corporate
+    - custom
+roles:
+  - id: founder_ceo
+    name: Founder & CEO
+    responsibility: Owns the research mandate, capital-allocation thesis, and final decision.
+    reports_to: owner
+    icon: leader
+    can_spawn: [product_chief, quant_chief, engineering_chief, risk_chief]
+    tools: []
+    preferred_external_agent: null
+    role_type: coordinator
+  - id: product_chief
+    name: Chief Product Officer
+    responsibility: Converts the mandate into product hypotheses, milestones, and evidence requirements.
+    reports_to: founder_ceo
+    icon: strategy
+    can_spawn: [market_researcher]
+    tools: []
+    preferred_external_agent: null
+    role_type: coordinator
+  - id: quant_chief
+    name: Chief Quantitative Officer
+    responsibility: Owns quantitative methods, portfolio models, validation, and analytical review.
+    reports_to: founder_ceo
+    icon: analytics
+    can_spawn: [portfolio_analyst]
+    tools: []
+    preferred_external_agent: null
+    role_type: coordinator
+  - id: engineering_chief
+    name: Chief Engineering Officer
+    responsibility: Owns platform architecture, implementation quality, and reproducible research systems.
+    reports_to: founder_ceo
+    icon: engineering
+    can_spawn: [platform_engineer]
+    tools: []
+    preferred_external_agent: null
+    role_type: coordinator
+  - id: risk_chief
+    name: Chief Risk Officer
+    responsibility: Owns risk limits, independent challenge, compliance review, and release constraints.
+    reports_to: founder_ceo
+    icon: shield
+    can_spawn: [compliance_analyst]
+    tools: []
+    preferred_external_agent: null
+    role_type: coordinator
+  - id: market_researcher
+    name: Market Researcher
+    responsibility: Collects cited market, customer, competitor, and product evidence.
+    reports_to: product_chief
+    icon: search
+    can_spawn: []
+    tools: []
+    preferred_external_agent: null
+    role_type: worker
+  - id: portfolio_analyst
+    name: Portfolio Analyst
+    responsibility: Builds valuation, scenario, portfolio-construction, and attribution analyses.
+    reports_to: quant_chief
+    icon: analytics
+    can_spawn: []
+    tools: []
+    preferred_external_agent: null
+    role_type: worker
+  - id: platform_engineer
+    name: Platform Engineer
+    responsibility: Implements research tooling, data pipelines, tests, and operational automation.
+    reports_to: engineering_chief
+    icon: engineering
+    can_spawn: []
+    tools: []
+    preferred_external_agent: null
+    role_type: worker
+  - id: compliance_analyst
+    name: Compliance Analyst
+    responsibility: Checks evidence provenance, policy constraints, disclosures, and audit readiness.
+    reports_to: risk_chief
+    icon: shield
+    can_spawn: []
+    tools: []
+    preferred_external_agent: null
+    role_type: reviewer
+employees: []
+escalation_rules: []
+talent_templates: []
+teams: []
+installed_packages: []
+role_serial_queue_enabled: true
+metadata:
+  source: org_mode
+  organization_config_file: company_orgs/org_quantum_harbor_config.yaml

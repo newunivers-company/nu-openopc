@@ -15,6 +15,7 @@ import type { OutgoingAttachmentPayload } from '../types/chat'
 import type { TaskPreferredAgent } from '../types/kanban'
 import type { SavedOrgSummary } from '../types/visual'
 import { getContextUsageMetrics } from '../lib/contextUsage'
+import { ModeAdvisorPanel } from './ModeAdvisorPanel'
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024
 const MAX_TOTAL_SIZE = 20 * 1024 * 1024
@@ -587,6 +588,19 @@ export function MessageComposer({
             />
             {(showModePicker || execMode) && (
               <div className="composer-config-group" data-locked={lockedMode ? 'true' : undefined}>
+                {showModePicker && !lockedMode && (
+                  <ModeAdvisorPanel
+                    disabled={disabled}
+                    currentMode={selectedModeOption}
+                    onApply={(mode) => {
+                      if (mode === 'task') {
+                        onModeChange?.('task')
+                        return
+                      }
+                      onModeChange?.('company', 'corporate')
+                    }}
+                  />
+                )}
                 {showModePicker && !lockedMode ? (
                   <label
                     className="composer-mode-inline"
@@ -611,8 +625,8 @@ export function MessageComposer({
                         disabled={disabled}
                         aria-label="Execution mode"
                       >
-                        <option value="task">Task</option>
-                        <option value="company">Company</option>
+                        <option value="task">Task · single agent</option>
+                        <option value="company">Company · role team</option>
                       </select>
                     </span>
                   </label>
@@ -683,7 +697,7 @@ export function MessageComposer({
                       data-kind="org"
                       title="Company architecture for this chat"
                     >
-                      <span className="composer-mode-inline-label">Company</span>
+                      <span className="composer-mode-inline-label">Team</span>
                       <span className="composer-mode-select-wrap">
                         <select
                           className="composer-mode-select"
@@ -704,7 +718,7 @@ export function MessageComposer({
                           disabled={disabled}
                           aria-label="Company architecture"
                         >
-                          <option value="corporate">Corporate</option>
+                          <option value="corporate">Default roles</option>
                           {!selectedCompanyArchitecture && (
                             <option value="" disabled>Select saved org</option>
                           )}

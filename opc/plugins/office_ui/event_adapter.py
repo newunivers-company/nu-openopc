@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -37,6 +37,10 @@ TOOL_MAP: dict[str, str] = {
     "git_diff": "shell",
     "todo_write": "write",
     "agent_spawn": "reflect",
+    # Legacy runtimes emitted ``probe`` before the native runtime renamed the
+    # capability to ``agent_spawn``.  Keep the visual contract compatible with
+    # persisted/replayed events from those sessions.
+    "probe": "reflect",
     "browser_navigate": "web_search",
     "browser_snapshot": "read",
     "browser_click": "shell",
@@ -67,6 +71,7 @@ COLLAB_SKIP_TOOLS: frozenset[str] = frozenset({
 COLLAB_DIRECT_MAP: dict[str, str] = {
     "inbox": "message_in",
     "read_inbox": "message_in",
+    "annotate_task": "message_out",
 }
 
 
@@ -294,8 +299,8 @@ class EventAdapter:
             # Close previous state (emits reflect_done if was reflecting)
             results.extend(self._close_previous_state(agent_id, tracker))
 
-            # Special: agent_spawn is treated as subagent spawn visual.
-            if tool == "agent_spawn":
+            # ``probe`` is the legacy name recorded in older transcripts.
+            if tool in {"agent_spawn", "probe"}:
                 results.append(_ve(agent_id, "subagent_spawn", {}))
 
             # A-class collab tools: skip tool_start entirely.
@@ -511,13 +516,10 @@ class EventAdapter:
         if text.startswith("[Tool:"):
             return []
 
-        # External agent monitoring status — show a lightweight role-scoped
-        # bubble so company-mode work items remain visibly active.
+        # Heartbeats are high-frequency transport telemetry.  They already
+        # update the runtime status surface and must not create chat bubbles.
         if text.startswith("[External status]"):
-            detail = text[text.find("]") + 1:].strip() if "]" in text else text
-            return [_ve(active_agent, "message_out", {
-                "content_preview": detail[:30] if detail else "External status",
-            })]
+            return []
 
         # P3: "[Company:projection] starting title"
         if text.startswith("[Company:") and "] starting" in text:

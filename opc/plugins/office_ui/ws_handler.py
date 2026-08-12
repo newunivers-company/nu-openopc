@@ -25,13 +25,11 @@ from opc.core.config import (
     OPCConfig,
     get_project_workplace,
     slugify_organization_name,
-    validate_organization_id,
 )
 from opc.core.org_config import (
     allocate_org_config_id,
     apply_org_config_payload_to_config,
     build_org_config_payload_from_config,
-    list_org_config_paths,
     load_org_config_payload,
     org_config_filename,
     org_config_path,
@@ -46,10 +44,6 @@ from opc.core.org_config import (
 from opc.core.models import normalize_role_runtime_status
 from opc.core.transcript_visibility import rendered_transcript_metadata_visible
 from opc.presentation.kanban import build_company_board_columns
-from opc.layer2_organization.phase import (
-    kanban_column,
-    should_hide_work_item_from_company_kanban,
-)
 from opc.layer2_organization.company_runtime_identity import (
     ACTIVE_COMPANY_RUNTIME_CHECKPOINT_STATUSES,
     COMPANY_RUNTIME_CHECKPOINT_TYPES,
@@ -58,16 +52,12 @@ from opc.layer2_organization.company_runtime_identity import (
 )
 from opc.layer2_organization.work_item_identity import (
     work_item_identity_payload,
-    work_item_identity_payload_for_task,
     work_item_projection_id_from_metadata,
     work_item_turn_type_from_metadata,
 )
-from opc.layer2_organization.work_item_links import linked_work_item_id_for_task
 from opc.layer2_organization.work_item_transition import (
     apply_task_status_transition,
 )
-from opc.layer2_organization.org_work_item_planner import build_custom_org_work_item_blueprint
-from opc.layer4_tools.output_budget import clip_text
 
 if TYPE_CHECKING:
     import aiohttp.web
@@ -101,9 +91,14 @@ from opc.plugins.office_ui.snapshot_builder import (
 )
 from opc.plugins.office_ui.org_architecture_snapshot import (
     apply_org_architecture_snapshot,
-    build_org_architecture_snapshot,
-    dump_org_architecture_snapshot,
     parse_org_architecture_snapshot,
+)
+from opc.plugins.office_ui.ws_protocol import (
+    SUPPORTED_WS_PROTOCOL_VERSIONS,
+    VersionedWebSocketResponse,
+    WebSocketProtocolError,
+    parse_inbound_envelope,
+    version_outbound_envelope,
 )
 
 
@@ -519,14 +514,20 @@ class WSHandler:
         self.services_context.broadcast_snapshot = self._broadcast_snapshot
         self.services_context.cancel_session_tasks = self._cancel_session_tasks
         self.services_context.cancel_task_tree = self._cancel_task_tree
+        # Resolve at call time so tests and embedders can replace the handler's
+        # project resolver without leaving the service layer on a stale path.
+        self.services_context.project_engine_resolver = lambda project_id: self._engine_for_project(project_id)
         self.services = OfficeServices(self.services_context)
         self._wire_engine_callbacks(engine)
 
     def _on_service_engine_activated(self, engine: Any, project_id: str) -> None:
-        self.engine = engine
-        self.dispatcher = Dispatcher(engine, self.chat_store)
+        # A browser project switch is a per-client view change.  The root
+        # handler stays bound to its owning engine so in-flight work for other
+        # clients cannot be rebound or cancelled.
         self._active_project_id = self._normalize_project_id(project_id)
-        self._refresh_engine_attachment_store()
+        ensure_attachment_store = getattr(engine, "_ensure_attachment_store", None)
+        if callable(ensure_attachment_store):
+            ensure_attachment_store()
 
     def _ensure_office_services(self) -> OfficeServices:
         """Create service wiring for tests that instantiate WSHandler via __new__."""
@@ -575,6 +576,8 @@ class WSHandler:
             context.cancel_session_tasks = self._cancel_session_tasks
         if hasattr(self, "_cancel_task_tree"):
             context.cancel_task_tree = self._cancel_task_tree
+        if hasattr(self, "_engine_for_project"):
+            context.project_engine_resolver = lambda project_id: self._engine_for_project(project_id)
         self.services_context = context
         self.services = OfficeServices(context)
         return self.services
@@ -1073,8 +1076,7 @@ class WSHandler:
 
     async def handle_ws(self, request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
         """Handle a WebSocket connection."""
-        import aiohttp.web as web
-        ws = web.WebSocketResponse()
+        ws = VersionedWebSocketResponse()
         await ws.prepare(request)
         if bool(getattr(self, "_shutting_down", False)):
             await ws.close()
@@ -1175,6 +1177,7 @@ class WSHandler:
             self._clients -= disconnected
 
     def _prepare_outbound_envelope(self, envelope: dict[str, Any]) -> dict[str, Any] | None:
+        envelope = version_outbound_envelope(envelope)
         envelope_type = str(envelope.get("type", "") or "")
         explicit_project_id = str(envelope.get("project_id", "") or "").strip()
         payload = envelope.get("payload")
@@ -3286,13 +3289,17 @@ class WSHandler:
     async def _route_message(self, ws: Any, raw: str) -> None:
         """Parse and route an incoming WS message."""
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
+            data = parse_inbound_envelope(raw)
+        except WebSocketProtocolError as exc:
+            await self._send_ack(
+                ws,
+                ok=False,
+                error=str(exc),
+                code=exc.code,
+                supported_protocol_versions=list(SUPPORTED_WS_PROTOCOL_VERSIONS),
+            )
             return
-        # ``json.loads`` succeeds for non-object frames (null/number/array/string);
-        # ``data.get`` would then raise AttributeError, escape this method, and drop the
-        # whole WS connection. Ignore anything that is not a JSON object.
-        if not isinstance(data, dict):
+        if data is None:
             return
 
         msg_type = data.get("type", "")
@@ -4438,7 +4445,7 @@ class WSHandler:
             self._clients.discard(ws)
             return False
         try:
-            result = ws.send_json(payload)
+            result = ws.send_json(version_outbound_envelope(payload))
             if inspect.isawaitable(result):
                 await result
             return True
@@ -4942,7 +4949,6 @@ class WSHandler:
             content = f"{title}\n{description}".strip()
             engine_mode, company_profile = self._resolve_engine_mode(mode, profile)
             engine_preferred_agent = preferred_agent if engine_mode == "project" else None
-            response = None
 
             if task_id:
                 # Per-task lock: same session serialized, different sessions concurrent
@@ -4973,7 +4979,7 @@ class WSHandler:
                             await self._set_company_runtime_control(company_runtime_target, state="running")
                         except Exception:
                             logger.opt(exception=True).debug("failed to mark run_task company runtime running")
-                    response = await engine.process_message(
+                    await engine.process_message(
                         content,
                         project_id=pid,
                         session_id=session_id,
@@ -4985,7 +4991,7 @@ class WSHandler:
                     )
                 await self._sync_task_transcript_messages(task_id, engine=engine)
             else:
-                response = await engine.process_message(
+                await engine.process_message(
                     content,
                     project_id=pid,
                     mode=engine_mode,
@@ -7681,10 +7687,8 @@ class WSHandler:
                         logger.opt(exception=True).debug("failed to load parent task for delivery feedback reply")
                 session_exec_mode = self._normalize_session_exec_mode(self._exec_mode)
                 session_company_profile = self._normalize_session_company_profile(self._company_profile)
-                session_org_id = ""
                 if parent_task is not None:
                     session_exec_mode, session_company_profile = self._resolve_task_session_config(parent_task)
-                    session_org_id = self._resolve_task_org_id(parent_task)
                 engine_mode, company_profile = self._resolve_engine_mode(
                     session_exec_mode,
                     session_company_profile,
@@ -8504,7 +8508,7 @@ class WSHandler:
                     conversation_turn_id=_ui_conversation_turn_id(user_message_id),
                     created_at=user_message_created_at,
                 ))
-                response = await engine.process_message(
+                await engine.process_message(
                     content,
                     project_id=pid,
                     session_id=session_id,
@@ -10091,6 +10095,115 @@ class WSHandler:
         except Exception as exc:
             await ws.send_json({"type": "comms_state", "payload": {"available": False, "reason": str(exc)}})
 
+    async def _handle_mission_control(self, ws: Any, data: dict) -> None:
+        """Return the deterministic operations snapshot for one project.
+
+        Mission Control is deliberately read-only and does not invoke an LLM.
+        Keeping the project id in both the request and response lets the UI
+        discard a late response after a project switch.
+        """
+        if self._shutting_down:
+            return
+        project_id = ""
+        try:
+            engine, project_id = await self._engine_for_request(data)
+            operations = getattr(engine, "operations", None)
+            mission_control = getattr(operations, "mission_control", None)
+            summary = getattr(mission_control, "summary", None)
+            if not callable(summary):
+                await ws.send_json(
+                    {
+                        "type": "mission_control",
+                        "payload": {
+                            "available": False,
+                            "project_id": project_id,
+                            "reason": "Operations Mission Control is not enabled for this project.",
+                        },
+                    }
+                )
+                return
+            payload = await summary(project_id=project_id)
+            await ws.send_json(
+                {
+                    "type": "mission_control",
+                    "payload": {**dict(payload or {}), "available": True, "project_id": project_id},
+                }
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to build Mission Control snapshot for {project_id or 'unknown'}: {exc}")
+            await ws.send_json(
+                {
+                    "type": "mission_control",
+                    "payload": {
+                        "available": False,
+                        "project_id": project_id,
+                        "reason": str(exc),
+                    },
+                }
+            )
+
+    async def _handle_mission_action(self, ws: Any, data: dict) -> None:
+        """Plan or confirm one allowlisted, digest-bound operator action."""
+        if self._shutting_down:
+            return
+        project_id = ""
+        phase = str(data.get("phase", "") or "").strip().lower()
+        try:
+            engine, project_id = await self._engine_for_request(data)
+            operations = getattr(engine, "operations", None)
+            actions = getattr(operations, "operator_actions", None)
+            if actions is None:
+                raise RuntimeError(
+                    "Operations action center is not enabled for this project."
+                )
+            if phase == "plan":
+                action = await actions.plan(
+                    project_id=project_id,
+                    kind=str(data.get("kind", "") or ""),
+                    target_id=str(data.get("target_id", "") or ""),
+                    reason=str(data.get("reason", "") or ""),
+                    idempotency_key=str(data.get("idempotency_key", "") or ""),
+                )
+            elif phase == "execute":
+                action = await actions.execute(
+                    project_id=project_id,
+                    action_id=str(data.get("action_id", "") or ""),
+                    plan_digest=str(data.get("plan_digest", "") or ""),
+                    operator_id=str(data.get("operator_id", "") or ""),
+                    confirmed=data.get("confirmed") is True,
+                )
+            else:
+                raise ValueError("mission action phase must be plan or execute")
+            await ws.send_json(
+                {
+                    "type": "mission_action",
+                    "payload": {
+                        "ok": True,
+                        "phase": phase,
+                        "project_id": project_id,
+                        "action": action,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning(
+                "Mission Control action {} failed for {}: {}",
+                phase or "unknown",
+                project_id or "unknown",
+                exc,
+            )
+            await ws.send_json(
+                {
+                    "type": "mission_action",
+                    "payload": {
+                        "ok": False,
+                        "phase": phase,
+                        "project_id": project_id,
+                        "error": str(exc),
+                    },
+                }
+            )
+
     async def _handle_comms_read_message(self, ws: Any, data: dict) -> None:
         """Read the body of a single comms message file for the UI viewer."""
         if self._shutting_down:
@@ -10108,3 +10221,5 @@ class WSHandler:
     # Register handlers defined after _HANDLERS class-level dict
     _HANDLERS["comms_state"] = _handle_comms_state
     _HANDLERS["comms_read_message"] = _handle_comms_read_message
+    _HANDLERS["mission_control"] = _handle_mission_control
+    _HANDLERS["mission_action"] = _handle_mission_action

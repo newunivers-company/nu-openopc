@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "release_id": "openopc-nu-2026-08-12",
+  "openopc": {
+    "package": "opc",
+    "version": "0.1.0"
+  },
+  "packages": {
+    "nu-llm-routing-lib": {
+      "module": "nu_llm_routing_lib",
+      "version": "0.4.0",
+      "repository": "newunivers-company/nu-llm-routing-lib",
+      "checkout_path": "nu-llm-routing-lib",
+      "commit": "f0f27187f8e88f0977449be63b670b5c0070f5cc"
+    },
+    "nu-resource-gen-lib": {
+      "module": "nu_resource_gen_lib",
+      "version": "0.2.4",
+      "stable_api_version": "1",
+      "repository": "newunivers-company/nu-resource-gen-lib",
+      "checkout_path": "nu-resource-gen-lib",
+      "commit": "1f2b0025c3314e1410fca3db4628a881ab67750b"
+    }
+  }
+}

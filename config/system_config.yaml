@@ -13,6 +13,90 @@ system:
     chrome_executable_path: ''
     user_data_dir: ''
     args: []
+  nu_resource_gen:
+    enabled: true
+    # Live provider calls require all of: allow_live=true, a candidate in this
+    # allowlist, confirm_live=true, OpenOPC human approval, and the library's
+    # billing/identity/publication policy checks. Empty means no live candidates.
+    allow_live: false
+    allowed_live_candidates: []
+    record_ledger: true
+    record_dry_runs: true
+    ledger_root: ''
+    artifact_archive_root: ''
+    archive_live_artifacts: true
+    # Free/local artifact QC is separately allowlisted and can run only inside
+    # the approved pipeline. RF-DETR proves object presence/continuity, not
+    # general aesthetics or narrative quality.
+    allow_local_quality_execution: true
+    local_quality_candidates:
+    - local_rfdetr_detection_nano
+    max_timeout_seconds: 900
+    max_catalog_results: 50
+  operations:
+    enabled: true
+    evaluation:
+      minimum_total_score: 0.75
+      maximum_regression: 0.05
+      quality_weight: 0.45
+      evidence_weight: 0.20
+      budget_weight: 0.15
+      reliability_weight: 0.10
+      autonomy_weight: 0.10
+      auto_complete_goal_on_pass: true
+    durable:
+      lease_seconds: 30
+      outbox_max_attempts: 5
+      retry_base_seconds: 5
+      retry_max_seconds: 900
+      deadlock_after_seconds: 900
+      outbox_dispatcher_enabled: true
+      outbox_dispatch_batch_size: 50
+      outbox_dispatch_poll_seconds: 1.0
+    learning:
+      minimum_offline_score: 0.75
+      minimum_shadow_score: 0.78
+      minimum_canary_score: 0.80
+      minimum_sample_size: 3
+      maximum_regression: 0.02
+    staffing:
+      quality_weight: 0.35
+      domain_weight: 0.20
+      reliability_weight: 0.15
+      experience_weight: 0.15
+      availability_weight: 0.10
+      cost_weight: 0.05
+    providers:
+      # Subscription CLIs often omit token/cost telemetry, so call count is a
+      # separate rolling hard guard and never inferred as zero cost.
+      subscription_call_limit: 200
+      subscription_window_seconds: 86400
+      subscription_providers:
+      - codex
+      - claude
+      - grok
+      status_canary_enabled: true
+      status_canary_interval_seconds: 300
+      slo_min_samples: 3
+      slo_trend_window_samples: 3
+      slo_availability_target: 0.95
+      slo_p95_latency_target_ms: 30000
+      canary_expected_model: ''
+      # Production readiness is intentionally stricter than the short SLO
+      # view: 24 hours, four dense six-hour buckets, fresh samples, bounded
+      # gaps, and fresh independently evidenced failure drills.
+      readiness_min_observation_seconds: 86400
+      readiness_time_bucket_seconds: 21600
+      readiness_min_time_buckets: 4
+      readiness_min_samples_per_bucket: 1
+      readiness_max_sample_age_seconds: 1800
+      readiness_max_gap_seconds: 28800
+      readiness_failure_drill_max_age_seconds: 2592000
+      readiness_required_failure_scenarios:
+      - credential_expiry
+      - transport_timeout
+      - quota_exhaustion
+      - model_drift
   native_runtime:
     enabled: true
     stream_llm: true
@@ -114,11 +198,11 @@ system:
       sandbox:
         enabled: true
         default_mode: workspace-write
-        fail_if_unavailable: false
-        allow_direct_fallback: true
+        fail_if_unavailable: true
+        allow_direct_fallback: false
         allow_network: true
         windows:
-          mode: elevated
+          mode: "off"
           wrapper: none
         linux:
           mode: workspace-write
@@ -141,7 +225,7 @@ autonomy:
   learned_policy_threshold: 0.8
   max_auto_approve_risk: medium
   allow_native_tool_auto_approval: true
-  allow_external_agent_auto_approval: true
+  allow_external_agent_auto_approval: false
   learn_from_feedback: true
   save_external_sessions: true
   tool_first_use_approval: true

@@ -26,6 +26,7 @@ const src = readFileSync(join(here, 'OrgTab.tsx'), 'utf8')
 const createModalSrc = readFileSync(join(here, 'OrgCreateModal.tsx'), 'utf8')
 const visualTypesSrc = readFileSync(join(here, '..', 'types', 'visual.ts'), 'utf8')
 const orgCssSrc = readFileSync(join(here, 'org.css'), 'utf8')
+const roleInspectorSrc = readFileSync(join(here, 'RoleInspector.tsx'), 'utf8')
 
 // ── 1. Four sub-tab labels declared ──
 for (const label of ['Team', 'Runtime', 'Architecture', 'Employees']) {
@@ -123,6 +124,23 @@ assert.match(
   'Create-org reports-to select options must use explicit themed colors',
 )
 
+// ── 9. Self-built role skills are editable and saved as explicit refs ──
+assert.match(
+  roleInspectorSrc,
+  /skill_refs\?:\s*string\[\]/,
+  'RoleUpdatePatch must carry explicit skill_refs',
+)
+assert.match(
+  roleInspectorSrc,
+  /handleSkillRefsChange/,
+  'RoleInspector must persist edited role skill refs',
+)
+assert.match(
+  roleInspectorSrc,
+  /One installed skill name per line/,
+  'RoleInspector must expose the installed-skill assignment editor',
+)
+
 console.log(
-  'OrgTab.test.tsx: OK (tabs, marketplace panels, create-org prompt, select option theme colors)',
+  'OrgTab.test.tsx: OK (tabs, marketplaces, skill refs, create-org prompt, select option colors)',
 )

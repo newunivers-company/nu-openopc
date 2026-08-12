@@ -21,7 +21,10 @@ from opc.core.models import OPCEvent
 from opc.core.worker_envelope import classify_worker_message
 from opc.llm.provider import LLMProvider
 from opc.layer1_perception.context_assembler import ContextAssembler
-from opc.layer3_agent.company_runtime_contract import build_company_work_item_contract
+from opc.layer3_agent.company_runtime_contract import (
+    _COMPANY_REVIEW_WORK_ITEM_GUIDELINES as _COMPANY_REVIEW_WORK_ITEM_GUIDELINES,
+    build_company_work_item_contract,
+)
 from opc.layer3_agent.runtime_v2 import NativeRuntimeV2
 from opc.layer3_agent.prompt_harness import PromptHarnessBuilder
 from opc.layer3_agent.prompt_harness.builder import _final_decider_role_id, _memory_skill_user_facing
@@ -340,7 +343,6 @@ class NativeAgent:
             payload={"role_id": self.role.role_id, "status": "running", "task_id": task.id},
         ))
 
-        is_task_mode = self._is_task_mode_task(task)
         allowed = self._resolve_allowed_tools(task)
         inbox_interrupt_provider = None
         if (
@@ -386,14 +388,42 @@ class NativeAgent:
     async def _build_native_prompt_bundle(self, task: Task) -> NativePromptBundle:
         override = str(task.metadata.get("_runtime_system_prompt_override", "") or "").strip()
         if override:
-            task.metadata["runtime_prompt_profile"] = "override"
-            return NativePromptBundle(
+            bundle = NativePromptBundle(
                 profile_name="override",
                 stable_system_prompt=override,
                 runtime_policy_messages=[],
             )
-        bundle = self.prompt_profiles.build_prompt_bundle(task)
+        else:
+            bundle = self.prompt_profiles.build_prompt_bundle(task)
         task.metadata["runtime_prompt_profile"] = bundle.profile_name
+        execution_mode = str(task.metadata.get("execution_mode", "") or "").strip() or None
+        role_skill_builder = getattr(self.skills, "build_role_skill_pack", None)
+        role_skill_pack = (
+            role_skill_builder(
+                list(self.role.skill_refs or []),
+                project_id=task.project_id,
+                execution_mode=execution_mode,
+                role_id=self.role.role_id,
+            )
+            if callable(role_skill_builder)
+            else {"content": "", "skills": [], "missing": []}
+        )
+        if role_skill_pack["content"]:
+            bundle.runtime_policy_messages.append(
+                {"role": "system", "content": role_skill_pack["content"]}
+            )
+        task.metadata["role_skill_versions"] = {
+            item["name"]: item["content_digest"]
+            for item in role_skill_pack["skills"]
+        }
+        task.metadata["missing_role_skill_refs"] = role_skill_pack["missing"]
+        pinned_messages = [
+            dict(item)
+            for item in task.metadata.get("_operations_learning_runtime_messages", []) or []
+            if isinstance(item, dict) and str(item.get("content", "") or "").strip()
+        ]
+        if pinned_messages:
+            bundle.runtime_policy_messages.extend(pinned_messages)
         return bundle
 
     async def _build_system_prompt(self, task: Task) -> str:
@@ -725,6 +755,7 @@ class NativeAgent:
             llm_config = self.llm.config.model_copy(deep=True)
             llm_config.default_model = model_override
             child_llm = LLMProvider(llm_config, opc_home=getattr(self.llm, "opc_home", None))
+            child_llm.inherit_operations_binding(self.llm)
 
         child_config = self.config
         max_iterations = overrides.get("max_iterations")

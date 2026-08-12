@@ -830,7 +830,10 @@ class OrgService:
         return ServiceResult({"role_ids": added, "count": len(added)})
 
     async def update_role(self, role_id: str, updates: dict[str, Any]) -> ServiceResult:
-        self._ensure_custom_org_editable()
+        # Structural/identity edits are only allowed on a saved custom org;
+        # runtime fields (tools, refs, capabilities, ...) may be tuned on any org.
+        if {"name", "responsibility", "reports_to", "icon"} & set(updates or {}):
+            self._ensure_custom_org_editable()
         role_id = str(role_id or "").strip()
         if not role_id:
             raise ServiceError("missing_role_id", "role_id required")
@@ -862,7 +865,24 @@ class OrgService:
                     value = [item.strip() for item in value.split(",") if item.strip()]
                 else:
                     value = [str(item).strip() for item in list(value) if str(item).strip()]
-                setattr(target, key, list(value))
+                normalized = list(dict.fromkeys(value))
+                if len(normalized) > 64:
+                    raise ServiceError(
+                        "too_many_role_refs",
+                        f"{key} cannot contain more than 64 entries",
+                        {"role_id": role_id, "field": key},
+                    )
+                if any(
+                    len(item) > 256
+                    or any(ord(character) < 32 for character in item)
+                    for item in normalized
+                ):
+                    raise ServiceError(
+                        "invalid_role_ref",
+                        f"{key} contains an invalid entry",
+                        {"role_id": role_id, "field": key},
+                    )
+                setattr(target, key, normalized)
         if "execution_strategy" in updates and hasattr(target, "runtime_policy"):
             strategy = str(updates.get("execution_strategy") or "auto").strip()
             if strategy:

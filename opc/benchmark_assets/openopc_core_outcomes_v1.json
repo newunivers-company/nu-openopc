@@ -1,0 +1,410 @@
+{
+  "schema_version": 1,
+  "suite_id": "openopc-core-outcomes",
+  "version": 1,
+  "status": "candidate_requires_operator_evidence",
+  "description": "Paired Task Mode versus Company Mode outcome suite for software, content, and research work. Synthetic inputs are safe to run, but only completed governed runs with independent evidence can support promotion.",
+  "repetitions": 3,
+  "gate_policy": {
+    "baseline_mode": "task",
+    "candidate_mode": "company",
+    "minimum_paired_samples_per_workload": 10,
+    "maximum_quality_regression": 0.02,
+    "maximum_success_regression": 0.02,
+    "minimum_quality_improvement": 0.0
+  },
+  "cases": [
+    {
+      "case_id": "software-race-fix",
+      "workload": "software",
+      "title": "Repair an atomic reservation race",
+      "prompt": "Diagnose and repair a concurrent reservation race in a small SQLite-backed service. Preserve failed-call accounting, add multiprocess regression coverage, and produce a concise operator note.",
+      "tags": ["concurrency", "sqlite", "recovery"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "reservation.py",
+            "content": "import sqlite3\n\n\ndef reserve(db_path: str, bucket: str, limit: int) -> bool:\n    conn = sqlite3.connect(db_path, timeout=5)\n    try:\n        row = conn.execute(\"SELECT used FROM reservations WHERE bucket = ?\", (bucket,)).fetchone()\n        used = int(row[0]) if row else 0\n        if used >= limit:\n            return False\n        conn.execute(\"INSERT INTO reservations(bucket, used) VALUES(?, 1) ON CONFLICT(bucket) DO UPDATE SET used = ?\", (bucket, used + 1))\n        conn.commit()\n        return True\n    finally:\n        conn.close()\n\n\ndef record_failed_call(db_path: str, bucket: str) -> None:\n    conn = sqlite3.connect(db_path)\n    conn.execute(\"INSERT INTO failed_calls(bucket) VALUES(?)\", (bucket,))\n    conn.commit()\n    conn.close()\n"
+          },
+          {
+            "name": "schema.sql",
+            "content": "CREATE TABLE reservations(bucket TEXT PRIMARY KEY, used INTEGER NOT NULL);\nCREATE TABLE failed_calls(id INTEGER PRIMARY KEY, bucket TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-software-race-fix",
+        "project_id": "benchmark",
+        "title": "Repair an atomic reservation race",
+        "objective": "Produce a verified race-free reservation implementation and evidence.",
+        "deliverables": ["source patch", "multiprocess regression test", "operator note"],
+        "acceptance_criteria": [
+          {"criterion_id": "correctness", "description": "Concurrent workers cannot exceed the declared limit.", "minimum_score": 0.9},
+          {"criterion_id": "recovery", "description": "Failures remain conservatively accounted and expire by policy.", "minimum_score": 0.85},
+          {"criterion_id": "evidence", "description": "A repeatable multiprocess test and commands are supplied.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["test output", "source revision", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "software-api-feature",
+      "workload": "software",
+      "title": "Add a governed API feature",
+      "prompt": "Add a versioned JSON API endpoint to an existing service, including validation, authorization boundaries, backwards compatibility, tests, and migration notes.",
+      "tags": ["api", "compatibility", "security"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "service.py",
+            "content": "from dataclasses import dataclass\n\n\n@dataclass\nclass Request:\n    method: str\n    path: str\n    token: str | None\n    json: dict\n\n\ndef handle(request: Request) -> tuple[int, dict]:\n    if request.method == \"GET\" and request.path == \"/v1/items\":\n        return 200, {\"items\": []}\n    return 404, {\"error\": \"not_found\"}\n"
+          },
+          {
+            "name": "contract.md",
+            "content": "Add POST /v2/items. Accept JSON {name: non-empty string, priority: integer 1..5}. Require token `writer-token`; missing or other tokens return 401 without revealing validation details. Success returns 201 and {id, name, priority}. GET /v1/items must remain unchanged. No third-party dependencies may be added.\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-software-api-feature",
+        "project_id": "benchmark",
+        "title": "Add a governed API feature",
+        "objective": "Ship a backwards-compatible endpoint with enforceable contracts.",
+        "deliverables": ["API implementation", "contract tests", "migration notes"],
+        "acceptance_criteria": [
+          {"criterion_id": "contract", "description": "The API rejects malformed and unauthorized requests.", "minimum_score": 0.9},
+          {"criterion_id": "compatibility", "description": "Existing clients and tests remain compatible.", "minimum_score": 0.9},
+          {"criterion_id": "documentation", "description": "Usage and migration behavior are documented.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["contract test output", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "software-dependency-release",
+      "workload": "software",
+      "title": "Make a private dependency release reproducible",
+      "prompt": "Replace mutable sibling dependency checkouts with an immutable release manifest, exact source refs, installed-version checks, and clean-wheel verification.",
+      "tags": ["release", "supply-chain", "ci"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "pyproject.toml",
+            "content": "[project]\nname = \"demo-app\"\nversion = \"0.1.0\"\ndependencies = [\"private-router @ ../private-router\"]\n"
+          },
+          {
+            "name": ".github/workflows/test.yml",
+            "content": "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - run: pip install -e ../private-router\n      - run: pytest\n"
+          },
+          {
+            "name": "dependency-identity.json",
+            "content": "{\"repository\":\"example/private-router\",\"version\":\"0.4.0\",\"commit\":\"5f6e18ad6af547626030f66e2f82c3d11d2529f1\",\"required_import\":\"private_router.route\"}\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-software-dependency-release",
+        "project_id": "benchmark",
+        "title": "Make dependency release reproducible",
+        "objective": "Ensure CI and local release checks consume the same immutable dependency sources.",
+        "deliverables": ["release manifest", "CI pinning", "verification tests"],
+        "acceptance_criteria": [
+          {"criterion_id": "immutability", "description": "All dependency refs are full immutable commits.", "minimum_score": 1.0},
+          {"criterion_id": "identity", "description": "Source HEAD, package version, and public API are verified.", "minimum_score": 0.95},
+          {"criterion_id": "failure_mode", "description": "Drift fails closed with an actionable message.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 1, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["clean install report", "CI configuration digest"]
+      }
+    },
+    {
+      "case_id": "software-incident-recovery",
+      "workload": "software",
+      "title": "Recover a failed durable delivery",
+      "prompt": "Investigate a dead-letter delivery after a process crash, prove the external side effect is not duplicated, replay it safely, and document the recovery decision.",
+      "tags": ["incident", "outbox", "idempotency"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "outbox-state.json",
+            "content": "{\"message\":{\"id\":\"msg-017\",\"status\":\"dead_letter\",\"attempts\":3,\"idempotency_key\":\"invoice-1042\"},\"external_receipts\":[{\"idempotency_key\":\"invoice-1042\",\"receipt_id\":\"rcpt-88\",\"accepted_at\":\"2026-07-20T04:10:00Z\"}],\"last_error\":\"worker exited before local acknowledgement\",\"operator\":\"op-7\"}\n"
+          },
+          {
+            "name": "replay.py",
+            "content": "def replay(message, transport, store):\n    receipt = transport.send(message[\"payload\"], idempotency_key=message[\"idempotency_key\"])\n    store.mark_delivered(message[\"id\"], receipt.id)\n    return receipt.id\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-software-incident-recovery",
+        "project_id": "benchmark",
+        "title": "Recover failed durable delivery",
+        "objective": "Restore delivery without repeating an external side effect.",
+        "deliverables": ["root-cause report", "safe replay", "recovery evidence"],
+        "acceptance_criteria": [
+          {"criterion_id": "deduplication", "description": "The side effect occurs at most once.", "minimum_score": 1.0},
+          {"criterion_id": "audit", "description": "Replay reason and operator identity are durable.", "minimum_score": 0.9},
+          {"criterion_id": "recovery", "description": "The message reaches a terminal delivered state.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 1, "max_failed_attempts": 2},
+        "evidence_requirements": ["delivery receipt", "event log", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-vertical-series",
+      "workload": "content",
+      "title": "Plan a vertical microdrama episode",
+      "prompt": "Create a production-ready 60–90 second vertical microdrama package with a hook, beat sheet, scene board, character continuity constraints, and platform-safe ending.",
+      "tags": ["vertical-video", "story", "production"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "creative-brief.json",
+            "content": "{\"runtime_seconds\":[60,90],\"format\":\"9:16\",\"audience\":\"Korean viewers age 18-34\",\"premise\":\"A night-shift convenience-store worker discovers that every receipt predicts the customer's next decision.\",\"characters\":[{\"id\":\"mina\",\"role\":\"worker\",\"anchor\":\"red name tag, tied black hair\"},{\"id\":\"jun\",\"role\":\"customer\",\"anchor\":\"navy raincoat, cracked silver watch\"}],\"locations\":[\"convenience store counter\",\"rainy storefront\"],\"prohibited\":[\"graphic harm\",\"guaranteed sequel claim\"],\"ending\":\"resolve the immediate choice while leaving one evidence-based question\"}\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-content-vertical-series",
+        "project_id": "benchmark",
+        "title": "Plan a vertical microdrama episode",
+        "objective": "Deliver a coherent and shootable short-form episode package.",
+        "deliverables": ["logline", "beat sheet", "scene board", "continuity rules"],
+        "acceptance_criteria": [
+          {"criterion_id": "hook", "description": "The opening establishes conflict within the first beat.", "minimum_score": 0.85},
+          {"criterion_id": "shootability", "description": "Shots, duration, and transitions are production feasible.", "minimum_score": 0.85},
+          {"criterion_id": "continuity", "description": "Character, prop, and location anchors are explicit.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["review rubric", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-campaign-package",
+      "workload": "content",
+      "title": "Build a launch campaign package",
+      "prompt": "Produce a coherent product launch package: positioning, landing-page outline, three channel variants, CTA hypotheses, and a measurable experiment plan without inventing customer evidence.",
+      "tags": ["marketing", "copy", "experimentation"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "product-brief.json",
+            "content": "{\"product\":\"TraceBoard\",\"facts\":[\"imports CSV files up to 25 MB\",\"creates a claim-to-source table\",\"exports Markdown and JSON\",\"single-user beta\"],\"unknowns\":[\"time saved\",\"accuracy improvement\",\"team collaboration date\"],\"audience\":\"independent analysts\",\"channels\":[\"landing page\",\"email\",\"LinkedIn\"],\"primary_metric\":\"qualified beta signup rate\",\"constraints\":[\"do not invent testimonials\",\"do not claim compliance certification\"]}\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-content-campaign-package",
+        "project_id": "benchmark",
+        "title": "Build a launch campaign package",
+        "objective": "Deliver channel-ready campaign assets tied to testable hypotheses.",
+        "deliverables": ["positioning", "landing outline", "channel variants", "experiment plan"],
+        "acceptance_criteria": [
+          {"criterion_id": "consistency", "description": "All assets use one defensible positioning.", "minimum_score": 0.9},
+          {"criterion_id": "evidence_hygiene", "description": "Claims distinguish facts, assumptions, and hypotheses.", "minimum_score": 0.95},
+          {"criterion_id": "measurement", "description": "Experiments define audience, metric, and decision rule.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["claim source map", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-continuity-qa",
+      "workload": "content",
+      "title": "Gate character and prop continuity",
+      "prompt": "Review a synthetic two-scene asset manifest for character identity, costume, prop, composition, and story continuity. Separate object-grounding evidence from judgments requiring stronger VLM or human review.",
+      "tags": ["quality", "continuity", "vlm"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "scene-manifest.json",
+            "content": "{\"anchors\":{\"character\":\"mina\",\"costume\":\"green jacket with white stripe\",\"prop\":\"red umbrella\"},\"scenes\":[{\"scene_id\":\"s1\",\"detections\":[{\"class\":\"person\",\"confidence\":0.98,\"box\":[10,20,110,300]},{\"class\":\"umbrella\",\"confidence\":0.94,\"box\":[120,40,210,190]}],\"human_notes\":\"face not reviewed\"},{\"scene_id\":\"s2\",\"detections\":[{\"class\":\"person\",\"confidence\":0.97,\"box\":[15,18,118,302]},{\"class\":\"umbrella\",\"confidence\":0.61,\"box\":[118,42,205,188]}],\"human_notes\":\"jacket appears blue; identity unconfirmed\"}],\"detector_scope\":[\"object presence\",\"bounding box\"],\"unsupported_by_detector\":[\"identity\",\"aesthetics\",\"story continuity\"]}\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-content-continuity-qa",
+        "project_id": "benchmark",
+        "title": "Gate character and prop continuity",
+        "objective": "Produce scoped, grounded QA decisions without overstating detector evidence.",
+        "deliverables": ["quality decisions", "grounded findings", "review queue"],
+        "acceptance_criteria": [
+          {"criterion_id": "scope", "description": "Object evidence is not used to prove identity or aesthetics.", "minimum_score": 1.0},
+          {"criterion_id": "grounding", "description": "Findings retain artifact, class, confidence, and location evidence.", "minimum_score": 0.9},
+          {"criterion_id": "handoff", "description": "Unresolved axes enter a human or stronger-VLM review queue.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 1, "max_failed_attempts": 2},
+        "evidence_requirements": ["grounding report", "review queue", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "content-release-package",
+      "workload": "content",
+      "title": "Prepare a platform release package",
+      "prompt": "Package approved synthetic media metadata for a vertical-video release with rights, aspect, duration, captions, thumbnails, checksum, and delivery manifest gates.",
+      "tags": ["release", "rights", "delivery"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "approved-media.json",
+            "content": "{\"release_id\":\"rel-204\",\"platform\":\"vertical-video-demo\",\"requirements\":{\"aspect\":\"9:16\",\"max_duration_seconds\":90,\"captions_required\":true,\"thumbnail_required\":true},\"assets\":[{\"path\":\"episode.mp4\",\"aspect\":\"9:16\",\"duration_seconds\":78,\"sha256\":\"3d7e3f6a30f2490012728e30b1c21578bdb6f2d66a8573a3a33ec4b05a2f7c51\",\"rights\":\"owned\",\"approved\":true},{\"path\":\"captions.ko.vtt\",\"sha256\":\"0e4d39f71bbf624e459a1f00c535282680b5c14b59e90f7849a3d406228086bb\",\"rights\":\"owned\",\"approved\":true},{\"path\":\"thumbnail.jpg\",\"aspect\":\"9:16\",\"sha256\":\"2b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfe\",\"rights\":\"pending\",\"approved\":false}]}\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-content-release-package",
+        "project_id": "benchmark",
+        "title": "Prepare platform release package",
+        "objective": "Create a traceable, policy-compliant delivery package.",
+        "deliverables": ["delivery manifest", "rights checklist", "platform validation"],
+        "acceptance_criteria": [
+          {"criterion_id": "platform", "description": "Format, aspect, duration, and caption checks pass.", "minimum_score": 0.95},
+          {"criterion_id": "rights", "description": "Rights and consent state are explicit and non-placeholder.", "minimum_score": 1.0},
+          {"criterion_id": "traceability", "description": "Every delivered artifact has source and checksum evidence.", "minimum_score": 0.95}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 1, "max_failed_attempts": 2},
+        "evidence_requirements": ["delivery manifest", "checksum report"]
+      }
+    },
+    {
+      "case_id": "research-investment-memo",
+      "workload": "research",
+      "title": "Draft an evidence-bound investment memo",
+      "prompt": "Using only a supplied synthetic source pack, write an investment memo that separates evidence, inference, and unknowns; includes counterarguments; and maps every material claim to a source.",
+      "tags": ["investment", "citations", "risk"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "source-pack.md",
+            "content": "# Fictional company: Northstar Labs\n\n[S1 — audited filing, 2025] Revenue was $4.0M in 2024 and $5.2M in 2025. Gross margin was 62% in 2025. Cash at year end was $1.1M.\n\n[S2 — management deck, 2026-06] Management projects $9M revenue for 2026 and states that 70% of revenue is recurring. Neither statement is audited.\n\n[S3 — customer survey, n=18, 2026-05] Twelve respondents rated the product 8/10 or higher. The sample was selected from customers who renewed.\n\n[S4 — contract summary] The largest customer represented 38% of 2025 revenue; its contract renews monthly.\n\nMissing: cap table, churn cohort, bank statement, security audit.\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-research-investment-memo",
+        "project_id": "benchmark",
+        "title": "Draft evidence-bound investment memo",
+        "objective": "Deliver a decision-useful memo with complete claim provenance.",
+        "deliverables": ["investment memo", "claim-source map", "open questions"],
+        "acceptance_criteria": [
+          {"criterion_id": "provenance", "description": "Every material factual claim maps to supplied evidence.", "minimum_score": 0.95},
+          {"criterion_id": "uncertainty", "description": "Inference and unknowns are clearly labeled.", "minimum_score": 0.9},
+          {"criterion_id": "decision", "description": "Recommendation includes counterarguments and falsifiers.", "minimum_score": 0.85}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["claim-source map", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "research-market-map",
+      "workload": "research",
+      "title": "Build a sourced market map",
+      "prompt": "Normalize a synthetic company dataset into a market taxonomy, explain inclusion rules, flag conflicting records, and produce a ranked review queue instead of silently resolving ambiguity.",
+      "tags": ["market-map", "normalization", "review"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "companies.csv",
+            "content": "source_id,name,description,segment,employees,updated_at\nA1,AlphaGrid,workflow automation for clinics,vertical SaaS,42,2026-05-01\nA2,Alpha Grid,AI scheduling for hospitals,health AI,45,2026-06-10\nB1,BetaForge,developer deployment automation,devtools,18,2026-04-12\nC1,ClearNote,meeting summaries for any team,productivity,,2026-02-01\nC2,ClearNote,clinical note transcription,health AI,27,2026-06-20\nD1,DeltaDesk,outsourced support agency,services,120,2025-12-11\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-research-market-map",
+        "project_id": "benchmark",
+        "title": "Build sourced market map",
+        "objective": "Create a reproducible taxonomy and reviewable normalized dataset.",
+        "deliverables": ["taxonomy", "normalized table", "conflict review queue"],
+        "acceptance_criteria": [
+          {"criterion_id": "taxonomy", "description": "Categories have explicit inclusion and exclusion rules.", "minimum_score": 0.9},
+          {"criterion_id": "lineage", "description": "Normalized rows retain source identifiers.", "minimum_score": 0.95},
+          {"criterion_id": "conflicts", "description": "Conflicts and missing values are queued, not invented.", "minimum_score": 0.95}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["source lineage", "review queue"]
+      }
+    },
+    {
+      "case_id": "research-due-diligence",
+      "workload": "research",
+      "title": "Run a due-diligence risk review",
+      "prompt": "Review a synthetic diligence room, construct a risk register with severity and evidence strength, identify missing documents, and avoid legal or financial conclusions unsupported by the pack.",
+      "tags": ["diligence", "risk-register", "evidence"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "diligence-room.md",
+            "content": "# Fictional diligence room index\n\n[D1] 2025 management accounts: revenue $2.4M, marked draft, no accountant signature.\n[D2] Customer list: 63 customers; top three account for 51% of listed annual contract value.\n[D3] IP schedule: founders assigned code to the company; two contractor assignments are listed as requested but absent.\n[D4] Security questionnaire: completed internally; penetration test field says planned.\n[D5] Employee roster: 14 employees in two countries; employment agreements supplied for 11.\n[D6] Board minutes: approve the current financing but do not include an updated cap table.\n\nExplicitly missing: signed contractor IP assignments, penetration test, three employment agreements, updated cap table, bank statements, tax filings.\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-research-due-diligence",
+        "project_id": "benchmark",
+        "title": "Run due-diligence risk review",
+        "objective": "Deliver a prioritized, evidence-scoped diligence risk register.",
+        "deliverables": ["risk register", "missing-document list", "decision questions"],
+        "acceptance_criteria": [
+          {"criterion_id": "risk", "description": "Risks include severity, likelihood, evidence, and owner.", "minimum_score": 0.9},
+          {"criterion_id": "scope", "description": "Unsupported conclusions are labeled for specialist review.", "minimum_score": 0.95},
+          {"criterion_id": "coverage", "description": "Missing and conflicting documents are explicit.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["risk-evidence map", "artifact digest"]
+      }
+    },
+    {
+      "case_id": "research-executive-brief",
+      "workload": "research",
+      "title": "Produce an executive evidence brief",
+      "prompt": "Transform a synthetic mixed-quality research pack into a one-page executive brief, a detailed appendix, and a source-quality table. Preserve disagreements and prioritize decisions.",
+      "tags": ["executive", "synthesis", "source-quality"],
+      "input_contract": {
+        "kind": "inline_fixture",
+        "network_allowed": false,
+        "artifacts": [
+          {
+            "name": "research-pack.md",
+            "content": "# Decision: whether to extend a fictional pilot\n\n[R1 — instrumented product log, high quality] 74 of 100 invited users activated; 41 were active in week four. Log coverage was 98%.\n\n[R2 — support summary, medium quality] 19 onboarding tickets were filed; 11 concerned CSV formatting. Ticket categories were assigned manually.\n\n[R3 — sales interview notes, low quality] Two account executives believe demand is strong. No interview transcript or customer sample is attached.\n\n[R4 — finance model, medium quality] Extending for 90 days is estimated at $48K. The estimate excludes security review and localization.\n\n[R5 — research memo, medium quality] Recommends extension if week-four activity exceeds 50% of activated users. A separate steering note sets the threshold at 60%; neither explains why.\n\nOpen decisions: threshold owner, CSV remediation scope, security-review budget, and whether localization is in pilot scope.\n"
+          }
+        ]
+      },
+      "goal": {
+        "goal_id": "benchmark-research-executive-brief",
+        "project_id": "benchmark",
+        "title": "Produce executive evidence brief",
+        "objective": "Deliver concise decisions without losing source quality or disagreement.",
+        "deliverables": ["one-page brief", "appendix", "source-quality table"],
+        "acceptance_criteria": [
+          {"criterion_id": "decision_focus", "description": "The brief leads with decisions and material uncertainty.", "minimum_score": 0.85},
+          {"criterion_id": "fidelity", "description": "The summary does not erase source disagreements.", "minimum_score": 0.95},
+          {"criterion_id": "traceability", "description": "Details and claims link to the appendix and sources.", "minimum_score": 0.9}
+        ],
+        "budget": {"max_interventions": 2, "max_rework_cycles": 2, "max_failed_attempts": 2},
+        "evidence_requirements": ["source-quality table", "artifact digest"]
+      }
+    }
+  ]
+}

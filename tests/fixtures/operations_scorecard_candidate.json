@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "scorecard_id": "operations-ci-candidate",
+  "run_id": "operations-ci-candidate",
+  "goal_id": "openopc-operating-kernel",
+  "project_id": "ci",
+  "gate_status": "pass",
+  "total_score": 0.91,
+  "quality_score": 0.91,
+  "evidence_score": 1.0,
+  "budget_score": 1.0,
+  "reliability_score": 0.91,
+  "autonomy_score": 0.9,
+  "criterion_results": [],
+  "metrics": {
+    "cost_usd": 0.0,
+    "duration_seconds": 0.0,
+    "tokens": 0,
+    "interventions": 0,
+    "rework_cycles": 0,
+    "failed_attempts": 0,
+    "total_attempts": 1,
+    "resume_attempts": 0,
+    "resume_successes": 0
+  },
+  "role_outcomes": [],
+  "violations": [],
+  "warnings": [],
+  "baseline_label": "operations-v1"
+}

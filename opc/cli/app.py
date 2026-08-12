@@ -42,14 +42,16 @@ from opc.core.models import OPCEvent
 # os.environ['https_proxy'] = 'http://127.0.0.1:7890'
 # os.environ['http_proxy'] = 'http://127.0.0.1:7890'
 
-custom_theme = Theme({
-    "info": "cyan",
-    "warning": "yellow",
-    "error": "red bold",
-    "success": "green bold",
-    "agent": "blue",
-    "tool": "magenta",
-})
+custom_theme = Theme(
+    {
+        "info": "cyan",
+        "warning": "yellow",
+        "error": "red bold",
+        "success": "green bold",
+        "agent": "blue",
+        "tool": "magenta",
+    }
+)
 console = Console(theme=custom_theme)
 app = typer.Typer(
     name="opc",
@@ -98,7 +100,7 @@ def _get_config() -> OPCConfig:
 
 
 def _channel_runtime_pid_path() -> Path:
-    from opc.core.config import get_opc_home, get_project_workplace
+    from opc.core.config import get_opc_home
 
     return get_opc_home() / "run" / "channels.pid"
 
@@ -116,7 +118,11 @@ def _read_channel_runtime_state() -> dict | None:
 def _write_channel_runtime_state(enabled_channels: list[str]) -> None:
     path = _channel_runtime_pid_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"pid": os.getpid(), "channels": enabled_channels}, ensure_ascii=False))
+    path.write_text(
+        json.dumps(
+            {"pid": os.getpid(), "channels": enabled_channels}, ensure_ascii=False
+        )
+    )
 
 
 def _clear_channel_runtime_state() -> None:
@@ -152,7 +158,9 @@ def _create_default_skills(opc_home: Path) -> None:
         return
 
     try:
-        resource_skills = importlib_resources.files("opc").joinpath("skills_assets", "core")
+        resource_skills = importlib_resources.files("opc").joinpath(
+            "skills_assets", "core"
+        )
     except Exception:
         return
     if not resource_skills.is_dir():
@@ -166,6 +174,7 @@ def _create_default_skills(opc_home: Path) -> None:
 
 def _progress_callback():
     """Create an async progress callback for streaming agent output."""
+
     async def callback(text: str, **_: Any) -> None:
         if text.startswith("[Tool:"):
             console.print(f"  [tool]{escape(text)}[/tool]")
@@ -180,13 +189,16 @@ def _progress_callback():
                 console.print(f"  [info]{escape(text)}[/info]")
         elif text.startswith("[External agent denied]"):
             console.print(f"  [warning]{escape(text)}[/warning]")
-        elif text.startswith("[External agent failed]") or text.startswith("[External agents exhausted]"):
+        elif text.startswith("[External agent failed]") or text.startswith(
+            "[External agents exhausted]"
+        ):
             console.print(f"  [warning]{escape(text)}[/warning]")
         elif text.startswith("[External:"):
             if _cli_verbose_external_progress():
                 console.print(f"  [warning]{escape(text)}[/warning]")
         else:
             pass
+
     return callback
 
 
@@ -201,7 +213,19 @@ def _should_show_external_status(text: str) -> bool:
     detail = text.split("]", 1)[1].strip().lower() if "]" in text else text.lower()
     if "working; last activity" in detail:
         return False
-    return any(token in detail for token in ("started", "approval", "timeout", "failed", "denied", "exhausted", "awaiting", "requires"))
+    return any(
+        token in detail
+        for token in (
+            "started",
+            "approval",
+            "timeout",
+            "failed",
+            "denied",
+            "exhausted",
+            "awaiting",
+            "requires",
+        )
+    )
 
 
 @dataclass
@@ -286,9 +310,13 @@ class _CliRuntimeDisplay:
             summary = str(payload.get("result_summary", "") or "").strip()
             suffix = f" ({elapsed_ms}ms)" if elapsed_ms > 0 else ""
             if summary:
-                self.console.print(f"  [tool]{escape(tool_name)} finished{suffix}: {escape(summary)}[/tool]")
+                self.console.print(
+                    f"  [tool]{escape(tool_name)} finished{suffix}: {escape(summary)}[/tool]"
+                )
             else:
-                self.console.print(f"  [tool]{escape(tool_name)} finished{suffix}[/tool]")
+                self.console.print(
+                    f"  [tool]{escape(tool_name)} finished{suffix}[/tool]"
+                )
             return
         if runtime_type == "permission_requested":
             tool_name = str(payload.get("tool_name", "") or "tool").strip()
@@ -308,11 +336,15 @@ class _CliRuntimeDisplay:
         if runtime_type == "sandbox_retry_completed":
             tool_name = str(payload.get("tool_name", "") or "tool").strip()
             state = "succeeded" if bool(payload.get("success", False)) else "failed"
-            self.console.print(f"  [info]Sandbox retry {state} for {escape(tool_name)}[/info]")
+            self.console.print(
+                f"  [info]Sandbox retry {state} for {escape(tool_name)}[/info]"
+            )
             return
         if runtime_type == "context_warning":
             pct = int(payload.get("context_remaining_pct", 0) or 0)
-            self.console.print(f"  [warning]Context window low: {pct}% remaining[/warning]")
+            self.console.print(
+                f"  [warning]Context window low: {pct}% remaining[/warning]"
+            )
 
     def _enqueue_assistant_delta(self, text: str) -> None:
         if not text:
@@ -324,7 +356,9 @@ class _CliRuntimeDisplay:
 
     def _finalize_assistant_buffer(self) -> None:
         if self._assistant_buffer:
-            self._line_queue.append(_QueuedAssistantLine(self._assistant_buffer, time.monotonic()))
+            self._line_queue.append(
+                _QueuedAssistantLine(self._assistant_buffer, time.monotonic())
+            )
             self._assistant_buffer = ""
 
     def _ensure_drain_task(self) -> None:
@@ -340,7 +374,9 @@ class _CliRuntimeDisplay:
         oldest_age_ms = int(max(0.0, now - self._line_queue[0].enqueued_at) * 1000)
         severe = queued >= 64 or oldest_age_ms >= 300
         if self._mode == "smooth":
-            if (queued >= 8 or oldest_age_ms >= 120) and (not self._last_exit_at or severe or (now - self._last_exit_at) >= 0.25):
+            if (queued >= 8 or oldest_age_ms >= 120) and (
+                not self._last_exit_at or severe or (now - self._last_exit_at) >= 0.25
+            ):
                 self._mode = "catch_up"
                 self._below_exit_since = None
         else:
@@ -376,7 +412,9 @@ class _CliRuntimeDisplay:
         stream_queue_depth = len(self._line_queue)
         runtime_queue_depth = snapshot.get("queue_depth", 0)
         current_tool = str(snapshot.get("current_tool", "") or "").strip()
-        agent_id = str(snapshot.get("agent_id", "") or snapshot.get("role_id", "") or "").strip()
+        agent_id = str(
+            snapshot.get("agent_id", "") or snapshot.get("role_id", "") or ""
+        ).strip()
         task_id = str(snapshot.get("task_id", "") or "").strip()
         context_remaining_pct = snapshot.get("context_remaining_pct")
         turn_cost = snapshot.get("turn_cost_usd")
@@ -402,14 +440,20 @@ class _CliRuntimeDisplay:
             parts.append(f"turn=${float(turn_cost):.4f}")
         if session_cost not in (None, ""):
             parts.append(f"session=${float(session_cost):.4f}")
-        if pending_permission_count not in (None, "") and int(pending_permission_count or 0) > 0:
+        if (
+            pending_permission_count not in (None, "")
+            and int(pending_permission_count or 0) > 0
+        ):
             parts.append(f"approvals={int(pending_permission_count or 0)}")
         if self._checkpoint_hint:
             parts.append(f"checkpoint={self._checkpoint_hint}")
         message = " | ".join(parts)
         if not message:
             return
-        if not force and (message == self._last_status_render or (now - self._last_status_render_at) < 0.75):
+        if not force and (
+            message == self._last_status_render
+            or (now - self._last_status_render_at) < 0.75
+        ):
             return
         self.console.print(f"[dim][status][/dim] {message}")
         self._last_status_render = message
@@ -453,7 +497,11 @@ def _create_cli_engine(config, project: str | None):
 def _attach_cli_runtime_callbacks(state: _InteractiveChatState) -> None:
     def on_company_runtime_children(session_id: str, task_ids: list[str]) -> None:
         parent_session_id = str(session_id or "").strip()
-        clean_task_ids = [str(item or "").strip() for item in list(task_ids or []) if str(item or "").strip()]
+        clean_task_ids = [
+            str(item or "").strip()
+            for item in list(task_ids or [])
+            if str(item or "").strip()
+        ]
         if parent_session_id and clean_task_ids:
             state.session_to_task[parent_session_id] = clean_task_ids[0]
             for task_id in clean_task_ids:
@@ -510,11 +558,14 @@ def _normalize_escalation_reply(reply: str, options: list[dict]) -> str | None:
         if alias in normalized_map.values():
             return alias
 
-    return normalized_map.get(raw_reply.casefold()) or normalized_map.get(_normalize_escalation_key(raw_reply))
+    return normalized_map.get(raw_reply.casefold()) or normalized_map.get(
+        _normalize_escalation_key(raw_reply)
+    )
 
 
 def _escalation_callback():
     """Create an async escalation callback for human-in-the-loop."""
+
     async def callback(message: str, options: list[dict]) -> str | None:
         console.print(Panel(message, title="Action Required", border_style="yellow"))
         if options:
@@ -529,13 +580,16 @@ def _escalation_callback():
                 normalized = _normalize_escalation_reply(reply, options)
                 if normalized is not None:
                     return normalized
-                console.print("[warning]Invalid choice. Please enter a listed number, label, or id.[/warning]")
+                console.print(
+                    "[warning]Invalid choice. Please enter a listed number, label, or id.[/warning]"
+                )
         else:
             try:
                 reply = console.input("[bold]Your reply: [/bold]")
                 return reply.strip()
             except (EOFError, KeyboardInterrupt):
                 return None
+
     return callback
 
 
@@ -543,14 +597,25 @@ def _escalation_callback():
 # Commands
 # ---------------------------------------------------------------------------
 
+
 @app.command()
 def chat(
     message: Optional[str] = typer.Argument(None, help="Single message to process"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID to work in"),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override default LLM model"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project ID to work in"
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="Override default LLM model"
+    ),
     mode: str = typer.Option("task", "--mode", help="Execution mode: task or company"),
-    agent: Optional[str] = typer.Option(None, "--agent", help="Preferred agent: native, claude_code, codex, cursor, opencode"),
-    company_profile: str = typer.Option("corporate", "--company-profile", help="Company profile for company mode"),
+    agent: Optional[str] = typer.Option(
+        None,
+        "--agent",
+        help="Preferred agent: native, claude_code, codex, cursor, opencode",
+    ),
+    company_profile: str = typer.Option(
+        "corporate", "--company-profile", help="Company profile for company mode"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed logs"),
     no_markdown: bool = typer.Option(False, "--no-markdown", help="Plain text output"),
 ):
@@ -562,41 +627,65 @@ def chat(
         config.system.log_level = "DEBUG"
 
     if message:
-        asyncio.run(_single_message(
-            config,
-            message,
-            project,
-            no_markdown,
-            mode=mode,
-            preferred_agent=agent,
-            company_profile=company_profile,
-        ))
+        asyncio.run(
+            _single_message(
+                config,
+                message,
+                project,
+                no_markdown,
+                mode=mode,
+                preferred_agent=agent,
+                company_profile=company_profile,
+            )
+        )
     else:
-        asyncio.run(_interactive_mode(
-            config,
-            project,
-            no_markdown,
-            mode=mode,
-            preferred_agent=agent,
-            company_profile=company_profile,
-            explicit_mode=_cli_option_present("--mode"),
-            explicit_agent=_cli_option_present("--agent"),
-            explicit_company_profile=_cli_option_present("--company-profile"),
-        ))
+        asyncio.run(
+            _interactive_mode(
+                config,
+                project,
+                no_markdown,
+                mode=mode,
+                preferred_agent=agent,
+                company_profile=company_profile,
+                explicit_mode=_cli_option_present("--mode"),
+                explicit_agent=_cli_option_present("--agent"),
+                explicit_company_profile=_cli_option_present("--company-profile"),
+            )
+        )
 
 
 @app.command("exec")
 def exec_command(
-    prompt: Optional[str] = typer.Argument(None, help="Prompt to run non-interactively. Reads stdin when omitted."),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID to work in"),
-    mode: str = typer.Option("task", "--mode", help="Execution mode: task, company, or org"),
-    company_profile: str = typer.Option("corporate", "--company-profile", help="Company profile for company mode"),
-    agent: Optional[str] = typer.Option(None, "--agent", help="Preferred agent: native, claude_code, codex, cursor, opencode"),
-    org_id: Optional[str] = typer.Option(None, "--org", "--org-id", help="Saved org id for org/custom mode"),
-    session_id: Optional[str] = typer.Option(None, "--session-id", help="Existing task-backed session id to reuse"),
-    resume: bool = typer.Option(False, "--resume", help="Resume the latest task-backed session in the project"),
+    prompt: Optional[str] = typer.Argument(
+        None, help="Prompt to run non-interactively. Reads stdin when omitted."
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project ID to work in"
+    ),
+    mode: str = typer.Option(
+        "task", "--mode", help="Execution mode: task, company, or org"
+    ),
+    company_profile: str = typer.Option(
+        "corporate", "--company-profile", help="Company profile for company mode"
+    ),
+    agent: Optional[str] = typer.Option(
+        None,
+        "--agent",
+        help="Preferred agent: native, claude_code, codex, cursor, opencode",
+    ),
+    org_id: Optional[str] = typer.Option(
+        None, "--org", "--org-id", help="Saved org id for org/custom mode"
+    ),
+    session_id: Optional[str] = typer.Option(
+        None, "--session-id", help="Existing task-backed session id to reuse"
+    ),
+    resume: bool = typer.Option(
+        False, "--resume", help="Resume the latest task-backed session in the project"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print final JSON payload"),
-    stream_json: bool = typer.Option(False, "--stream-json", help="Print newline-delimited JSON runtime events"),
+    stream_json: bool = typer.Option(
+        False, "--stream-json", help="Print newline-delimited JSON runtime events"
+    ),
     no_markdown: bool = typer.Option(False, "--no-markdown", help="Plain text output"),
 ):
     """Run one non-interactive OPC task for scripts and CI."""
@@ -611,20 +700,22 @@ def exec_command(
         message = sys.stdin.read()
     config = _get_config()
     try:
-        asyncio.run(_exec_message(
-            config=config,
-            prompt=str(message or "").strip(),
-            project=project,
-            mode=mode,
-            company_profile=company_profile,
-            preferred_agent=agent,
-            org_id=org_id,
-            session_id=session_id,
-            resume=resume,
-            json_output=json_output,
-            stream_json=stream_json,
-            no_markdown=no_markdown,
-        ))
+        asyncio.run(
+            _exec_message(
+                config=config,
+                prompt=str(message or "").strip(),
+                project=project,
+                mode=mode,
+                company_profile=company_profile,
+                preferred_agent=agent,
+                org_id=org_id,
+                session_id=session_id,
+                resume=resume,
+                json_output=json_output,
+                stream_json=stream_json,
+                no_markdown=no_markdown,
+            )
+        )
     except KeyboardInterrupt as exc:
         if stream_json:
             _print_exec_event(
@@ -641,8 +732,12 @@ def exec_command(
 @app.command()
 def secretary(
     message: Optional[str] = typer.Argument(None, help="Single secretary message"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID for secretary context"),
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override default LLM model"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project ID for secretary context"
+    ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="Override default LLM model"
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed logs"),
     no_markdown: bool = typer.Option(False, "--no-markdown", help="Plain text output"),
 ):
@@ -661,7 +756,9 @@ def secretary(
 
 @app.command("propose-reorg")
 def propose_reorg(
-    payload: str = typer.Argument(..., help="JSON payload with summary/rationale/changeset"),
+    payload: str = typer.Argument(
+        ..., help="JSON payload with summary/rationale/changeset"
+    ),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID"),
 ):
     """Create a runtime company reorg proposal."""
@@ -720,17 +817,17 @@ def _template_has_required_config_files(source: Any) -> bool:
         return False
 
 
+def _source_checkout_config_dir() -> Path:
+    return Path(__file__).resolve().parents[2] / "config"
+
+
 def _project_config_template_dir() -> Any | None:
     """Return the best config template source.
 
     Source checkouts use ``project_root/config``. Installed packages fall back
     to ``opc/config_templates`` shipped as package data via ``importlib.resources``.
     """
-    from opc.core.config import get_opc_home
-
-    opc_home = get_opc_home()
-    project_root = opc_home.parent
-    repo_config = project_root / "config"
+    repo_config = _source_checkout_config_dir()
     if _template_has_required_config_files(repo_config):
         return repo_config
 
@@ -738,7 +835,9 @@ def _project_config_template_dir() -> Any | None:
         packaged_config = importlib_resources.files("opc").joinpath("config_templates")
     except Exception:
         packaged_config = None
-    if packaged_config is not None and _template_has_required_config_files(packaged_config):
+    if packaged_config is not None and _template_has_required_config_files(
+        packaged_config
+    ):
         return packaged_config
     return None
 
@@ -761,19 +860,40 @@ def _load_config_template(source: Any) -> OPCConfig:
         return OPCConfig.load(tmp_path)
 
 
+def _materialize_missing_config_templates(
+    source: Any,
+    target: Path,
+) -> list[str]:
+    """Install only absent runtime config files, preserving every existing byte."""
+
+    config = _load_config_template(source)
+    config.llm.api_key = ""
+    target.mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        staged = Path(tmpdir) / "config"
+        config.save(staged)
+        for name in (
+            "system_config.yaml",
+            "llm_config.yaml",
+            "agent_config.yaml",
+            "channel_config.yaml",
+        ):
+            destination = target / name
+            if destination.exists():
+                continue
+            candidate = staged / name
+            if not candidate.is_file():
+                continue
+            destination.write_bytes(candidate.read_bytes())
+            created.append(name)
+    return created
+
+
 def _opc_config_initialized(opc_home: Path) -> bool:
-    config_dir = opc_home / "config"
-    if not config_dir.exists():
-        return False
-    expected = (
-        "llm_config.yaml",
-        "system_config.yaml",
-        "agent_config.yaml",
-        "org_config.yaml",
-    )
-    if any((config_dir / name).exists() for name in expected):
-        return True
-    return any(config_dir.iterdir())
+    from opc.core.initialization import inspect_initialization
+
+    return inspect_initialization(opc_home).ready
 
 
 def _trust_configured_external_agents(
@@ -786,7 +906,11 @@ def _trust_configured_external_agents(
 
     manager = ApprovalAllowlistManager(opc_home)
     manager.ensure_file()
-    scope_project = project_id.strip() if isinstance(project_id, str) and project_id.strip() else None
+    scope_project = (
+        project_id.strip()
+        if isinstance(project_id, str) and project_id.strip()
+        else None
+    )
     for agent_name, agent_config in config.agents.agents.items():
         if not getattr(agent_config, "enabled", True):
             continue
@@ -823,7 +947,37 @@ def _run_init_external_agent_preflight(
         f"collab surfaces and workspace permissions checked."
     )
     for item in failures:
-        console.print(f"  [warning]- {item.agent}: {'; '.join(item.issues[:2])}[/warning]")
+        console.print(
+            f"  [warning]- {item.agent}: {'; '.join(item.issues[:2])}[/warning]"
+        )
+
+
+def _disable_unavailable_default_external_agents(config: OPCConfig) -> list[str]:
+    """Disable missing defaults when a fresh init explicitly skips preflight.
+
+    Existing configurations are never rewritten by this helper. A normal init
+    with preflight also keeps enabled adapters intact so provisioning can report
+    and prepare their collaboration surfaces.
+    """
+
+    from opc.layer3_agent.adapters.registry import ADAPTER_CLASSES
+
+    disabled: list[str] = []
+    for name, adapter_cls in ADAPTER_CLASSES.items():
+        configured = config.agents.agents.get(name)
+        if configured is None or not bool(configured.enabled):
+            continue
+        try:
+            available = bool(adapter_cls(config=configured).resolve_binary())
+        except Exception:
+            # A detection implementation error must not silently rewrite the
+            # user's future execution policy.
+            continue
+        if available:
+            continue
+        configured.enabled = False
+        disabled.append(name)
+    return disabled
 
 
 def _render_external_agent_detection(config: OPCConfig) -> None:
@@ -843,7 +997,9 @@ def _render_external_agent_detection(config: OPCConfig) -> None:
         if found:
             console.print(f"  - {agent_name}: [success]found[/success] ({found})")
         else:
-            console.print(f"  - {agent_name}: [warning]not found[/warning] (command={command})")
+            console.print(
+                f"  - {agent_name}: [warning]not found[/warning] (command={command})"
+            )
 
 
 def _render_external_agent_preflight_table(results: list[Any]) -> None:
@@ -868,9 +1024,17 @@ def _render_external_agent_preflight_table(results: list[Any]) -> None:
         elif item.version:
             mode = item.version
         workspace_ok = all(check.ok for check in item.write_checks)
-        workspace = "[success]writable[/success]" if workspace_ok else "[error]blocked[/error]"
-        collab = "[success]ready[/success]" if item.collab_cli and not item.issues else "[warning]check[/warning]"
-        rpc_transport = str(getattr(item, "collaboration_rpc_transport", "") or "").strip()
+        workspace = (
+            "[success]writable[/success]" if workspace_ok else "[error]blocked[/error]"
+        )
+        collab = (
+            "[success]ready[/success]"
+            if item.collab_cli and not item.issues
+            else "[warning]check[/warning]"
+        )
+        rpc_transport = str(
+            getattr(item, "collaboration_rpc_transport", "") or ""
+        ).strip()
         if rpc_transport:
             collab = f"{collab}\nRPC: {rpc_transport}"
         notes = []
@@ -900,7 +1064,17 @@ def _truncate_status_cell(value: str, *, limit: int) -> str:
 @app.command()
 def init(
     project: Optional[str] = typer.Argument(None, help="Project ID to initialize"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Continue when OPC is already initialized; existing config is preserved."),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Continue when OPC is already initialized; existing config is preserved.",
+    ),
+    repair: bool = typer.Option(
+        False,
+        "--repair",
+        help="Fill missing config files in a partial initialization without overwriting existing files.",
+    ),
     external_agent_preflight: bool = typer.Option(
         True,
         "--external-agent-preflight/--no-external-agent-preflight",
@@ -917,27 +1091,89 @@ def init(
 
     opc_home = get_opc_home()
     template_dir = _project_config_template_dir()
-    already_initialized = _opc_config_initialized(opc_home)
-    config: OPCConfig
+    from opc.core.initialization import inspect_initialization
 
-    if already_initialized:
-        if not yes and not typer.confirm(
-            f"OPC is already initialized at {opc_home}. Continue without overwriting existing config?",
-            default=False,
+    initialization = inspect_initialization(opc_home)
+    config: OPCConfig
+    disabled_default_agents: list[str] = []
+
+    if initialization.state == "partial":
+        missing = ", ".join(initialization.missing) or "none"
+        invalid = ", ".join(initialization.invalid) or "none"
+        if not repair:
+            console.print(
+                f"[error]Partial OPC initialization detected at {opc_home}. "
+                f"Missing: {missing}; invalid: {invalid}.[/error]"
+            )
+            console.print(
+                "[info]Run `opc init --repair` to install only missing config files.[/info]"
+            )
+            raise typer.Exit(1)
+        if initialization.invalid:
+            console.print(
+                "[error]Repair will not overwrite invalid config files. Fix or move these files first: "
+                f"{invalid}[/error]"
+            )
+            raise typer.Exit(1)
+        if template_dir is None:
+            console.print(
+                "[error]Config templates are unavailable; partial initialization cannot be repaired.[/error]"
+            )
+            raise typer.Exit(1)
+        created = _materialize_missing_config_templates(
+            template_dir, opc_home / "config"
+        )
+        console.print(f"[info]Existing config preserved: {opc_home / 'config'}[/info]")
+        if created:
+            console.print(
+                f"[info]Installed missing config templates: {', '.join(created)}[/info]"
+            )
+        initialization = inspect_initialization(opc_home)
+        if not initialization.ready:
+            console.print(
+                f"[error]Initialization repair is incomplete. Missing: {', '.join(initialization.missing)}[/error]"
+            )
+            raise typer.Exit(1)
+        config = OPCConfig.load(opc_home / "config")
+    elif initialization.state == "initialized":
+        if (
+            not repair
+            and not yes
+            and not typer.confirm(
+                f"OPC is already initialized at {opc_home}. Continue without overwriting existing config?",
+                default=False,
+            )
         ):
-            console.print("[warning]Init cancelled. Existing config was left unchanged.[/warning]")
+            console.print(
+                "[warning]Init cancelled. Existing config was left unchanged.[/warning]"
+            )
             raise typer.Exit(1)
         console.print(f"[info]Existing config preserved: {opc_home / 'config'}[/info]")
+        if repair and template_dir is not None:
+            created = _materialize_missing_config_templates(
+                template_dir,
+                opc_home / "config",
+            )
+            if created:
+                console.print(
+                    "[info]Installed missing config templates: "
+                    f"{', '.join(created)}[/info]"
+                )
         config = OPCConfig.load(opc_home / "config")
     elif template_dir is not None:
         # Use repo config template (same setup as maintainers, keys left for user to set)
         config = _load_config_template(template_dir)
         config.llm.api_key = ""
+        if not external_agent_preflight:
+            disabled_default_agents = _disable_unavailable_default_external_agents(
+                config
+            )
         config.save(opc_home / "config")
     else:
         config = OPCConfig()
         if not config.org.roles:
             from opc.core.config import RoleConfig, EscalationRule
+
             browser_tools = [
                 "browser_navigate",
                 "browser_navigate_back",
@@ -1105,17 +1341,46 @@ def init(
                 ),
             ]
             config.org.escalation_rules = [
-                EscalationRule(condition="3 consecutive failures with no progress", action="Escalate to owner with failure reason"),
-                EscalationRule(condition="External account or credentials required", action="Escalate to owner"),
-                EscalationRule(condition="Security vulnerability severity >= HIGH", action="Immediately halt and escalate"),
-                EscalationRule(condition="Budget exceeds 80% of limit", action="Alert owner and await instructions"),
+                EscalationRule(
+                    condition="3 consecutive failures with no progress",
+                    action="Escalate to owner with failure reason",
+                ),
+                EscalationRule(
+                    condition="External account or credentials required",
+                    action="Escalate to owner",
+                ),
+                EscalationRule(
+                    condition="Security vulnerability severity >= HIGH",
+                    action="Immediately halt and escalate",
+                ),
+                EscalationRule(
+                    condition="Budget exceeds 80% of limit",
+                    action="Alert owner and await instructions",
+                ),
             ]
+        if not external_agent_preflight:
+            disabled_default_agents = _disable_unavailable_default_external_agents(
+                config
+            )
         config.save(opc_home / "config")
+
+    if disabled_default_agents:
+        console.print(
+            "[info]Disabled unavailable default external agents because preflight was skipped: "
+            f"{', '.join(disabled_default_agents)}. Enable them in agent_config.yaml after installation.[/info]"
+        )
 
     # Create default directories. ``agent_homes/`` and ``bin/`` get
     # provisioned lazily by the skill installer the first time an
     # external agent launches.
-    for subdir in ["memory", "skills/core", "skills/cache", "skills/learned", "logs", "prompts/talent"]:
+    for subdir in [
+        "memory",
+        "skills/core",
+        "skills/cache",
+        "skills/learned",
+        "logs",
+        "prompts/talent",
+    ]:
         (opc_home / subdir).mkdir(parents=True, exist_ok=True)
 
     # Create default skills
@@ -1124,6 +1389,7 @@ def init(
     # Create default global memory.
     from opc.layer5_memory.approval_allowlist import ApprovalAllowlistManager
     from opc.layer5_memory.markdown_memory import MarkdownMemoryStore
+
     memory_store = MarkdownMemoryStore(opc_home)
     if not memory_store.load_raw_text():
         memory_store.save_visible_text("# Global Memory", None)
@@ -1131,7 +1397,9 @@ def init(
 
     if project:
         if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$", project or ""):
-            console.print("[error]Invalid project ID (use alphanumeric, hyphens, underscores).[/error]")
+            console.print(
+                "[error]Invalid project ID (use alphanumeric, hyphens, underscores).[/error]"
+            )
             raise typer.Exit(1)
         proj_dir = opc_home / "projects" / project
         project_memory = memory_store.memory_path(project)
@@ -1142,7 +1410,9 @@ def init(
         proj_dir.mkdir(parents=True, exist_ok=False)
         workplace.mkdir(parents=True, exist_ok=False)
         memory_store.ensure_memory_file(project, f"# Project Memory ({project})")
-        console.print(f"[success]Project '{project}' initialized at {proj_dir}[/success]")
+        console.print(
+            f"[success]Project '{project}' initialized at {proj_dir}[/success]"
+        )
         console.print(f"  Workplace: {workplace}")
 
     if trust_external_agents:
@@ -1160,12 +1430,16 @@ def init(
     console.print(f"  Config: {opc_home / 'config'}")
     console.print(f"  Memory: {opc_home / 'memory'}")
     console.print(f"  Skills: {opc_home / 'skills'}")
-    console.print(f"\nEdit [bold]{opc_home / 'config' / 'llm_config.yaml'}[/bold] to set your API key.")
+    console.print(
+        f"\nEdit [bold]{opc_home / 'config' / 'llm_config.yaml'}[/bold] to set your API key."
+    )
 
 
 @app.command()
 def status(
-    project: str = typer.Option("default", "--project", "-p", help="Project ID used for workspace preflight."),
+    project: str = typer.Option(
+        "default", "--project", "-p", help="Project ID used for workspace preflight."
+    ),
     external_agent_preflight: bool = typer.Option(
         True,
         "--external-agent-preflight/--no-external-agent-preflight",
@@ -1200,7 +1474,11 @@ def status(
     # External agents
     console.print("\n[bold]External Agents:[/bold]")
     for name, agent_config in config.agents.agents.items():
-        status_str = "[success]enabled[/success]" if agent_config.enabled else "[warning]disabled[/warning]"
+        status_str = (
+            "[success]enabled[/success]"
+            if agent_config.enabled
+            else "[warning]disabled[/warning]"
+        )
         console.print(f"  - {name}: {status_str}")
 
     if not config.agents.agents:
@@ -1224,11 +1502,186 @@ def status(
     projects_dir = opc_home / "projects"
     if projects_dir.exists():
         projects = [p.name for p in projects_dir.iterdir() if p.is_dir()]
-        console.print(f"\n[bold]Projects:[/bold] {', '.join(projects) if projects else '(none)'}")
+        console.print(
+            f"\n[bold]Projects:[/bold] {', '.join(projects) if projects else '(none)'}"
+        )
 
     # Cost
     asyncio.run(_show_cost_summary(config))
     asyncio.run(_show_autonomy_summary(config))
+
+
+@app.command()
+def doctor(
+    project: str = typer.Option(
+        "default", "--project", "-p", help="Project workspace to diagnose"
+    ),
+    probe_agent_commands: bool = typer.Option(
+        False,
+        "--probe-agent-commands/--no-probe-agent-commands",
+        help="Run version/help and writable-path probes for enabled external agents",
+    ),
+    strict: bool = typer.Option(
+        False, "--strict", help="Exit non-zero when any required check is not ready"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print machine-readable diagnostics"
+    ),
+):
+    """Diagnose initialization, storage paths, external agents, channels, and databases."""
+    from contextlib import closing
+    import sqlite3
+
+    from opc.core.config import get_project_workplace
+    from opc.core.initialization import inspect_initialization
+    from opc.diagnostics import (
+        channel_diagnostics,
+        external_agent_diagnostics,
+        filesystem_diagnostics,
+        nu_llm_routing_diagnostics,
+    )
+
+    opc_home = get_opc_home()
+    initialization = inspect_initialization(opc_home)
+    config = (
+        OPCConfig.load(opc_home / "config") if initialization.ready else OPCConfig()
+    )
+    workspace = get_project_workplace(project)
+    runtime_state = _read_channel_runtime_state() or {}
+    runtime_pid = int(runtime_state.get("pid", 0) or 0)
+    runtime_running = bool(runtime_pid and _pid_is_running(runtime_pid))
+
+    agents = external_agent_diagnostics(config, opc_home=opc_home)
+    if probe_agent_commands and initialization.ready:
+        from opc.layer3_agent.preflight import run_external_agent_preflight
+
+        probed = run_external_agent_preflight(
+            config,
+            project_id=project,
+            workspace_path=workspace,
+            opc_home=opc_home,
+            probe_commands=True,
+            prepare_surfaces=False,
+        )
+        agents = {
+            **agents,
+            "agents": [item.as_dict() for item in probed],
+            "ready": sum(bool(item.ok) for item in probed if item.enabled),
+            "issues": [
+                f"{item.agent}: {issue}"
+                for item in probed
+                if item.enabled
+                for issue in item.issues
+            ],
+            "probed": True,
+        }
+    else:
+        agents["probed"] = False
+
+    database_rows = []
+    for name, path in (
+        ("global", opc_home / "global.db"),
+        ("project", opc_home / "projects" / project / "tasks.db"),
+        ("office_ui", opc_home / "ui_state.db"),
+    ):
+        row = {
+            "name": name,
+            "path": str(path),
+            "exists": path.is_file(),
+            "quick_check": "not_created",
+            "ready": True,
+            "access": "read_only_immutable",
+        }
+        if path.is_file():
+            try:
+                uri = f"{path.resolve().as_uri()}?mode=ro&immutable=1"
+                with closing(sqlite3.connect(uri, uri=True)) as connection:
+                    row["quick_check"] = str(
+                        connection.execute("PRAGMA quick_check").fetchone()[0]
+                    )
+                row["ready"] = row["quick_check"] == "ok"
+            except sqlite3.Error as exc:
+                row["quick_check"] = f"{type(exc).__name__}: {exc}"
+                row["ready"] = False
+        database_rows.append(row)
+
+    channels = channel_diagnostics(
+        config,
+        runtime_state=runtime_state,
+        runtime_running=runtime_running,
+    )
+    llm_routing = nu_llm_routing_diagnostics(config, opc_home=opc_home)
+    filesystem = filesystem_diagnostics(opc_home, workspace)
+    issues = [
+        *(
+            []
+            if initialization.ready
+            else [
+                f"initialization is {initialization.state}; run "
+                + (
+                    "opc init --repair"
+                    if initialization.state == "partial"
+                    else "opc init"
+                )
+            ]
+        ),
+        *filesystem["issues"],
+        *agents["issues"],
+        *channels["issues"],
+        *llm_routing["issues"],
+        *[
+            f"database {row['name']} quick_check failed: {row['quick_check']}"
+            for row in database_rows
+            if not row["ready"]
+        ],
+    ]
+    report = {
+        "ok": not issues,
+        "project_id": project,
+        "initialization": initialization.to_payload(),
+        "filesystem": filesystem,
+        "external_agents": agents,
+        "channels": channels,
+        "llm_routing": llm_routing,
+        "databases": {
+            "checks": database_rows,
+            "ready": all(row["ready"] for row in database_rows),
+        },
+        "issues": issues,
+    }
+    if json_output:
+        _print_json(report)
+    else:
+        console.print(
+            Panel(
+                "[bold]OPC Doctor[/bold]",
+                border_style="green" if report["ok"] else "yellow",
+            )
+        )
+        console.print(f"  Initialization: {initialization.state}")
+        console.print(
+            f"  Filesystem: {'ready' if filesystem['ready'] else 'check required'}"
+        )
+        console.print(f"  External agents: {agents['ready']}/{agents['enabled']} ready")
+        console.print(
+            f"  Channels: {channels['ready']}/{channels['enabled']} enabled providers ready"
+        )
+        console.print(f"  NU LLM routing: {llm_routing['state']}")
+        console.print(
+            f"  Databases: {'ready' if report['databases']['ready'] else 'check required'}"
+        )
+        if llm_routing["notices"]:
+            console.print("\n[bold]Notices:[/bold]")
+            for notice in llm_routing["notices"]:
+                console.print(f"  - {escape(notice)}")
+        if issues:
+            console.print("\n[warning]Issues:[/warning]")
+            for issue in issues:
+                console.print(f"  - {escape(issue)}")
+        else:
+            console.print("\n[success]All required checks are ready.[/success]")
+    if strict and issues:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -1241,7 +1694,9 @@ def autonomy_status(
     console.print(f"  Mode: {config.autonomy.mode}")
     console.print(f"  Enabled: {config.autonomy.enabled}")
     console.print(f"  Max auto-approve risk: {config.autonomy.max_auto_approve_risk}")
-    console.print(f"  Confidence threshold: {config.autonomy.approval_confidence_threshold}")
+    console.print(
+        f"  Confidence threshold: {config.autonomy.approval_confidence_threshold}"
+    )
     asyncio.run(_show_autonomy_summary(config, project=project))
 
 
@@ -1259,14 +1714,22 @@ def autonomy_reset(
     prefs.reset_autonomy_preferences(project_id=project)
     ApprovalAllowlistManager(opc_home).reset(project_id=project)
     scope = f"project '{project}'" if project else "global"
-    console.print(f"[success]Reset learned autonomy preferences and allowlist rules for {scope}.[/success]")
+    console.print(
+        f"[success]Reset learned autonomy preferences and allowlist rules for {scope}.[/success]"
+    )
 
 
 @app.command()
 def autonomy_configure(
-    mode: Optional[str] = typer.Option(None, "--mode", help="Autonomy mode, e.g. bounded"),
-    max_auto_approve_risk: Optional[str] = typer.Option(None, "--max-risk", help="Max auto-approve risk"),
-    approval_confidence_threshold: Optional[float] = typer.Option(None, "--confidence-threshold", help="Approval confidence threshold"),
+    mode: Optional[str] = typer.Option(
+        None, "--mode", help="Autonomy mode, e.g. bounded"
+    ),
+    max_auto_approve_risk: Optional[str] = typer.Option(
+        None, "--max-risk", help="Max auto-approve risk"
+    ),
+    approval_confidence_threshold: Optional[float] = typer.Option(
+        None, "--confidence-threshold", help="Approval confidence threshold"
+    ),
 ):
     """Update autonomy configuration settings."""
     from opc.core.config import get_opc_home
@@ -1287,6 +1750,7 @@ def projects():
     """List all projects."""
     from opc.core.config import get_opc_home, get_project_workplace
     from opc.layer5_memory.markdown_memory import MarkdownMemoryStore
+
     opc_home = get_opc_home()
     memory_store = MarkdownMemoryStore(opc_home)
     projects_dir = opc_home / "projects"
@@ -1341,6 +1805,7 @@ def skills():
 def config_show():
     """Show current configuration."""
     import yaml
+
     config = _get_config()
     console.print(yaml.dump(config.model_dump(), default_flow_style=False))
 
@@ -1357,9 +1822,23 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _print_json(payload: Any) -> None:
+    """Emit machine-readable JSON without rich console wrapping.
+
+    ``console.print`` hard-wraps long lines at the terminal width, which
+    inserts raw newlines inside JSON string values and corrupts the payload
+    for any consumer of ``--json`` output (CI, the benchmark harness).
+    """
+
+    sys.stdout.write(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe) + "\n"
+    )
+    sys.stdout.flush()
+
+
 def _emit_payload(payload: dict[str, Any], *, json_output: bool = False) -> None:
     if json_output:
-        console.print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe))
+        _print_json(payload)
         return
     if not payload:
         console.print("[success]OK[/success]")
@@ -1382,16 +1861,21 @@ async def _run_service_command(
     *,
     json_output: bool = False,
     render: Any | None = None,
+    read_only: bool = False,
 ) -> None:
     from opc.plugins.office_ui.services import ServiceError
     from opc.plugins.office_ui.services.factory import OfficeServiceFactory
 
-    async with OfficeServiceFactory(config=_get_config(), project_id=project) as services:
+    async with OfficeServiceFactory(
+        config=_get_config(),
+        project_id=project,
+        read_only=read_only,
+    ) as services:
         try:
             result = await operation(services)
         except ServiceError as exc:
             if json_output:
-                console.print(json.dumps({"ok": False, **exc.to_payload()}, ensure_ascii=False, indent=2))
+                _print_json({"ok": False, **exc.to_payload()})
             else:
                 console.print(f"[error]{escape(exc.message)}[/error]")
             raise typer.Exit(code=1) from exc
@@ -1402,7 +1886,9 @@ async def _run_service_command(
             _emit_payload(payload, json_output=json_output)
 
 
-def _load_structured_payload(*, payload: str | None = None, file_path: str | None = None) -> Any:
+def _load_structured_payload(
+    *, payload: str | None = None, file_path: str | None = None
+) -> Any:
     raw = ""
     if file_path:
         raw = Path(file_path).read_text(encoding="utf-8")
@@ -1418,6 +1904,66 @@ def _load_structured_payload(*, payload: str | None = None, file_path: str | Non
         return yaml.safe_load(raw) or {}
 
 
+def _parse_org_members(
+    *, member_specs: list[str] | None = None, file_path: str | None = None
+) -> list[dict[str, Any]]:
+    """Parse saved-org members from a structured file or repeatable CLI values.
+
+    A ``--member`` value may be a JSON/YAML object or the compact
+    ``name|responsibility|reports_to_index`` form.  The structured file may be
+    either a member list or an object containing a ``members`` list.
+    """
+    members: list[Any] = []
+    if file_path:
+        loaded = _load_structured_payload(file_path=file_path)
+        if isinstance(loaded, dict):
+            loaded = loaded.get("members")
+        if not isinstance(loaded, list):
+            raise ValueError("Members file must contain a list or a 'members' list.")
+        members.extend(loaded)
+
+    for raw_spec in member_specs or []:
+        raw = str(raw_spec or "").strip()
+        if not raw:
+            continue
+        parsed: Any = None
+        if raw.startswith("{"):
+            parsed = _load_structured_payload(payload=raw)
+        if isinstance(parsed, dict):
+            members.append(parsed)
+            continue
+        parts = [part.strip() for part in raw.split("|", 2)]
+        item: dict[str, Any] = {"name": parts[0]}
+        if len(parts) > 1 and parts[1]:
+            item["responsibility"] = parts[1]
+        if len(parts) > 2 and parts[2]:
+            try:
+                item["reports_to_index"] = int(parts[2])
+            except ValueError as exc:
+                raise ValueError("Member reports_to_index must be an integer.") from exc
+        members.append(item)
+
+    normalized = [dict(item) for item in members if isinstance(item, dict)]
+    if len(normalized) < 2:
+        raise ValueError("A custom organization requires at least two members.")
+    return normalized
+
+
+async def _create_and_activate_saved_org(
+    services: Any, *, organization_name: str, members: list[dict[str, Any]]
+) -> Any:
+    result = await services.org.saved_create(
+        organization_name=organization_name, members=members
+    )
+    org_id = str(
+        result.payload.get("organization_id") or result.payload.get("name") or ""
+    ).strip()
+    await services.runtime.mode_set(
+        mode="org", profile="custom", org_id=org_id, sync_config=False
+    )
+    return result
+
+
 def _split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -1430,6 +1976,43 @@ def _exec_event_payload(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return dict(value.__dict__)
     return _json_safe(value)
+
+
+_EXEC_FAILURE_STATUSES = {"failed", "cancelled"}
+
+
+def _exec_final_contract(
+    *,
+    project_id: str,
+    task_id: str,
+    session_id: str,
+    mode: str,
+    company_profile: str,
+    response: str,
+    task_status: str,
+) -> tuple[dict[str, Any], int]:
+    """Build the exec final payload with an honest success verdict.
+
+    Historically ``opc exec`` reported ``ok: true`` and exit 0 whenever the
+    send call returned, hiding soft failures (failed/cancelled tasks) from
+    automation. The verdict now reflects the task's terminal status: a
+    failed or cancelled task yields ``ok: false`` and exit code 3, so CI
+    and the benchmark harness can trust the exit code again.
+    """
+
+    status = str(task_status or "").strip().lower()
+    succeeded = status not in _EXEC_FAILURE_STATUSES
+    payload = {
+        "ok": succeeded,
+        "project_id": project_id,
+        "task_id": task_id,
+        "session_id": session_id,
+        "mode": mode,
+        "company_profile": company_profile,
+        "task_status": status,
+        "response": response,
+    }
+    return payload, 0 if succeeded else 3
 
 
 def _print_exec_event(
@@ -1463,12 +2046,18 @@ def _exec_title(prompt: str) -> str:
     return "Exec Session"
 
 
-async def _task_id_for_session(services: Any, *, project_id: str, session_id: str) -> str:
+async def _task_id_for_session(
+    services: Any, *, project_id: str, session_id: str
+) -> str:
     engine = await services.context.engine_for_project(project_id)
     store = getattr(engine, "store", None)
     if not store or not session_id:
         return ""
-    tasks = await store.get_tasks(project_id=project_id) if hasattr(store, "get_tasks") else []
+    tasks = (
+        await store.get_tasks(project_id=project_id)
+        if hasattr(store, "get_tasks")
+        else []
+    )
     for task in tasks:
         if str(getattr(task, "session_id", "") or "") == session_id:
             return str(getattr(task, "id", "") or "")
@@ -1493,24 +2082,47 @@ async def _resolve_exec_session(
     if normalized_mode == "custom":
         normalized_mode = "org"
     if normalized_mode not in {"task", "company", "org"}:
-        raise ServiceError("invalid_mode", "mode must be task, company, or org", {"mode": mode})
+        raise ServiceError(
+            "invalid_mode", "mode must be task, company, or org", {"mode": mode}
+        )
 
     if session_id:
-        task_id = await _task_id_for_session(services, project_id=project_id, session_id=session_id)
+        task_id = await _task_id_for_session(
+            services, project_id=project_id, session_id=session_id
+        )
         if not task_id:
-            raise ServiceError("session_not_task_backed", "Session is not linked to a task-backed CLI/UI session", {"session_id": session_id})
-        detail = await services.session.detail(project_id=project_id, task_id=task_id, session_id=session_id, limit=1)
-        return {**detail.payload, "task_id": task_id, "session_id": session_id, "restored": True}
+            raise ServiceError(
+                "session_not_task_backed",
+                "Session is not linked to a task-backed CLI/UI session",
+                {"session_id": session_id},
+            )
+        detail = await services.session.detail(
+            project_id=project_id, task_id=task_id, session_id=session_id, limit=1
+        )
+        return {
+            **detail.payload,
+            "task_id": task_id,
+            "session_id": session_id,
+            "restored": True,
+        }
 
     if resume:
-        starting = await services.session.resolve_starting_session(project_id=project_id)
+        starting = await services.session.resolve_starting_session(
+            project_id=project_id
+        )
         payload = dict(starting.payload)
         restored_session_id = str(payload.get("session_id", "") or "")
         restored_task_id = str(payload.get("task_id", "") or "")
         if restored_session_id and not restored_task_id:
-            restored_task_id = await _task_id_for_session(services, project_id=project_id, session_id=restored_session_id)
+            restored_task_id = await _task_id_for_session(
+                services, project_id=project_id, session_id=restored_session_id
+            )
         if not restored_task_id:
-            raise ServiceError("session_not_task_backed", "Latest session is not task-backed; create a new exec session without --resume", {"session_id": restored_session_id})
+            raise ServiceError(
+                "session_not_task_backed",
+                "Latest session is not task-backed; create a new exec session without --resume",
+                {"session_id": restored_session_id},
+            )
         payload["task_id"] = restored_task_id
         payload["session_id"] = restored_session_id
         payload["restored"] = True
@@ -1558,7 +2170,10 @@ async def _exec_message(
             project_id=project_id,
             task_id=str(event_state.get("task_id", "") or ""),
             session_id=str(event_state.get("session_id", "") or ""),
-            payload={"args": [_exec_event_payload(arg) for arg in args], "kwargs": kwargs},
+            payload={
+                "args": [_exec_event_payload(arg) for arg in args],
+                "kwargs": kwargs,
+            },
         )
 
     async def on_runtime_event(event: Any) -> None:
@@ -1599,7 +2214,9 @@ async def _exec_message(
             if stream_json:
                 _print_exec_event(
                     event_state,
-                    "session_created" if not target.get("restored") else "session_resumed",
+                    "session_created"
+                    if not target.get("restored")
+                    else "session_resumed",
                     project_id=project_id,
                     task_id=task_id,
                     session_id=resolved_session_id,
@@ -1609,8 +2226,16 @@ async def _exec_message(
             response = ""
             if prompt:
                 normalized_mode = str(mode or "task").strip().lower()
-                send_mode = "company" if normalized_mode in {"company", "org", "custom"} else "task"
-                send_profile = "custom" if normalized_mode in {"org", "custom"} else company_profile
+                send_mode = (
+                    "company"
+                    if normalized_mode in {"company", "org", "custom"}
+                    else "task"
+                )
+                send_profile = (
+                    "custom"
+                    if normalized_mode in {"org", "custom"}
+                    else company_profile
+                )
                 sent = await services.session.send(
                     project_id=project_id,
                     task_id=task_id,
@@ -1630,15 +2255,26 @@ async def _exec_message(
                         payload={"role": "assistant", "content": response},
                     )
 
-            final_payload = {
-                "ok": True,
-                "project_id": project_id,
-                "task_id": task_id,
-                "session_id": resolved_session_id,
-                "mode": mode,
-                "company_profile": company_profile,
-                "response": response,
-            }
+            task_status = ""
+            if prompt and task_id:
+                try:
+                    detail = await services.session.detail(
+                        project_id=project_id, task_id=task_id, limit=1
+                    )
+                    task_status = str(
+                        (detail.payload.get("task") or {}).get("status", "") or ""
+                    )
+                except Exception:  # noqa: BLE001 - status probe must not mask the response
+                    task_status = ""
+            final_payload, exit_code = _exec_final_contract(
+                project_id=project_id,
+                task_id=task_id,
+                session_id=resolved_session_id,
+                mode=mode,
+                company_profile=company_profile,
+                response=response,
+                task_status=task_status,
+            )
             if stream_json:
                 _print_exec_event(
                     event_state,
@@ -1648,29 +2284,33 @@ async def _exec_message(
                     session_id=resolved_session_id,
                     payload=final_payload,
                 )
-                return
-            if json_output:
-                console.print(json.dumps(final_payload, ensure_ascii=False, indent=2, default=_json_safe))
-                return
-            if response:
+            elif json_output:
+                _print_json(final_payload)
+            elif response:
                 _print_response(response, no_markdown=no_markdown)
             else:
                 _emit_payload(final_payload)
+            if exit_code:
+                raise typer.Exit(code=exit_code)
     except ServiceError as exc:
         payload = {"ok": False, **exc.to_payload()}
         if stream_json:
-            _print_exec_event(event_state, "error", project_id=project_id, payload=payload)
+            _print_exec_event(
+                event_state, "error", project_id=project_id, payload=payload
+            )
         elif json_output:
-            console.print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe))
+            _print_json(payload)
         else:
             console.print(f"[error]{escape(exc.message)}[/error]")
         raise typer.Exit(code=1) from exc
     except ValueError as exc:
         payload = {"ok": False, "code": "invalid_argument", "error": str(exc)}
         if stream_json:
-            _print_exec_event(event_state, "error", project_id=project_id, payload=payload)
+            _print_exec_event(
+                event_state, "error", project_id=project_id, payload=payload
+            )
         elif json_output:
-            console.print(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_safe))
+            _print_json(payload)
         else:
             console.print(f"[error]{escape(str(exc))}[/error]")
         raise typer.Exit(code=2) from exc
@@ -1682,11 +2322,19 @@ app.add_typer(project_app, name="project")
 
 @project_app.command("list")
 def project_list(
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Active project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Active project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """List projects."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.project.list(active_project_id=project), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.project.list(active_project_id=project),
+            json_output=json_output,
+        )
+    )
 
 
 @project_app.command("show")
@@ -1696,52 +2344,88 @@ def project_show(
 ):
     """Show project index payload."""
     target = project or "default"
-    asyncio.run(_run_service_command(project, lambda svc: svc.project.project_index(target, include_snapshot=False), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.project.project_index(target, include_snapshot=False),
+            json_output=json_output,
+        )
+    )
 
 
 @project_app.command("create")
 def project_create(
     project_id: str = typer.Argument(..., help="Project ID to create"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Active project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Active project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Create a project."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.project.create(project_id, active_project_id=project), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.project.create(project_id, active_project_id=project),
+            json_output=json_output,
+        )
+    )
 
 
 @project_app.command("switch")
 def project_switch(
     project_id: str = typer.Argument(..., help="Project ID to prepare/switch"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Current project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Current project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Prepare and validate switching to a project."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.project.switch(project_id, include_snapshot=False), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.project.switch(project_id, include_snapshot=False),
+            json_output=json_output,
+        )
+    )
 
 
 @project_app.command("rename")
 def project_rename(
     old_project_id: str = typer.Argument(..., help="Existing project ID"),
     new_project_id: str = typer.Argument(..., help="New project ID"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Active project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Active project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Rename a project id and move its persisted project data."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.project.rename(old_project_id, new_project_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.project.rename(old_project_id, new_project_id),
+            json_output=json_output,
+        )
+    )
 
 
 @project_app.command("delete")
 def project_delete(
     project_id: str = typer.Argument(..., help="Project ID to delete"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm deletion"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Active project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Active project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Delete a project and its persisted UI/runtime data."""
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.project.delete(project_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.project.delete(project_id), json_output=json_output
+        )
+    )
 
 
 session_app = typer.Typer(help="Manage OPC sessions")
@@ -1754,7 +2438,13 @@ def session_list(
     limit: int = typer.Option(50, "--limit", "-n", help="Maximum rows"),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.list(project_id=project or "default", limit=limit), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.list(project_id=project or "default", limit=limit),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("create")
@@ -1762,12 +2452,32 @@ def session_create(
     title: str = typer.Argument("New Chat", help="Session title"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID"),
     mode: str = typer.Option("task", "--mode", help="task, company, or org"),
-    company_profile: str = typer.Option("corporate", "--company-profile", help="corporate or custom"),
-    agent: Optional[str] = typer.Option(None, "--agent", help="Preferred task-mode agent"),
-    org_id: Optional[str] = typer.Option(None, "--org", "--org-id", help="Saved org id"),
+    company_profile: str = typer.Option(
+        "corporate", "--company-profile", help="corporate or custom"
+    ),
+    agent: Optional[str] = typer.Option(
+        None, "--agent", help="Preferred task-mode agent"
+    ),
+    org_id: Optional[str] = typer.Option(
+        None, "--org", "--org-id", help="Saved org id"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.create(project_id=project or "default", title=title, exec_mode=mode, company_profile=company_profile, preferred_agent=agent, org_id=org_id, interface="cli"), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.create(
+                project_id=project or "default",
+                title=title,
+                exec_mode=mode,
+                company_profile=company_profile,
+                preferred_agent=agent,
+                org_id=org_id,
+                interface="cli",
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("show")
@@ -1777,7 +2487,18 @@ def session_show(
     limit: int = typer.Option(200, "--limit", "-n", help="Transcript limit"),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.detail(project_id=project or "default", task_id=target, session_id=target, limit=limit), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.detail(
+                project_id=project or "default",
+                task_id=target,
+                session_id=target,
+                limit=limit,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("config")
@@ -1785,12 +2506,31 @@ def session_config(
     task_id: str = typer.Argument(..., help="Task ID"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID"),
     mode: Optional[str] = typer.Option(None, "--mode", help="task, company, or org"),
-    company_profile: Optional[str] = typer.Option(None, "--company-profile", help="corporate or custom"),
-    agent: Optional[str] = typer.Option(None, "--agent", help="Preferred task-mode agent"),
-    org_id: Optional[str] = typer.Option(None, "--org", "--org-id", help="Saved org id"),
+    company_profile: Optional[str] = typer.Option(
+        None, "--company-profile", help="corporate or custom"
+    ),
+    agent: Optional[str] = typer.Option(
+        None, "--agent", help="Preferred task-mode agent"
+    ),
+    org_id: Optional[str] = typer.Option(
+        None, "--org", "--org-id", help="Saved org id"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.update_config(project_id=project or "default", task_id=task_id, exec_mode=mode, company_profile=company_profile, preferred_agent=agent, org_id=org_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.update_config(
+                project_id=project or "default",
+                task_id=task_id,
+                exec_mode=mode,
+                company_profile=company_profile,
+                preferred_agent=agent,
+                org_id=org_id,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("send")
@@ -1799,11 +2539,43 @@ def session_send(
     message: str = typer.Argument(..., help="Message to send"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID"),
     mode: str = typer.Option("task", "--mode", help="task or company"),
-    company_profile: str = typer.Option("corporate", "--company-profile", help="Company profile"),
+    company_profile: str = typer.Option(
+        "corporate", "--company-profile", help="Company profile"
+    ),
     agent: Optional[str] = typer.Option(None, "--agent", help="Preferred agent"),
+    respond_checkpoint: Optional[str] = typer.Option(
+        None,
+        "--respond-checkpoint",
+        help="Address this message to an explicit pending checkpoint id "
+        "(approval-type checkpoints only accept checkpoint-addressed replies)",
+    ),
+    reply_kind: Optional[str] = typer.Option(
+        None,
+        "--reply-kind",
+        help="Checkpoint reply kind (e.g. approve, feedback, ignore)",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.send(project_id=project or "default", task_id=task_id, content=message, mode=mode, company_profile=company_profile, preferred_agent=agent), json_output=json_output))
+    message_metadata: dict[str, Any] | None = None
+    if respond_checkpoint:
+        message_metadata = {"response_to_checkpoint_id": respond_checkpoint.strip()}
+        if reply_kind:
+            message_metadata["checkpoint_reply_kind"] = reply_kind.strip().lower()
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.send(
+                project_id=project or "default",
+                task_id=task_id,
+                content=message,
+                mode=mode,
+                company_profile=company_profile,
+                preferred_agent=agent,
+                message_metadata=message_metadata,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("rename")
@@ -1813,7 +2585,18 @@ def session_rename(
     project: Optional[str] = typer.Option(None, "--project", "-p"),
     json_output: bool = typer.Option(False, "--json"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.rename(project_id=project or "default", task_id=target, session_id=target, title=title), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.rename(
+                project_id=project or "default",
+                task_id=target,
+                session_id=target,
+                title=title,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("delete")
@@ -1826,12 +2609,32 @@ def session_delete(
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.delete(project_id=project or "default", task_id=task_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.delete(
+                project_id=project or "default", task_id=task_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("stop")
-def session_stop(target: str = typer.Argument(..., help="Task ID or session ID"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.stop(project_id=project or "default", target=target), json_output=json_output))
+def session_stop(
+    target: str = typer.Argument(..., help="Task ID or session ID"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.stop(
+                project_id=project or "default", target=target
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("continue")
@@ -1841,17 +2644,49 @@ def session_continue(
     project: Optional[str] = typer.Option(None, "--project", "-p"),
     json_output: bool = typer.Option(False, "--json"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.continue_run(project_id=project or "default", target=target, content=message or ""), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.continue_run(
+                project_id=project or "default", target=target, content=message or ""
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("resume")
-def session_resume(target: str = typer.Argument(..., help="Task ID or session ID"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.resume(project_id=project or "default", target=target), json_output=json_output))
+def session_resume(
+    target: str = typer.Argument(..., help="Task ID or session ID"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.resume(
+                project_id=project or "default", target=target
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @session_app.command("complete")
-def session_complete(task_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.session.complete(project_id=project or "default", task_id=task_id), json_output=json_output))
+def session_complete(
+    task_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.session.complete(
+                project_id=project or "default", task_id=task_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 mode_app = typer.Typer(help="Manage default execution mode")
@@ -1859,8 +2694,15 @@ app.add_typer(mode_app, name="mode")
 
 
 @mode_app.command("show")
-def mode_show(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.mode_show(), json_output=json_output))
+def mode_show(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.runtime.mode_show(), json_output=json_output
+        )
+    )
 
 
 @mode_app.command("set")
@@ -1872,7 +2714,15 @@ def mode_set(
     org_id: Optional[str] = typer.Option(None, "--org", "--org-id"),
     json_output: bool = typer.Option(False, "--json"),
 ):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.mode_set(mode=mode, profile=profile, preferred_agent=agent, org_id=org_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.runtime.mode_set(
+                mode=mode, profile=profile, preferred_agent=agent, org_id=org_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 kanban_app = typer.Typer(help="Manage kanban views and tasks")
@@ -1882,42 +2732,136 @@ app.add_typer(kanban_app, name="kanban")
 
 
 @kanban_task_app.command("create")
-def kanban_task_create(title: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), description: str = typer.Option("", "--description", "-d"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.kanban.create_task(project_id=project or "default", title=title, description=description), json_output=json_output))
+def kanban_task_create(
+    title: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    description: str = typer.Option("", "--description", "-d"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.kanban.create_task(
+                project_id=project or "default", title=title, description=description
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @kanban_task_app.command("update")
-def kanban_task_update(task_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), title: Optional[str] = typer.Option(None, "--title"), description: Optional[str] = typer.Option(None, "--description"), json_output: bool = typer.Option(False, "--json")):
-    updates = {k: v for k, v in {"title": title, "description": description}.items() if v is not None}
-    asyncio.run(_run_service_command(project, lambda svc: svc.kanban.update_task(project_id=project or "default", task_id=task_id, updates=updates), json_output=json_output))
+def kanban_task_update(
+    task_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    title: Optional[str] = typer.Option(None, "--title"),
+    description: Optional[str] = typer.Option(None, "--description"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    updates = {
+        k: v
+        for k, v in {"title": title, "description": description}.items()
+        if v is not None
+    }
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.kanban.update_task(
+                project_id=project or "default", task_id=task_id, updates=updates
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @kanban_task_app.command("move")
-def kanban_task_move(task_id: str = typer.Argument(...), column: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.kanban.move_task(project_id=project or "default", task_id=task_id, column_id=column), json_output=json_output))
+def kanban_task_move(
+    task_id: str = typer.Argument(...),
+    column: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.kanban.move_task(
+                project_id=project or "default", task_id=task_id, column_id=column
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @kanban_task_app.command("delete")
-def kanban_task_delete(task_id: str = typer.Argument(...), yes: bool = typer.Option(False, "--yes", "-y"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def kanban_task_delete(
+    task_id: str = typer.Argument(...),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.kanban.delete_task(project_id=project or "default", task_id=task_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.kanban.delete_task(
+                project_id=project or "default", task_id=task_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @kanban_task_app.command("assign")
-def kanban_task_assign(task_id: str = typer.Argument(...), agent_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.kanban.assign(project_id=project or "default", task_id=task_id, agent_id=agent_id), json_output=json_output))
+def kanban_task_assign(
+    task_id: str = typer.Argument(...),
+    agent_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.kanban.assign(
+                project_id=project or "default", task_id=task_id, agent_id=agent_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @kanban_task_app.command("status")
-def kanban_task_status(task_id: str = typer.Argument(...), status: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.kanban.status(project_id=project or "default", task_id=task_id, status=status), json_output=json_output))
+def kanban_task_status(
+    task_id: str = typer.Argument(...),
+    status: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.kanban.status(
+                project_id=project or "default", task_id=task_id, status=status
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @kanban_app.command("view")
-def kanban_view(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.project.project_index(project or "default", include_snapshot=False), json_output=json_output))
+def kanban_view(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.project.project_index(
+                project or "default", include_snapshot=False
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 agent_app = typer.Typer(help="Manage UI agents")
@@ -1925,41 +2869,131 @@ app.add_typer(agent_app, name="agent")
 
 
 @agent_app.command("list")
-def agent_list(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.agent.list(), json_output=json_output))
+def agent_list(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.agent.list(), json_output=json_output
+        )
+    )
 
 
 @agent_app.command("create")
-def agent_create(name: str = typer.Argument(...), role_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), office_id: str = typer.Option("office-0", "--office"), description: str = typer.Option("", "--description"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.agent.create(name=name, role_id=role_id, office_id=office_id, description=description), json_output=json_output))
+def agent_create(
+    name: str = typer.Argument(...),
+    role_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    office_id: str = typer.Option("office-0", "--office"),
+    description: str = typer.Option("", "--description"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.agent.create(
+                name=name, role_id=role_id, office_id=office_id, description=description
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @agent_app.command("create-from-template")
-def agent_create_from_template(template_id: str = typer.Argument(...), role_id: Optional[str] = typer.Option(None, "--role", "--role-id"), project: Optional[str] = typer.Option(None, "--project", "-p"), office_id: str = typer.Option("office-0", "--office"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.agent.create_from_template(template_id=template_id, role_id=role_id or template_id, office_id=office_id), json_output=json_output))
+def agent_create_from_template(
+    template_id: str = typer.Argument(...),
+    role_id: Optional[str] = typer.Option(None, "--role", "--role-id"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    office_id: str = typer.Option("office-0", "--office"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.agent.create_from_template(
+                template_id=template_id,
+                role_id=role_id or template_id,
+                office_id=office_id,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @agent_app.command("import-employee")
-def agent_import_employee(employee_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), office_id: str = typer.Option("office-0", "--office"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.agent.import_employee(employee_id=employee_id, office_id=office_id), json_output=json_output))
+def agent_import_employee(
+    employee_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    office_id: str = typer.Option("office-0", "--office"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.agent.import_employee(
+                employee_id=employee_id, office_id=office_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @agent_app.command("detail")
-def agent_detail(agent_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.agent.detail(project_id=project or "default", agent_id=agent_id), json_output=json_output))
+def agent_detail(
+    agent_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.agent.detail(
+                project_id=project or "default", agent_id=agent_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @agent_app.command("delete")
-def agent_delete(agent_id: str = typer.Argument(...), yes: bool = typer.Option(False, "--yes", "-y"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def agent_delete(
+    agent_id: str = typer.Argument(...),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.agent.delete(agent_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.agent.delete(agent_id), json_output=json_output
+        )
+    )
 
 
 @agent_app.command("move")
-def agent_move(agent_id: str = typer.Argument(...), office_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), seat_zone: Optional[str] = typer.Option(None, "--seat-zone"), desk_id: Optional[str] = typer.Option(None, "--desk"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.agent.move(agent_id=agent_id, office_id=office_id, seat_zone=seat_zone, desk_id=desk_id), json_output=json_output))
+def agent_move(
+    agent_id: str = typer.Argument(...),
+    office_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    seat_zone: Optional[str] = typer.Option(None, "--seat-zone"),
+    desk_id: Optional[str] = typer.Option(None, "--desk"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.agent.move(
+                agent_id=agent_id,
+                office_id=office_id,
+                seat_zone=seat_zone,
+                desk_id=desk_id,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 org_app = typer.Typer(help="Manage organization configuration")
@@ -1967,24 +3001,46 @@ app.add_typer(org_app, name="org")
 
 
 @org_app.command("info")
-def org_info(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.info(), json_output=json_output))
+def org_info(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.org.info(), json_output=json_output
+        )
+    )
 
 
 @org_app.command("export")
-def org_export(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(True, "--json/--no-json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.export_config(), json_output=json_output))
+def org_export(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(True, "--json/--no-json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.org.export_config(), json_output=json_output
+        )
+    )
 
 
 @org_app.command("import")
 def org_import(
     path: str = typer.Argument(..., help="YAML or JSON org config payload"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Validate and preview without applying"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Validate and preview without applying"
+    ),
     project: Optional[str] = typer.Option(None, "--project", "-p"),
     json_output: bool = typer.Option(False, "--json"),
 ):
     raw = Path(path).read_text(encoding="utf-8")
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.import_config(raw, dry_run=dry_run), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.org.import_config(raw, dry_run=dry_run),
+            json_output=json_output,
+        )
+    )
 
 
 org_saved_app = typer.Typer(help="Manage saved org architectures")
@@ -1992,26 +3048,106 @@ org_app.add_typer(org_saved_app, name="saved")
 
 
 @org_saved_app.command("list")
-def org_saved_list(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.saved_list(), json_output=json_output))
+def org_saved_list(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.org.saved_list(), json_output=json_output
+        )
+    )
+
+
+@org_saved_app.command("create")
+def org_saved_create(
+    organization_name: str = typer.Argument(
+        ..., help="Display name for the new custom organization"
+    ),
+    members: list[str] = typer.Option(
+        [],
+        "--member",
+        "-m",
+        help="Repeat for each member: JSON object or name|responsibility|reports_to_index",
+    ),
+    members_file: Optional[str] = typer.Option(
+        None,
+        "--members-file",
+        help="YAML/JSON member list (or object with a members list)",
+    ),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    """Create, save, and activate a custom organization from Corporate mode."""
+    try:
+        parsed_members = _parse_org_members(
+            member_specs=members, file_path=members_file
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        if json_output:
+            _print_json(
+                {"ok": False, "error": "invalid_org_members", "message": str(exc)}
+            )
+        else:
+            console.print(f"[error]{escape(str(exc))}[/error]")
+        raise typer.Exit(code=1) from exc
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: _create_and_activate_saved_org(
+                svc,
+                organization_name=organization_name,
+                members=parsed_members,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @org_saved_app.command("save")
-def org_saved_save(name: str = typer.Argument(...), overwrite: bool = typer.Option(False, "--overwrite"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.saved_save_as(name, overwrite=overwrite), json_output=json_output))
+def org_saved_save(
+    name: str = typer.Argument(...),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.org.saved_save_as(name, overwrite=overwrite),
+            json_output=json_output,
+        )
+    )
 
 
 @org_saved_app.command("load")
-def org_saved_load(name: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.saved_load(name), json_output=json_output))
+def org_saved_load(
+    name: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.org.saved_load(name), json_output=json_output
+        )
+    )
 
 
 @org_saved_app.command("delete")
-def org_saved_delete(name: str = typer.Argument(...), yes: bool = typer.Option(False, "--yes", "-y"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def org_saved_delete(
+    name: str = typer.Argument(...),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.saved_delete(name), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.org.saved_delete(name), json_output=json_output
+        )
+    )
 
 
 org_role_app = typer.Typer(help="Manage organization roles")
@@ -2019,8 +3155,28 @@ org_app.add_typer(org_role_app, name="role")
 
 
 @org_role_app.command("add")
-def org_role_add(role_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), name: Optional[str] = typer.Option(None, "--name"), responsibility: str = typer.Option("", "--responsibility"), reports_to: str = typer.Option("owner", "--reports-to"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.add_role({"role_id": role_id, "name": name or role_id, "responsibility": responsibility, "reports_to": reports_to}), json_output=json_output))
+def org_role_add(
+    role_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    name: Optional[str] = typer.Option(None, "--name"),
+    responsibility: str = typer.Option("", "--responsibility"),
+    reports_to: str = typer.Option("owner", "--reports-to"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.org.add_role(
+                {
+                    "role_id": role_id,
+                    "name": name or role_id,
+                    "responsibility": responsibility,
+                    "reports_to": reports_to,
+                }
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @org_role_app.command("update")
@@ -2030,9 +3186,15 @@ def org_role_update(
     name: Optional[str] = typer.Option(None, "--name"),
     responsibility: Optional[str] = typer.Option(None, "--responsibility"),
     reports_to: Optional[str] = typer.Option(None, "--reports-to"),
-    can_spawn: Optional[str] = typer.Option(None, "--can-spawn", help="Comma-separated role ids"),
-    tools: Optional[str] = typer.Option(None, "--tools", help="Comma-separated tool names"),
-    agent: Optional[str] = typer.Option(None, "--agent", help="Preferred external agent"),
+    can_spawn: Optional[str] = typer.Option(
+        None, "--can-spawn", help="Comma-separated role ids"
+    ),
+    tools: Optional[str] = typer.Option(
+        None, "--tools", help="Comma-separated tool names"
+    ),
+    agent: Optional[str] = typer.Option(
+        None, "--agent", help="Preferred external agent"
+    ),
     json_output: bool = typer.Option(False, "--json"),
 ):
     updates = {
@@ -2049,22 +3211,55 @@ def org_role_update(
         updates["can_spawn"] = _split_csv(can_spawn)
     if tools is not None:
         updates["tools"] = _split_csv(tools)
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.update_role(role_id, updates), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.org.update_role(role_id, updates),
+            json_output=json_output,
+        )
+    )
 
 
 @org_role_app.command("bulk-add")
-def org_role_bulk_add(path: str = typer.Argument(..., help="JSON/YAML list of role objects or object with roles"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def org_role_bulk_add(
+    path: str = typer.Argument(
+        ..., help="JSON/YAML list of role objects or object with roles"
+    ),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     loaded = _load_structured_payload(file_path=path)
-    roles = loaded.get("roles", []) if isinstance(loaded, dict) else loaded if isinstance(loaded, list) else []
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.bulk_add_roles(list(roles or [])), json_output=json_output))
+    roles = (
+        loaded.get("roles", [])
+        if isinstance(loaded, dict)
+        else loaded
+        if isinstance(loaded, list)
+        else []
+    )
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.org.bulk_add_roles(list(roles or [])),
+            json_output=json_output,
+        )
+    )
 
 
 @org_role_app.command("delete")
-def org_role_delete(role_id: str = typer.Argument(...), yes: bool = typer.Option(False, "--yes", "-y"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def org_role_delete(
+    role_id: str = typer.Argument(...),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.delete_role(role_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.org.delete_role(role_id), json_output=json_output
+        )
+    )
 
 
 org_policy_app = typer.Typer(help="Manage organization runtime policy")
@@ -2072,9 +3267,21 @@ org_app.add_typer(org_policy_app, name="policy")
 
 
 @org_policy_app.command("update")
-def org_policy_update(payload: Optional[str] = typer.Option(None, "--payload", help="JSON/YAML object"), file_path: Optional[str] = typer.Option(None, "--file", "-f"), profile: str = typer.Option("custom", "--profile"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def org_policy_update(
+    payload: Optional[str] = typer.Option(None, "--payload", help="JSON/YAML object"),
+    file_path: Optional[str] = typer.Option(None, "--file", "-f"),
+    profile: str = typer.Option("custom", "--profile"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     data = _load_structured_payload(payload=payload, file_path=file_path)
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.update_runtime_policy(data, profile=profile), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.org.update_runtime_policy(data, profile=profile),
+            json_output=json_output,
+        )
+    )
 
 
 org_strategy_app = typer.Typer(help="Manage organization strategy")
@@ -2082,16 +3289,38 @@ org_app.add_typer(org_strategy_app, name="strategy")
 
 
 @org_strategy_app.command("update")
-def org_strategy_update(final_decider_role_id: Optional[str] = typer.Option(None, "--final-decider", "--final-decider-role-id"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.update_org_strategy(final_decider_role_id=final_decider_role_id), json_output=json_output))
+def org_strategy_update(
+    final_decider_role_id: Optional[str] = typer.Option(
+        None, "--final-decider", "--final-decider-role-id"
+    ),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.org.update_org_strategy(
+                final_decider_role_id=final_decider_role_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @org_app.command("reset")
-def org_reset(yes: bool = typer.Option(False, "--yes", "-y"), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def org_reset(
+    yes: bool = typer.Option(False, "--yes", "-y"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.org.reset_architecture(), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.org.reset_architecture(), json_output=json_output
+        )
+    )
 
 
 runtime_app = typer.Typer(help="Inspect and control runtime state")
@@ -2099,23 +3328,72 @@ app.add_typer(runtime_app, name="runtime")
 
 
 @runtime_app.command("status")
-def runtime_status(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.status(project_id=project or "default"), json_output=json_output))
+def runtime_status(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.runtime.status(project_id=project or "default"),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 @runtime_app.command("checkpoints")
-def runtime_checkpoints(project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(50, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.checkpoints(project_id=project or "default", limit=limit), json_output=json_output))
+def runtime_checkpoints(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    limit: int = typer.Option(50, "--limit", "-n"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.runtime.checkpoints(
+                project_id=project or "default", limit=limit
+            ),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 @runtime_app.command("logs")
-def runtime_logs(task_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.logs(project_id=project or "default", task_id=task_id, limit=limit), json_output=json_output))
+def runtime_logs(
+    task_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    limit: int = typer.Option(100, "--limit", "-n"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.runtime.logs(
+                project_id=project or "default", task_id=task_id, limit=limit
+            ),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 @runtime_app.command("run")
-def runtime_run(task_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.runtime.run_task(project_id=project or "default", task_id=task_id), json_output=json_output))
+def runtime_run(
+    task_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.runtime.run_task(
+                project_id=project or "default", task_id=task_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 comms_app = typer.Typer(help="Inspect company-mode comms")
@@ -2123,13 +3401,40 @@ app.add_typer(comms_app, name="comms")
 
 
 @comms_app.command("state")
-def comms_state(task_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.comms.state(project_id=project or "default", task_id=task_id), json_output=json_output))
+def comms_state(
+    task_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.comms.state(
+                project_id=project or "default", task_id=task_id
+            ),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 @comms_app.command("read")
-def comms_read(task_id: str = typer.Argument(...), path: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.comms.read(project_id=project or "default", task_id=task_id, path=path), json_output=json_output))
+def comms_read(
+    task_id: str = typer.Argument(...),
+    path: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.comms.read(
+                project_id=project or "default", task_id=task_id, path=path
+            ),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 work_item_app = typer.Typer(help="Inspect company-mode work items")
@@ -2137,23 +3442,83 @@ app.add_typer(work_item_app, name="work-item")
 
 
 @work_item_app.command("list")
-def work_item_list(project: Optional[str] = typer.Option(None, "--project", "-p"), role_id: Optional[str] = typer.Option(None, "--role", "--role-id"), status: Optional[str] = typer.Option(None, "--status"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.list(project_id=project or "default", role_id=role_id, status=status, limit=limit), json_output=json_output))
+def work_item_list(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    role_id: Optional[str] = typer.Option(None, "--role", "--role-id"),
+    status: Optional[str] = typer.Option(None, "--status"),
+    limit: int = typer.Option(100, "--limit", "-n"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.work_item.list(
+                project_id=project or "default",
+                role_id=role_id,
+                status=status,
+                limit=limit,
+            ),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 @work_item_app.command("show")
-def work_item_show(work_item_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.show(project_id=project or "default", work_item_id=work_item_id, limit=limit), json_output=json_output))
+def work_item_show(
+    work_item_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    limit: int = typer.Option(100, "--limit", "-n"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.work_item.show(
+                project_id=project or "default", work_item_id=work_item_id, limit=limit
+            ),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 @work_item_app.command("logs")
-def work_item_logs(work_item_id: str = typer.Argument(""), role_id: Optional[str] = typer.Option(None, "--role", "--role-id"), project: Optional[str] = typer.Option(None, "--project", "-p"), limit: int = typer.Option(100, "--limit", "-n"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.logs(project_id=project or "default", work_item_id=work_item_id, role_id=role_id or "", limit=limit), json_output=json_output))
+def work_item_logs(
+    work_item_id: str = typer.Argument(""),
+    role_id: Optional[str] = typer.Option(None, "--role", "--role-id"),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    limit: int = typer.Option(100, "--limit", "-n"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.work_item.logs(
+                project_id=project or "default",
+                work_item_id=work_item_id,
+                role_id=role_id or "",
+                limit=limit,
+            ),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 @work_item_app.command("role-status")
-def work_item_role_status(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.work_item.status_by_role(project_id=project or "default"), json_output=json_output))
+def work_item_role_status(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.work_item.status_by_role(project_id=project or "default"),
+            json_output=json_output,
+            read_only=True,
+        )
+    )
 
 
 channels_app = typer.Typer(help="Manage external messaging channels")
@@ -2165,7 +3530,9 @@ app.add_typer(talent_app, name="talent")
 
 @talent_app.command("list")
 def talent_list(
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """List imported talent templates."""
@@ -2189,7 +3556,9 @@ def talent_list(
 
 @talent_app.command("employees")
 def talent_employees(
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """List hired employees."""
@@ -2213,8 +3582,12 @@ def talent_employees(
 
 @talent_app.command("import")
 def talent_import(
-    repo_path: str = typer.Argument(..., help="Local path to the agency-agents repository"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    repo_path: str = typer.Argument(
+        ..., help="Local path to the agency-agents repository"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Import local agency-agent markdown files into recruitable talent templates."""
@@ -2232,9 +3605,15 @@ def talent_import(
 def talent_hire(
     template_id: str = typer.Argument(..., help="Imported talent template id"),
     role_id: str = typer.Argument(..., help="Company role id to staff"),
-    employee_name: Optional[str] = typer.Option(None, "--name", help="Optional hired employee display name"),
-    employee_id: Optional[str] = typer.Option(None, "--employee-id", help="Optional employee id override"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    employee_name: Optional[str] = typer.Option(
+        None, "--name", help="Optional hired employee display name"
+    ),
+    employee_id: Optional[str] = typer.Option(
+        None, "--employee-id", help="Optional employee id override"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Hire an imported template into a company role."""
@@ -2257,27 +3636,64 @@ def talent_hire(
 
 
 @talent_app.command("scan")
-def talent_scan(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def talent_scan(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     """Scan local talent templates."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.talent.scan(), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.talent.scan(), json_output=json_output
+        )
+    )
 
 
 @talent_app.command("import-selected")
-def talent_import_selected(template_ids: list[str] = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def talent_import_selected(
+    template_ids: list[str] = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     """Import selected local talent templates."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.talent.import_selected(template_ids), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.talent.import_selected(template_ids),
+            json_output=json_output,
+        )
+    )
 
 
 @talent_app.command("employee-detail")
-def talent_employee(employee_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def talent_employee(
+    employee_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     """Show employee detail."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.talent.employee_detail(employee_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.talent.employee_detail(employee_id),
+            json_output=json_output,
+        )
+    )
 
 
 @talent_app.command("import-agent")
-def talent_import_agent(employee_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def talent_import_agent(
+    employee_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     """Import an employee as a visual office agent."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.talent.import_employee_as_agent(employee_id=employee_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.talent.import_employee_as_agent(employee_id=employee_id),
+            json_output=json_output,
+        )
+    )
 
 
 talent_employee_app = typer.Typer(help="Manage hired employees")
@@ -2285,19 +3701,44 @@ talent_app.add_typer(talent_employee_app, name="employee")
 
 
 @talent_employee_app.command("detail")
-def talent_employee_detail(employee_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.talent.employee_detail(employee_id), json_output=json_output))
+def talent_employee_detail(
+    employee_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.talent.employee_detail(employee_id),
+            json_output=json_output,
+        )
+    )
 
 
 @talent_employee_app.command("import-agent")
-def talent_employee_import_agent(employee_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), office_id: str = typer.Option("office-0", "--office"), json_output: bool = typer.Option(False, "--json")):
-    asyncio.run(_run_service_command(project, lambda svc: svc.talent.import_employee_as_agent(employee_id=employee_id, office_id=office_id), json_output=json_output))
+def talent_employee_import_agent(
+    employee_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    office_id: str = typer.Option("office-0", "--office"),
+    json_output: bool = typer.Option(False, "--json"),
+):
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.talent.import_employee_as_agent(
+                employee_id=employee_id, office_id=office_id
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
 # Market subcommands
 # ---------------------------------------------------------------------------
-market_app = typer.Typer(help="OPC Market — export, import, and manage architecture packages")
+market_app = typer.Typer(
+    help="OPC Market — export, import, and manage architecture packages"
+)
 app.add_typer(market_app, name="market")
 
 
@@ -2331,28 +3772,59 @@ def market_export(
     description: str = typer.Option("", "--desc", help="Package description"),
     version: str = typer.Option("1.0.0", "--version", help="Semantic version"),
     output_dir: str = typer.Option(".", "--output-dir", "-o", help="Output directory"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Export the current org as an .opcpkg package."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.market.export(package_id=package_id, name=name, description=description, version=version, output_dir=output_dir), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.market.export(
+                package_id=package_id,
+                name=name,
+                description=description,
+                version=version,
+                output_dir=output_dir,
+            ),
+            json_output=json_output,
+        )
+    )
 
 
 @market_app.command("browse")
-def market_browse(project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def market_browse(
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     """Browse market architecture presets."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.market.browse(), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.market.browse(), json_output=json_output
+        )
+    )
 
 
 @market_app.command("preview")
-def market_preview(preset_id: str = typer.Argument(...), project: Optional[str] = typer.Option(None, "--project", "-p"), json_output: bool = typer.Option(False, "--json")):
+def market_preview(
+    preset_id: str = typer.Argument(...),
+    project: Optional[str] = typer.Option(None, "--project", "-p"),
+    json_output: bool = typer.Option(False, "--json"),
+):
     """Preview a built-in architecture preset."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.market.preview(preset_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.market.preview(preset_id), json_output=json_output
+        )
+    )
 
 
 @market_app.command("presets")
 def market_presets(
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """List built-in architecture presets."""
@@ -2367,49 +3839,86 @@ def market_presets(
 @market_app.command("apply-preset")
 def market_apply_preset(
     preset_id: str = typer.Argument(..., help="Built-in architecture preset id"),
-    strategy: str = typer.Option("overwrite", "--strategy", "-s", help="Role id strategy: namespace or overwrite"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    strategy: str = typer.Option(
+        "overwrite", "--strategy", "-s", help="Role id strategy: namespace or overwrite"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
-    """Apply a built-in architecture preset as the active custom organization."""
+    """Apply a preset to the active custom org (create one with `opc org saved create`)."""
     if strategy not in {"namespace", "overwrite"}:
         console.print("[error]Strategy must be namespace or overwrite.[/error]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.market.apply_preset(preset_id=preset_id, strategy=strategy), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.market.apply_preset(preset_id=preset_id, strategy=strategy),
+            json_output=json_output,
+        )
+    )
 
 
 @market_app.command("install")
 def market_install(
     path: str = typer.Argument(..., help="Path to .opcpkg directory"),
-    strategy: str = typer.Option("namespace", "--strategy", "-s", help="Conflict strategy: namespace or overwrite"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    strategy: str = typer.Option(
+        "namespace",
+        "--strategy",
+        "-s",
+        help="Conflict strategy: namespace or overwrite",
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Install an .opcpkg package from a local path."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.market.install(path=path, strategy=strategy), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.market.install(path=path, strategy=strategy),
+            json_output=json_output,
+        )
+    )
 
 
 @market_app.command("list")
 def market_list(
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """List installed OPC Market packages."""
-    asyncio.run(_run_service_command(project, lambda svc: svc.market.list_installed(), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project, lambda svc: svc.market.list_installed(), json_output=json_output
+        )
+    )
 
 
 @market_app.command("uninstall")
 def market_uninstall(
     package_id: str = typer.Argument(..., help="Package id to uninstall"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Confirm uninstall"),
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project context"),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Project context"
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print JSON"),
 ):
     """Uninstall an installed OPC Market package."""
     if not yes:
         console.print("[warning]Destructive command requires --yes.[/warning]")
         raise typer.Exit(code=1)
-    asyncio.run(_run_service_command(project, lambda svc: svc.market.uninstall(package_id), json_output=json_output))
+    asyncio.run(
+        _run_service_command(
+            project,
+            lambda svc: svc.market.uninstall(package_id),
+            json_output=json_output,
+        )
+    )
 
 
 @channels_app.command("status")
@@ -2432,7 +3941,9 @@ def channels_status():
             _clear_channel_runtime_state()
 
     manager = ChannelManager(config, MessageBus())
-    console.print(f"[bold]Runtime:[/bold] {'running' if runtime_running else 'stopped'}")
+    console.print(
+        f"[bold]Runtime:[/bold] {'running' if runtime_running else 'stopped'}"
+    )
     if runtime_pid:
         console.print(f"  PID: {runtime_pid}")
     console.print("[bold]Channels:[/bold]")
@@ -2444,7 +3955,9 @@ def channels_status():
             capability = channel.describe_capability() if channel is not None else {}
             status = {
                 "name": spec.name,
-                "enabled": bool(getattr(getattr(config.channels, spec.name), "enabled", False)),
+                "enabled": bool(
+                    getattr(getattr(config.channels, spec.name), "enabled", False)
+                ),
                 "available": capability.get("available", channel is not None),
                 "configured": capability.get("configured", channel is not None),
                 "delivery_mode": capability.get("delivery_mode", spec.delivery_mode),
@@ -2467,7 +3980,9 @@ def channels_status():
 
 
 @channels_app.command("start")
-def channels_start(project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID")):
+def channels_start(
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID"),
+):
     """Start enabled channels in foreground."""
     config = _get_config()
     asyncio.run(_run_channel_runtime(config, project))
@@ -2492,7 +4007,9 @@ def channels_stop():
 
 
 @channels_app.command("login")
-def channels_login(channel: Optional[str] = typer.Argument(None, help="Optional channel name")):
+def channels_login(
+    channel: Optional[str] = typer.Argument(None, help="Optional channel name"),
+):
     """Show login/setup guidance for channels."""
     from opc.channels.provider_registry import PROVIDER_SPECS, ordered_provider_specs
 
@@ -2501,7 +4018,11 @@ def channels_login(channel: Optional[str] = typer.Argument(None, help="Optional 
         if spec is None:
             console.print(f"[warning]Unknown channel `{channel}`.[/warning]")
             return
-        requirements = ", ".join(spec.required_config_fields) if spec.required_config_fields else "no required config fields"
+        requirements = (
+            ", ".join(spec.required_config_fields)
+            if spec.required_config_fields
+            else "no required config fields"
+        )
         bridge = " Requires a companion bridge/runtime." if spec.bridge_required else ""
         console.print(
             f"[info]Configure `{channel}` in `.opc/config/channel_config.yaml`. "
@@ -2509,7 +4030,9 @@ def channels_login(channel: Optional[str] = typer.Argument(None, help="Optional 
             f"Required config: {escape(requirements)}.{bridge} Then run `opc channels start`.[/info]"
         )
         return
-    console.print("[info]Set channel credentials in .opc/config/channel_config.yaml and start the runtime with `opc channels start` or `opc run`.[/info]")
+    console.print(
+        "[info]Set channel credentials in .opc/config/channel_config.yaml and start the runtime with `opc channels start` or `opc run`.[/info]"
+    )
     for spec in ordered_provider_specs():
         bridge = " bridge-required;" if spec.bridge_required else ""
         console.print(
@@ -2519,7 +4042,9 @@ def channels_login(channel: Optional[str] = typer.Argument(None, help="Optional 
 
 
 @app.command()
-def run(project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID")):
+def run(
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Project ID"),
+):
     """Run the long-lived engine + channel runtime in foreground."""
     config = _get_config()
     asyncio.run(_run_channel_runtime(config, project))
@@ -2528,6 +4053,7 @@ def run(project: Optional[str] = typer.Option(None, "--project", "-p", help="Pro
 # ---------------------------------------------------------------------------
 # Async helpers
 # ---------------------------------------------------------------------------
+
 
 async def _single_message(
     config,
@@ -2561,12 +4087,15 @@ async def _single_message(
         console.print(f"\n[error]Error: {escape(str(e))}[/error]")
         if config.system.log_level == "DEBUG":
             import traceback
+
             console.print(escape(traceback.format_exc()))
     finally:
         await engine.shutdown()
 
 
-async def _single_secretary_message(config, message: str, project: str | None, no_markdown: bool) -> None:
+async def _single_secretary_message(
+    config, message: str, project: str | None, no_markdown: bool
+) -> None:
     engine, runtime_display = _create_cli_engine(config, project)
     try:
         await engine.initialize()
@@ -2586,6 +4115,7 @@ async def _single_secretary_message(config, message: str, project: str | None, n
         console.print(f"\n[error]Error: {escape(str(e))}[/error]")
         if config.system.log_level == "DEBUG":
             import traceback
+
             console.print(escape(traceback.format_exc()))
     finally:
         await engine.shutdown()
@@ -2607,19 +4137,25 @@ async def _propose_reorg(config, payload: str, project: str | None) -> None:
             source_role_id=str(data.get("source_role_id", "")),
             metadata={"source": "cli"},
         )
-        console.print(f"[success]Created reorg proposal:[/success] {proposal.proposal_id}")
+        console.print(
+            f"[success]Created reorg proposal:[/success] {proposal.proposal_id}"
+        )
         console.print(f"Status: {proposal.status.value}")
         console.print(f"Scope: {proposal.scope.value}")
         console.print(f"Risk: {proposal.risk_level.value}")
         console.print(f"Summary: {proposal.summary}")
         if proposal.user_confirmation_required:
             await engine._save_reorg_checkpoint(proposal)  # noqa: SLF001
-            console.print("[warning]User confirmation is required before applying this reorg.[/warning]")
+            console.print(
+                "[warning]User confirmation is required before applying this reorg.[/warning]"
+            )
     finally:
         await engine.shutdown()
 
 
-async def _approve_reorg(config, proposal_id: str, project: str | None, *, approved: bool) -> None:
+async def _approve_reorg(
+    config, proposal_id: str, project: str | None, *, approved: bool
+) -> None:
     engine, _runtime_display = _create_cli_engine(config, project)
     try:
         await engine.initialize()
@@ -2653,17 +4189,23 @@ async def _show_reorg(config, proposal_id: str, project: str | None) -> None:
         if not proposal:
             console.print(f"[warning]Unknown reorg proposal:[/warning] {proposal_id}")
             return
-        console.print(json.dumps({
-            "proposal_id": proposal.proposal_id,
-            "status": proposal.status.value,
-            "scope": proposal.scope.value,
-            "risk_level": proposal.risk_level.value,
-            "summary": proposal.summary,
-            "rationale": proposal.rationale,
-            "impact_summary": proposal.impact_summary,
-            "approval_notes": proposal.approval_notes,
-            "metadata": proposal.metadata,
-        }, ensure_ascii=False, indent=2))
+        console.print(
+            json.dumps(
+                {
+                    "proposal_id": proposal.proposal_id,
+                    "status": proposal.status.value,
+                    "scope": proposal.scope.value,
+                    "risk_level": proposal.risk_level.value,
+                    "summary": proposal.summary,
+                    "rationale": proposal.rationale,
+                    "impact_summary": proposal.impact_summary,
+                    "approval_notes": proposal.approval_notes,
+                    "metadata": proposal.metadata,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     finally:
         await engine.shutdown()
 
@@ -2781,7 +4323,9 @@ class ChatTurnController:
             mode=mode or self.state.mode,
             company_profile=company_profile or self.state.company_profile,
             org_id=self.state.org_id if org_id is None else org_id,
-            preferred_agent=self.state.preferred_agent if preferred_agent is None else preferred_agent,
+            preferred_agent=self.state.preferred_agent
+            if preferred_agent is None
+            else preferred_agent,
             domains=list(self.state.domains if domains is None else domains),
             message_metadata=dict(message_metadata),
         )
@@ -2850,7 +4394,9 @@ class ChatTurnController:
         project_scope: bool = False,
     ) -> None:
         if self.kanban_watch_active():
-            console.print("[dim]Kanban live watch is already running. Use /kanban stop to stop it.[/dim]")
+            console.print(
+                "[dim]Kanban live watch is already running. Use /kanban stop to stop it.[/dim]"
+            )
             return
         self._kanban_watch_fingerprint = initial_fingerprint
         self.kanban_watch_task = asyncio.create_task(
@@ -2861,7 +4407,11 @@ class ChatTurnController:
                 project_scope=project_scope,
             )
         )
-        scope_label = "project" if project_scope else f"session {(session_id or self.state.session_id)[:8]}"
+        scope_label = (
+            "project"
+            if project_scope
+            else f"session {(session_id or self.state.session_id)[:8]}"
+        )
         console.print(
             f"[dim]Kanban live watch started for {escape(scope_label)}. "
             "New or changed work items will appear here. Exit with /kanban stop.[/dim]"
@@ -2911,7 +4461,9 @@ class ChatTurnController:
                 self.active_task = None
                 if not self._closing and self.queue:
                     next_item = self.queue.popleft()
-                    console.print(f"[dim]Running queued input; {len(self.queue)} remaining.[/dim]")
+                    console.print(
+                        f"[dim]Running queued input; {len(self.queue)} remaining.[/dim]"
+                    )
                     self._start_item_locked(next_item)
 
     async def _kanban_watch_loop(
@@ -2933,87 +4485,381 @@ class ChatTurnController:
                 fingerprint = _kanban_items_fingerprint(items)
                 if fingerprint != self._kanban_watch_fingerprint:
                     self._kanban_watch_fingerprint = fingerprint
-                    title = "Kanban Live Update (project)" if project_scope else f"Kanban Live Update (session {(session_id or self.state.session_id)[:8]})"
+                    title = (
+                        "Kanban Live Update (project)"
+                        if project_scope
+                        else f"Kanban Live Update (session {(session_id or self.state.session_id)[:8]})"
+                    )
                     _render_kanban_items(items, title=title)
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            console.print(f"[warning]Kanban live watch stopped: {escape(str(exc))}[/warning]")
+            console.print(
+                f"[warning]Kanban live watch stopped: {escape(str(exc))}[/warning]"
+            )
 
 
 _SLASH_COMMANDS: tuple[_SlashCommandSpec, ...] = (
     _SlashCommandSpec("Chat", "/help", "Show this command list."),
     _SlashCommandSpec("Chat", "/quit", "Exit interactive chat."),
-    _SlashCommandSpec("Chat", "/queue list|drop|clear", "Inspect or edit queued prompts while a turn is running.", ("list", "drop", "clear")),
-    _SlashCommandSpec("Context", "/status", "Show project, session, mode, agent, domains, model, and cost."),
-    _SlashCommandSpec("Context", "/mode [task|company] [corporate|custom]", "Set execution mode for future messages.", ("task", "company", "corporate", "custom")),
-    _SlashCommandSpec("Context", "/agent [native|codex|claude_code|cursor|opencode|none]", "Set preferred external agent.", ("native", "codex", "claude_code", "cursor", "opencode", "none")),
-    _SlashCommandSpec("Context", "/domains [domain ...|clear]", "Set domain hints for future messages.", ("clear",)),
-    _SlashCommandSpec("Project", "/project", "Show current project, known projects, and switch/create/delete usage.", ("list", "switch", "create", "rename", "delete")),
+    _SlashCommandSpec(
+        "Chat",
+        "/queue list|drop|clear",
+        "Inspect or edit queued prompts while a turn is running.",
+        ("list", "drop", "clear"),
+    ),
+    _SlashCommandSpec(
+        "Context",
+        "/status",
+        "Show project, session, mode, agent, domains, model, and cost.",
+    ),
+    _SlashCommandSpec(
+        "Context",
+        "/mode [task|company] [corporate|custom]",
+        "Set execution mode for future messages.",
+        ("task", "company", "corporate", "custom"),
+    ),
+    _SlashCommandSpec(
+        "Context",
+        "/agent [native|codex|claude_code|cursor|opencode|none]",
+        "Set preferred external agent.",
+        ("native", "codex", "claude_code", "cursor", "opencode", "none"),
+    ),
+    _SlashCommandSpec(
+        "Context",
+        "/domains [domain ...|clear]",
+        "Set domain hints for future messages.",
+        ("clear",),
+    ),
+    _SlashCommandSpec(
+        "Project",
+        "/project",
+        "Show current project, known projects, and switch/create/delete usage.",
+        ("list", "switch", "create", "rename", "delete"),
+    ),
     _SlashCommandSpec("Project", "/project list", "List known projects."),
-    _SlashCommandSpec("Project", "/project create <id>", "Create a project through the shared Office service."),
-    _SlashCommandSpec("Project", "/project switch <id>", "Switch project and restore its latest session."),
-    _SlashCommandSpec("Project", "/project rename <old_id> <new_id>", "Rename a project id and move persisted project data."),
-    _SlashCommandSpec("Project", "/project delete <id> --yes", "Delete a project through the shared Office service."),
-    _SlashCommandSpec("Session", "/stop [task_id|session_id]", "Stop the current or selected runtime and preserve history for follow-up."),
-    _SlashCommandSpec("Session", "/continue [task_id|session_id] [message]", "Continue a stopped runtime without re-planning."),
-    _SlashCommandSpec("Session", "/session", "Show current session, recent sessions, and switch/create/delete usage.", ("list", "new", "create", "resume", "show", "config", "send", "rename", "delete", "stop", "continue", "complete")),
+    _SlashCommandSpec(
+        "Project",
+        "/project create <id>",
+        "Create a project through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Project",
+        "/project switch <id>",
+        "Switch project and restore its latest session.",
+    ),
+    _SlashCommandSpec(
+        "Project",
+        "/project rename <old_id> <new_id>",
+        "Rename a project id and move persisted project data.",
+    ),
+    _SlashCommandSpec(
+        "Project",
+        "/project delete <id> --yes",
+        "Delete a project through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/stop [task_id|session_id]",
+        "Stop the current or selected runtime and preserve history for follow-up.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/continue [task_id|session_id] [message]",
+        "Continue a stopped runtime without re-planning.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session",
+        "Show current session, recent sessions, and switch/create/delete usage.",
+        (
+            "list",
+            "new",
+            "create",
+            "resume",
+            "show",
+            "config",
+            "send",
+            "rename",
+            "delete",
+            "stop",
+            "continue",
+            "complete",
+        ),
+    ),
     _SlashCommandSpec("Session", "/session list [limit]", "List recent sessions."),
     _SlashCommandSpec("Session", "/session new", "Start a fresh conversation session."),
-    _SlashCommandSpec("Session", "/session create [title] [--mode task|company|org] [--agent ...]", "Create a task-backed session through the shared Office service."),
-    _SlashCommandSpec("Session", "/session resume <session_id>", "Resume a session in this project."),
-    _SlashCommandSpec("Session", "/session show <session_id|task_id> [--limit N] [--full]", "Show session metadata and transcript."),
-    _SlashCommandSpec("Session", "/session config <task_id> [--mode ...] [--agent ...] [--org ...]", "Update session execution config through the shared Office service."),
-    _SlashCommandSpec("Session", "/session send <task_id> <message>", "Send a message to a task-backed session through the shared Office service."),
-    _SlashCommandSpec("Session", "/session rename <task_id|session_id> <title>", "Rename a task-backed or plain session."),
-    _SlashCommandSpec("Session", "/session delete <task_id> --yes", "Hard-delete a task-backed session."),
-    _SlashCommandSpec("Session", "/session stop [task_id|session_id]", "Stop the current or selected runtime through the shared Office service."),
-    _SlashCommandSpec("Session", "/session continue [task_id|session_id] [message]", "Continue a stopped runtime through the shared Office service."),
-    _SlashCommandSpec("Session", "/session complete <task_id>", "Complete a task-backed session through the shared Office service."),
-    _SlashCommandSpec("Tasks", "/tasks [status] [--limit N] [--full]", "List current project tasks."),
-    _SlashCommandSpec("Tasks", "/task show <task_id> [--limit N] [--full]", "Show task detail and transcript.", ("show", "move", "done", "rename", "delete")),
-    _SlashCommandSpec("Tasks", "/task move <task_id> todo|in-progress|done|blocked|failed|cancelled", "Move a task through the shared transition API."),
-    _SlashCommandSpec("Tasks", "/task done <task_id>", "Mark a task done through the shared transition API."),
-    _SlashCommandSpec("Tasks", "/task rename <task_id> <title>", "Rename a task and its session title."),
-    _SlashCommandSpec("Tasks", "/task delete <task_id> --yes", "Hard-delete a task and its persisted lifecycle data."),
-    _SlashCommandSpec("Runtime", "/runtime [--limit N] [--full]", "Show live runtime, active tasks, external sessions, and checkpoints."),
-    _SlashCommandSpec("Runtime", "/logs <task_id|session_id> [--limit N] [--full]", "Show execution logs, runtime events, tools, and transcript."),
-    _SlashCommandSpec("Runtime", "/comms <task_id> [--limit N] [--full]", "Show company-mode messages, handoffs, and review notes."),
-    _SlashCommandSpec("Runtime", "/attachments [--limit N] [--full]", "List current session attachment references."),
-    _SlashCommandSpec("Runtime", "/staffing [context]", "Open the pending company staffing/agent editor or role context preview.", ("context",)),
-    _SlashCommandSpec("Board", "/kanban [once|stop|all]", "Show current-session work-item status inline and optionally watch live updates.", ("once", "stop", "all", "project", "--once", "--all")),
-    _SlashCommandSpec("Board", "/board kanban|pipeline|work-item|role|logs", "Open opc board in read-only inspector mode.", ("kanban", "pipeline", "work-item", "role", "logs")),
-    _SlashCommandSpec("Work Items", "/work-items list|show|logs|role-status", "Inspect company work items and role progress.", ("list", "show", "logs", "role-status")),
-    _SlashCommandSpec("Org", "/org", "Show or edit organization config.", ("info", "role", "policy", "strategy", "reset", "saved", "export", "import")),
-    _SlashCommandSpec("Org", "/org role add|update|delete|bulk-add", "Manage company roles through the shared Office service."),
-    _SlashCommandSpec("Org", "/org policy update --payload ...", "Update runtime policy through the shared Office service."),
-    _SlashCommandSpec("Org", "/org strategy update --final-decider <role>", "Update organization strategy."),
-    _SlashCommandSpec("Org", "/org saved list|save|load|delete", "Manage saved organization architectures."),
-    _SlashCommandSpec("Agent", "/agent list|detail|create|delete|move|import-employee", "Manage visual office agents.", ("list", "detail", "create", "delete", "move", "create-from-template", "import-employee")),
-    _SlashCommandSpec("Talent", "/talent list|employees|scan", "Browse talent templates and employees.", ("list", "employees", "scan", "import", "import-repo", "hire", "employee", "import-agent")),
-    _SlashCommandSpec("Talent", "/talent import <template_id...>", "Import local talent templates."),
-    _SlashCommandSpec("Talent", "/talent import-repo <path>", "Import talent templates from a local repo."),
-    _SlashCommandSpec("Talent", "/talent hire <template_id> <role_id> [--name ...]", "Hire a template into a role."),
-    _SlashCommandSpec("Talent", "/talent employee <employee_id>", "Show employee detail."),
-    _SlashCommandSpec("Talent", "/talent import-agent <employee_id>", "Import an employee as a visual office agent."),
-    _SlashCommandSpec("Market", "/market list", "List installed OPC Market packages.", ("browse", "preview", "list", "presets", "apply-preset", "install", "uninstall", "export")),
-    _SlashCommandSpec("Market", "/market browse|preview <preset_id>", "Browse and preview architecture presets."),
-    _SlashCommandSpec("Market", "/market presets", "List built-in architecture presets."),
-    _SlashCommandSpec("Market", "/market apply-preset <preset_id> [--strategy namespace|overwrite]", "Apply a built-in architecture preset as the active custom organization."),
-    _SlashCommandSpec("Market", "/market install <path> [--strategy namespace|overwrite]", "Install a local .opcpkg package."),
-    _SlashCommandSpec("Market", "/market uninstall <package_id> --yes", "Uninstall an OPC Market package."),
-    _SlashCommandSpec("Market", "/market export --id ... --name ...", "Export the current org as a package."),
-    _SlashCommandSpec("Reorg", "/reorg list|show|approve|deny|apply", "Manage reorg proposals.", ("list", "show", "approve", "deny", "apply")),
+    _SlashCommandSpec(
+        "Session",
+        "/session create [title] [--mode task|company|org] [--agent ...]",
+        "Create a task-backed session through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Session", "/session resume <session_id>", "Resume a session in this project."
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session show <session_id|task_id> [--limit N] [--full]",
+        "Show session metadata and transcript.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session config <task_id> [--mode ...] [--agent ...] [--org ...]",
+        "Update session execution config through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session send <task_id> <message>",
+        "Send a message to a task-backed session through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session rename <task_id|session_id> <title>",
+        "Rename a task-backed or plain session.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session delete <task_id> --yes",
+        "Hard-delete a task-backed session.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session stop [task_id|session_id]",
+        "Stop the current or selected runtime through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session continue [task_id|session_id] [message]",
+        "Continue a stopped runtime through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Session",
+        "/session complete <task_id>",
+        "Complete a task-backed session through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Tasks", "/tasks [status] [--limit N] [--full]", "List current project tasks."
+    ),
+    _SlashCommandSpec(
+        "Tasks",
+        "/task show <task_id> [--limit N] [--full]",
+        "Show task detail and transcript.",
+        ("show", "move", "done", "rename", "delete"),
+    ),
+    _SlashCommandSpec(
+        "Tasks",
+        "/task move <task_id> todo|in-progress|done|blocked|failed|cancelled",
+        "Move a task through the shared transition API.",
+    ),
+    _SlashCommandSpec(
+        "Tasks",
+        "/task done <task_id>",
+        "Mark a task done through the shared transition API.",
+    ),
+    _SlashCommandSpec(
+        "Tasks",
+        "/task rename <task_id> <title>",
+        "Rename a task and its session title.",
+    ),
+    _SlashCommandSpec(
+        "Tasks",
+        "/task delete <task_id> --yes",
+        "Hard-delete a task and its persisted lifecycle data.",
+    ),
+    _SlashCommandSpec(
+        "Runtime",
+        "/runtime [--limit N] [--full]",
+        "Show live runtime, active tasks, external sessions, and checkpoints.",
+    ),
+    _SlashCommandSpec(
+        "Runtime",
+        "/logs <task_id|session_id> [--limit N] [--full]",
+        "Show execution logs, runtime events, tools, and transcript.",
+    ),
+    _SlashCommandSpec(
+        "Runtime",
+        "/comms <task_id> [--limit N] [--full]",
+        "Show company-mode messages, handoffs, and review notes.",
+    ),
+    _SlashCommandSpec(
+        "Runtime",
+        "/attachments [--limit N] [--full]",
+        "List current session attachment references.",
+    ),
+    _SlashCommandSpec(
+        "Runtime",
+        "/staffing [context]",
+        "Open the pending company staffing/agent editor or role context preview.",
+        ("context",),
+    ),
+    _SlashCommandSpec(
+        "Board",
+        "/kanban [once|stop|all]",
+        "Show current-session work-item status inline and optionally watch live updates.",
+        ("once", "stop", "all", "project", "--once", "--all"),
+    ),
+    _SlashCommandSpec(
+        "Board",
+        "/board kanban|pipeline|work-item|role|logs",
+        "Open opc board in read-only inspector mode.",
+        ("kanban", "pipeline", "work-item", "role", "logs"),
+    ),
+    _SlashCommandSpec(
+        "Work Items",
+        "/work-items list|show|logs|role-status",
+        "Inspect company work items and role progress.",
+        ("list", "show", "logs", "role-status"),
+    ),
+    _SlashCommandSpec(
+        "Org",
+        "/org",
+        "Show or edit organization config.",
+        ("info", "role", "policy", "strategy", "reset", "saved", "export", "import"),
+    ),
+    _SlashCommandSpec(
+        "Org",
+        "/org role add|update|delete|bulk-add",
+        "Manage company roles through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Org",
+        "/org policy update --payload ...",
+        "Update runtime policy through the shared Office service.",
+    ),
+    _SlashCommandSpec(
+        "Org",
+        "/org strategy update --final-decider <role>",
+        "Update organization strategy.",
+    ),
+    _SlashCommandSpec(
+        "Org",
+        "/org saved list|create|save|load|delete",
+        "Manage saved organization architectures.",
+    ),
+    _SlashCommandSpec(
+        "Agent",
+        "/agent list|detail|create|delete|move|import-employee",
+        "Manage visual office agents.",
+        (
+            "list",
+            "detail",
+            "create",
+            "delete",
+            "move",
+            "create-from-template",
+            "import-employee",
+        ),
+    ),
+    _SlashCommandSpec(
+        "Talent",
+        "/talent list|employees|scan",
+        "Browse talent templates and employees.",
+        (
+            "list",
+            "employees",
+            "scan",
+            "import",
+            "import-repo",
+            "hire",
+            "employee",
+            "import-agent",
+        ),
+    ),
+    _SlashCommandSpec(
+        "Talent", "/talent import <template_id...>", "Import local talent templates."
+    ),
+    _SlashCommandSpec(
+        "Talent",
+        "/talent import-repo <path>",
+        "Import talent templates from a local repo.",
+    ),
+    _SlashCommandSpec(
+        "Talent",
+        "/talent hire <template_id> <role_id> [--name ...]",
+        "Hire a template into a role.",
+    ),
+    _SlashCommandSpec(
+        "Talent", "/talent employee <employee_id>", "Show employee detail."
+    ),
+    _SlashCommandSpec(
+        "Talent",
+        "/talent import-agent <employee_id>",
+        "Import an employee as a visual office agent.",
+    ),
+    _SlashCommandSpec(
+        "Market",
+        "/market list",
+        "List installed OPC Market packages.",
+        (
+            "browse",
+            "preview",
+            "list",
+            "presets",
+            "apply-preset",
+            "install",
+            "uninstall",
+            "export",
+        ),
+    ),
+    _SlashCommandSpec(
+        "Market",
+        "/market browse|preview <preset_id>",
+        "Browse and preview architecture presets.",
+    ),
+    _SlashCommandSpec(
+        "Market", "/market presets", "List built-in architecture presets."
+    ),
+    _SlashCommandSpec(
+        "Market",
+        "/market apply-preset <preset_id> [--strategy namespace|overwrite]",
+        "Apply a preset to the active custom organization.",
+    ),
+    _SlashCommandSpec(
+        "Market",
+        "/market install <path> [--strategy namespace|overwrite]",
+        "Install a local .opcpkg package.",
+    ),
+    _SlashCommandSpec(
+        "Market",
+        "/market uninstall <package_id> --yes",
+        "Uninstall an OPC Market package.",
+    ),
+    _SlashCommandSpec(
+        "Market",
+        "/market export --id ... --name ...",
+        "Export the current org as a package.",
+    ),
+    _SlashCommandSpec(
+        "Reorg",
+        "/reorg list|show|approve|deny|apply",
+        "Manage reorg proposals.",
+        ("list", "show", "approve", "deny", "apply"),
+    ),
     _SlashCommandSpec("Diagnostics", "/cost", "Show token and cost counters."),
-    _SlashCommandSpec("Diagnostics", "/checkpoints [--limit N] [--full]", "List pending execution checkpoints."),
+    _SlashCommandSpec(
+        "Diagnostics",
+        "/checkpoints [--limit N] [--full]",
+        "List pending execution checkpoints.",
+    ),
 )
 CommandSpec = _SlashCommandSpec
-_SLASH_ALIASES = {"p": "project", "s": "session", "t": "task", "checkpoint": "checkpoints", "work-item": "work-items", "workitems": "work-items"}
+_SLASH_ALIASES = {
+    "p": "project",
+    "s": "session",
+    "t": "task",
+    "checkpoint": "checkpoints",
+    "work-item": "work-items",
+    "workitems": "work-items",
+}
 
 
 def _initial_company_profile(config: OPCConfig) -> str:
-    value = str(getattr(getattr(config, "org", None), "company_profile", "") or "corporate").strip().lower()
+    value = (
+        str(getattr(getattr(config, "org", None), "company_profile", "") or "corporate")
+        .strip()
+        .lower()
+    )
     return value if value in _VALID_COMPANY_PROFILES else "corporate"
 
 
@@ -3079,7 +4925,9 @@ async def _persist_chat_context(state: _InteractiveChatState) -> None:
             )
             db.commit()
     except Exception as exc:
-        console.print(f"[warning]Could not persist CLI mode state: {escape(str(exc))}[/warning]")
+        console.print(
+            f"[warning]Could not persist CLI mode state: {escape(str(exc))}[/warning]"
+        )
 
 
 async def _restore_chat_context(
@@ -3092,7 +4940,12 @@ async def _restore_chat_context(
     persisted = await _read_persisted_chat_context(state)
     raw_mode = str(persisted.get("mode", "") or "").strip().lower()
     raw_profile = str(persisted.get("company_profile", "") or "").strip().lower()
-    raw_agent = str(persisted.get("preferred_agent", "") or "").strip().lower().replace("-", "_")
+    raw_agent = (
+        str(persisted.get("preferred_agent", "") or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
     if restore_mode:
         if raw_mode in {"company", "company_mode"}:
             state.mode = "company"
@@ -3148,7 +5001,9 @@ def _json_summary(value: Any, limit: int = 240, *, full: bool = False) -> str:
             if value.get(key):
                 return _clip_text(value.get(key), limit, full=full)
     try:
-        return _clip_text(json.dumps(value, ensure_ascii=False, default=str), limit, full=full)
+        return _clip_text(
+            json.dumps(value, ensure_ascii=False, default=str), limit, full=full
+        )
     except TypeError:
         return _clip_text(value, limit, full=full)
 
@@ -3160,7 +5015,9 @@ def _coerce_limit(value: str, *, default: int = _SLASH_DEFAULT_LIMIT) -> int:
     return max(1, min(_SLASH_MAX_LIMIT, limit))
 
 
-def _parse_limit_args(args: list[str], *, default: int = _SLASH_DEFAULT_LIMIT) -> tuple[list[str], int]:
+def _parse_limit_args(
+    args: list[str], *, default: int = _SLASH_DEFAULT_LIMIT
+) -> tuple[list[str], int]:
     remaining: list[str] = []
     limit = default
     idx = 0
@@ -3181,7 +5038,9 @@ def _parse_limit_args(args: list[str], *, default: int = _SLASH_DEFAULT_LIMIT) -
     return remaining, limit
 
 
-def _parse_view_args(args: list[str], *, default: int = _SLASH_DEFAULT_LIMIT) -> tuple[list[str], int, bool]:
+def _parse_view_args(
+    args: list[str], *, default: int = _SLASH_DEFAULT_LIMIT
+) -> tuple[list[str], int, bool]:
     remaining: list[str] = []
     full = False
     idx = 0
@@ -3224,7 +5083,11 @@ def _slash_subcommands(command: str) -> list[str]:
         if root == canonical:
             values.update(spec.subcommands)
             parts = spec.command.split()
-            if len(parts) > 1 and not parts[1].startswith("[") and not parts[1].startswith("<"):
+            if (
+                len(parts) > 1
+                and not parts[1].startswith("[")
+                and not parts[1].startswith("<")
+            ):
                 values.add(parts[1].split("|", 1)[0])
     return sorted(item for item in values if item)
 
@@ -3243,7 +5106,9 @@ class _OPCSlashCompleter:
             prefix = body.lower()
             if prefix in _slash_command_names():
                 for suggestion in _slash_subcommands(prefix):
-                    yield Completion(f"/{prefix} {suggestion}", start_position=-len(text))
+                    yield Completion(
+                        f"/{prefix} {suggestion}", start_position=-len(text)
+                    )
                 return
             for command in _slash_command_names():
                 if command.startswith(prefix):
@@ -3251,7 +5116,11 @@ class _OPCSlashCompleter:
             return
         tokens = body.split()
         command = _canonical_slash_command(tokens[0] if tokens else "")
-        prefix = "" if body.endswith(" ") else (tokens[-1].lower() if len(tokens) > 1 else "")
+        prefix = (
+            ""
+            if body.endswith(" ")
+            else (tokens[-1].lower() if len(tokens) > 1 else "")
+        )
         suggestions = _slash_subcommands(command)
         if command == "agent":
             suggestions.extend(sorted([*_VALID_PREFERRED_AGENTS, "none"]))
@@ -3273,7 +5142,9 @@ def _print_slash_help() -> None:
     table.add_column("What it does")
     for spec in _SLASH_COMMANDS:
         table.add_row(spec.group, spec.command, spec.description)
-    table.add_row("Aliases", "/p /s /t", "Short aliases for /project, /session, and /task.")
+    table.add_row(
+        "Aliases", "/p /s /t", "Short aliases for /project, /session, and /task."
+    )
     console.print(table)
 
 
@@ -3296,7 +5167,10 @@ def _print_context_status(state: _InteractiveChatState) -> None:
     table.add_row("Project", _current_project_id(state.engine))
     table.add_row("Session", state.session_id or "(none)")
     table.add_row("Mode", state.mode)
-    table.add_row("Company profile", state.company_profile if state.mode == "company" else "(inactive)")
+    table.add_row(
+        "Company profile",
+        state.company_profile if state.mode == "company" else "(inactive)",
+    )
     if state.org_id:
         table.add_row("Org", state.org_id)
     table.add_row("Preferred agent", state.preferred_agent or "(system default)")
@@ -3307,7 +5181,9 @@ def _print_context_status(state: _InteractiveChatState) -> None:
     if state.runtime_control_checkpoint_id:
         table.add_row("Runtime checkpoint", state.runtime_control_checkpoint_id)
     console.print(table)
-    console.print("[dim]Use /mode, /agent, /project, /session, /stop, or /continue to inspect and control context.[/dim]")
+    console.print(
+        "[dim]Use /mode, /agent, /project, /session, /stop, or /continue to inspect and control context.[/dim]"
+    )
 
 
 def _list_cli_project_ids(engine: Any) -> list[str]:
@@ -3344,7 +5220,9 @@ def _render_project_list(state: _InteractiveChatState) -> None:
     table.add_column("Current", justify="center")
     table.add_column("Markers")
     for project_id in _list_cli_project_ids(state.engine):
-        project_dir, project_memory, workplace = _cli_project_paths(state.engine, project_id)
+        project_dir, project_memory, workplace = _cli_project_paths(
+            state.engine, project_id
+        )
         markers: list[str] = []
         if (project_dir / "tasks.db").exists():
             markers.append("tasks")
@@ -3352,12 +5230,18 @@ def _render_project_list(state: _InteractiveChatState) -> None:
             markers.append("memory")
         if workplace.exists():
             markers.append("workplace")
-        table.add_row(project_id, "*" if project_id == current else "", ", ".join(markers) or "")
+        table.add_row(
+            project_id, "*" if project_id == current else "", ", ".join(markers) or ""
+        )
     console.print(table)
-    console.print("[dim]Switch with /project switch <id> or /project <id>. Create with /project create <id>. Rename with /project rename <old_id> <new_id>.[/dim]")
+    console.print(
+        "[dim]Switch with /project switch <id> or /project <id>. Create with /project create <id>. Rename with /project rename <old_id> <new_id>.[/dim]"
+    )
 
 
-def _render_project_picker(state: _InteractiveChatState, project_ids: list[str]) -> None:
+def _render_project_picker(
+    state: _InteractiveChatState, project_ids: list[str]
+) -> None:
     current = _current_project_id(state.engine)
     table = Table(title="Choose Project")
     table.add_column("#", justify="right", style="cyan", no_wrap=True)
@@ -3366,7 +5250,9 @@ def _render_project_picker(state: _InteractiveChatState, project_ids: list[str])
     for idx, project_id in enumerate(project_ids, start=1):
         table.add_row(str(idx), project_id, "*" if project_id == current else "")
     console.print(table)
-    console.print("[dim]Enter a number or project id. Use `new <id>` to create a project. Blank selects the current project.[/dim]")
+    console.print(
+        "[dim]Enter a number or project id. Use `new <id>` to create a project. Blank selects the current project.[/dim]"
+    )
 
 
 def _render_session_picker(sessions: list[Any]) -> None:
@@ -3389,13 +5275,19 @@ def _render_session_picker(sessions: list[Any]) -> None:
             _format_datetime(getattr(item, "updated_at", None)),
         )
     console.print(table)
-    console.print("[dim]Enter a number or session id. Press Enter, or type `new`, to create a new session.[/dim]")
+    console.print(
+        "[dim]Enter a number or session id. Press Enter, or type `new`, to create a new session.[/dim]"
+    )
 
 
-async def _load_recent_primary_sessions(store: OPCStore | None, project_id: str | None, *, limit: int = 20) -> list[Any]:
+async def _load_recent_primary_sessions(
+    store: OPCStore | None, project_id: str | None, *, limit: int = 20
+) -> list[Any]:
     if not store:
         return []
-    return await store.list_sessions(project_id=project_id or "default", parent_session_id=None, limit=limit)
+    return await store.list_sessions(
+        project_id=project_id or "default", parent_session_id=None, limit=limit
+    )
 
 
 def _session_short_id(session_id: str) -> str:
@@ -3405,7 +5297,9 @@ def _session_short_id(session_id: str) -> str:
     return f"{text[:8]}..."
 
 
-def _chat_bottom_toolbar_text(state: _InteractiveChatState, controller: ChatTurnController | None = None) -> list[tuple[str, str]]:
+def _chat_bottom_toolbar_text(
+    state: _InteractiveChatState, controller: ChatTurnController | None = None
+) -> list[tuple[str, str]]:
     profile = f" {state.company_profile}" if state.mode == "company" else ""
     org = f" org:{state.org_id}" if state.org_id else ""
     busy_hint = ""
@@ -3417,7 +5311,11 @@ def _chat_bottom_toolbar_text(state: _InteractiveChatState, controller: ChatTurn
             busy_hint = "  kanban:live exit:/kanban stop"
         elif controller.queue_depth():
             busy_hint = f"  queue:{controller.queue_depth()}"
-    runtime_hint = f"  runtime:{state.runtime_control_state}" if state.runtime_control_state else ""
+    runtime_hint = (
+        f"  runtime:{state.runtime_control_state}"
+        if state.runtime_control_state
+        else ""
+    )
     text = (
         f" project:{_current_project_id(state.engine)}"
         f"  session:{_session_short_id(state.session_id)}"
@@ -3432,15 +5330,21 @@ def _chat_bottom_toolbar_text(state: _InteractiveChatState, controller: ChatTurn
 
 
 def _print_chat_hint() -> None:
-    console.print("[dim]Hint: /mode switches mode, /agent switches agent, /project switches project, /session switches session.[/dim]")
+    console.print(
+        "[dim]Hint: /mode switches mode, /agent switches agent, /project switches project, /session switches session.[/dim]"
+    )
 
 
-async def _run_chat_office_service(state: _InteractiveChatState, operation: Any) -> dict[str, Any] | None:
+async def _run_chat_office_service(
+    state: _InteractiveChatState, operation: Any
+) -> dict[str, Any] | None:
     from opc.plugins.office_ui.services import ServiceError
     from opc.plugins.office_ui.services.factory import OfficeServiceFactory
 
     try:
-        async with OfficeServiceFactory(config=state.config, project_id=_current_project_id(state.engine)) as services:
+        async with OfficeServiceFactory(
+            config=state.config, project_id=_current_project_id(state.engine)
+        ) as services:
             result = await operation(services)
             return {"ok": True, **dict(result.payload)}
     except ServiceError as exc:
@@ -3451,8 +5355,15 @@ async def _run_chat_office_service(state: _InteractiveChatState, operation: Any)
         return None
 
 
-async def _run_chat_current_office_service(state: _InteractiveChatState, operation: Any) -> dict[str, Any] | None:
-    from opc.plugins.office_ui.services import ModeState, OfficeServiceContext, OfficeServices, ServiceError
+async def _run_chat_current_office_service(
+    state: _InteractiveChatState, operation: Any
+) -> dict[str, Any] | None:
+    from opc.plugins.office_ui.services import (
+        ModeState,
+        OfficeServiceContext,
+        OfficeServices,
+        ServiceError,
+    )
 
     try:
         context = OfficeServiceContext(
@@ -3478,12 +5389,16 @@ async def _run_chat_current_office_service(state: _InteractiveChatState, operati
         return None
 
 
-async def _switch_chat_project(state: _InteractiveChatState, project_id: str, *, restore_session: bool = True) -> None:
+async def _switch_chat_project(
+    state: _InteractiveChatState, project_id: str, *, restore_session: bool = True
+) -> None:
     if not project_id:
         console.print("[warning]Usage: /project switch <id>[/warning]")
         return
     if not _safe_project_id(project_id):
-        console.print("[warning]Invalid project id. Use letters, numbers, hyphens, and underscores.[/warning]")
+        console.print(
+            "[warning]Invalid project id. Use letters, numbers, hyphens, and underscores.[/warning]"
+        )
         return
     if not _cli_project_exists(state.engine, project_id):
         console.print(f"[warning]Project does not exist: {project_id}[/warning]")
@@ -3512,22 +5427,32 @@ async def _switch_chat_project(state: _InteractiveChatState, project_id: str, *,
         console.print(f"[info]Started a new session: {state.session_id}[/info]")
 
 
-async def _create_and_switch_chat_project(state: _InteractiveChatState, project_id: str) -> bool:
+async def _create_and_switch_chat_project(
+    state: _InteractiveChatState, project_id: str
+) -> bool:
     if not _safe_project_id(project_id):
-        console.print("[warning]Invalid project id. Use letters, numbers, hyphens, and underscores.[/warning]")
+        console.print(
+            "[warning]Invalid project id. Use letters, numbers, hyphens, and underscores.[/warning]"
+        )
         return False
     payload = await _run_chat_office_service(
         state,
-        lambda svc: svc.project.create(project_id, active_project_id=_current_project_id(state.engine)),
+        lambda svc: svc.project.create(
+            project_id, active_project_id=_current_project_id(state.engine)
+        ),
     )
     if not payload:
         return False
-    console.print(f"[success]Created project: {payload.get('project_id') or project_id}[/success]")
+    console.print(
+        f"[success]Created project: {payload.get('project_id') or project_id}[/success]"
+    )
     await _switch_chat_project(state, project_id, restore_session=False)
     return True
 
 
-async def _choose_initial_project(state: _InteractiveChatState, *, explicit_project: bool = False) -> None:
+async def _choose_initial_project(
+    state: _InteractiveChatState, *, explicit_project: bool = False
+) -> None:
     if explicit_project:
         console.print(f"[info]Project: {_current_project_id(state.engine)}[/info]")
         return
@@ -3554,9 +5479,16 @@ async def _choose_initial_project(state: _InteractiveChatState, *, explicit_proj
                 console.print(f"[warning]Could not parse command: {exc}[/warning]")
                 continue
             subcommand = project_args[0].lower() if project_args else ""
-            if subcommand in {"switch", "use"} and _current_project_id(state.engine) != before_project:
+            if (
+                subcommand in {"switch", "use"}
+                and _current_project_id(state.engine) != before_project
+            ):
                 return
-            if len(project_args) == 1 and subcommand not in {"list", "ls", "create", "new", "delete", "rm"} and _current_project_id(state.engine) != before_project:
+            if (
+                len(project_args) == 1
+                and subcommand not in {"list", "ls", "create", "new", "delete", "rm"}
+                and _current_project_id(state.engine) != before_project
+            ):
                 return
             continue
         new_prefixes = ("new ", "create ", "+ ")
@@ -3571,14 +5503,18 @@ async def _choose_initial_project(state: _InteractiveChatState, *, explicit_proj
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(project_ids):
-                await _switch_chat_project(state, project_ids[idx - 1], restore_session=False)
+                await _switch_chat_project(
+                    state, project_ids[idx - 1], restore_session=False
+                )
                 return
             console.print("[warning]Invalid project number.[/warning]")
             continue
         if choice in project_ids or _cli_project_exists(state.engine, choice):
             await _switch_chat_project(state, choice, restore_session=False)
             return
-        console.print(f"[warning]Project not found: {choice}. Type `new {choice}` to create it.[/warning]")
+        console.print(
+            f"[warning]Project not found: {choice}. Type `new {choice}` to create it.[/warning]"
+        )
 
 
 async def _choose_initial_session(state: _InteractiveChatState) -> None:
@@ -3615,22 +5551,37 @@ async def _choose_initial_session(state: _InteractiveChatState) -> None:
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(sessions):
-                await _resume_chat_session(state, str(getattr(sessions[idx - 1], "session_id", "") or ""))
+                await _resume_chat_session(
+                    state, str(getattr(sessions[idx - 1], "session_id", "") or "")
+                )
                 return
             console.print("[warning]Invalid session number.[/warning]")
             continue
-        matching = next((item for item in sessions if str(getattr(item, "session_id", "") or "") == choice), None)
+        matching = next(
+            (
+                item
+                for item in sessions
+                if str(getattr(item, "session_id", "") or "") == choice
+            ),
+            None,
+        )
         if matching:
             await _resume_chat_session(state, choice)
             return
-        console.print(f"[warning]Session not found: {choice}. Type `new` to create a new session.[/warning]")
+        console.print(
+            f"[warning]Session not found: {choice}. Type `new` to create a new session.[/warning]"
+        )
 
 
-async def _run_interactive_startup_selector(state: _InteractiveChatState, *, explicit_project: bool = False) -> None:
+async def _run_interactive_startup_selector(
+    state: _InteractiveChatState, *, explicit_project: bool = False
+) -> None:
     await _choose_initial_project(state, explicit_project=explicit_project)
     state.session_id = ""
     await _choose_initial_session(state)
-    profile = f" company_profile={state.company_profile}" if state.mode == "company" else ""
+    profile = (
+        f" company_profile={state.company_profile}" if state.mode == "company" else ""
+    )
     console.print(
         f"[success]Ready:[/success] project={_current_project_id(state.engine)} "
         f"session={state.session_id} mode={state.mode}{profile} agent={state.preferred_agent or 'system'}"
@@ -3640,9 +5591,13 @@ async def _run_interactive_startup_selector(state: _InteractiveChatState, *, exp
 
 async def _handle_project_slash(state: _InteractiveChatState, args: list[str]) -> None:
     if not args:
-        console.print(f"[info]Current project: {_current_project_id(state.engine)}[/info]")
+        console.print(
+            f"[info]Current project: {_current_project_id(state.engine)}[/info]"
+        )
         _render_project_list(state)
-        console.print("[dim]Use /project list, /project switch <id>, /project <id>, /project create <id>, /project rename <old_id> <new_id>, or /project delete <id> --yes.[/dim]")
+        console.print(
+            "[dim]Use /project list, /project switch <id>, /project <id>, /project create <id>, /project rename <old_id> <new_id>, or /project delete <id> --yes.[/dim]"
+        )
         return
     subcommand = args[0].lower()
     if subcommand in {"list", "ls"}:
@@ -3652,9 +5607,16 @@ async def _handle_project_slash(state: _InteractiveChatState, args: list[str]) -
         if len(args) < 2:
             console.print("[warning]Usage: /project create <id>[/warning]")
             return
-        payload = await _run_chat_office_service(state, lambda svc: svc.project.create(args[1], active_project_id=_current_project_id(state.engine)))
+        payload = await _run_chat_office_service(
+            state,
+            lambda svc: svc.project.create(
+                args[1], active_project_id=_current_project_id(state.engine)
+            ),
+        )
         if payload:
-            console.print(f"[success]Created project: {payload.get('project_id')}[/success]")
+            console.print(
+                f"[success]Created project: {payload.get('project_id')}[/success]"
+            )
         return
     if subcommand in {"rename", "mv"}:
         if len(args) < 3:
@@ -3662,9 +5624,13 @@ async def _handle_project_slash(state: _InteractiveChatState, args: list[str]) -
             return
         old_id, new_id = args[1], args[2]
         renaming_current = old_id == _current_project_id(state.engine)
-        payload = await _run_chat_office_service(state, lambda svc: svc.project.rename(old_id, new_id))
+        payload = await _run_chat_office_service(
+            state, lambda svc: svc.project.rename(old_id, new_id)
+        )
         if payload:
-            console.print(f"[success]Renamed project:[/success] {payload.get('old_project_id')} -> {payload.get('new_project_id') or payload.get('project_id')}")
+            console.print(
+                f"[success]Renamed project:[/success] {payload.get('old_project_id')} -> {payload.get('new_project_id') or payload.get('project_id')}"
+            )
             if renaming_current:
                 await _switch_chat_project(state, new_id)
         return
@@ -3676,9 +5642,13 @@ async def _handle_project_slash(state: _InteractiveChatState, args: list[str]) -
         if remaining or not ok:
             return
         deleting_current = args[1] == _current_project_id(state.engine)
-        payload = await _run_chat_office_service(state, lambda svc: svc.project.delete(args[1]))
+        payload = await _run_chat_office_service(
+            state, lambda svc: svc.project.delete(args[1])
+        )
         if payload:
-            console.print(f"[success]Deleted project: {payload.get('project_id')}[/success]")
+            console.print(
+                f"[success]Deleted project: {payload.get('project_id')}[/success]"
+            )
             if deleting_current:
                 await _switch_chat_project(state, "default")
         return
@@ -3691,7 +5661,9 @@ async def _handle_project_slash(state: _InteractiveChatState, args: list[str]) -
     if len(args) == 1:
         await _switch_chat_project(state, args[0])
         return
-    console.print("[warning]Usage: /project [list|create <id>|rename <old_id> <new_id>|switch <id>|delete <id> --yes][/warning]")
+    console.print(
+        "[warning]Usage: /project [list|create <id>|rename <old_id> <new_id>|switch <id>|delete <id> --yes][/warning]"
+    )
 
 
 async def _render_sessions(state: _InteractiveChatState, args: list[str]) -> None:
@@ -3736,7 +5708,9 @@ async def _render_sessions(state: _InteractiveChatState, args: list[str]) -> Non
             _format_datetime(getattr(item, "updated_at", None)),
         )
     console.print(table)
-    console.print("[dim]Switch with /session resume <session_id> or /session <session_id>. Create with /session new.[/dim]")
+    console.print(
+        "[dim]Switch with /session resume <session_id> or /session <session_id>. Create with /session new.[/dim]"
+    )
 
 
 async def _resume_chat_session(state: _InteractiveChatState, session_id: str) -> None:
@@ -3806,14 +5780,18 @@ def _render_transcript_table(transcript: list[dict[str, Any]], *, limit: int) ->
             "user": "You",
             "assistant": "OPC",
             "system": "System",
-            "subagent": agent_id.replace("_", " ").replace("-", " ").title() if agent_id else "Subagent",
+            "subagent": agent_id.replace("_", " ").replace("-", " ").title()
+            if agent_id
+            else "Subagent",
         }.get(role, agent_id or role.title() or "OPC")
-        rows.append((
-            _format_datetime(getattr(message, "created_at", None)),
-            role or "assistant",
-            sender,
-            _clip_text(content),
-        ))
+        rows.append(
+            (
+                _format_datetime(getattr(message, "created_at", None)),
+                role or "assistant",
+                sender,
+                _clip_text(content),
+            )
+        )
     rows = rows[-limit:]
     if not rows:
         console.print("[info]No transcript messages found.[/info]")
@@ -3828,7 +5806,9 @@ def _render_transcript_table(transcript: list[dict[str, Any]], *, limit: int) ->
     console.print(table)
 
 
-async def _resolve_session_or_task(state: _InteractiveChatState, token: str) -> tuple[Any | None, Any | None, str]:
+async def _resolve_session_or_task(
+    state: _InteractiveChatState, token: str
+) -> tuple[Any | None, Any | None, str]:
     store = getattr(state.engine, "store", None)
     if not store:
         return None, None, ""
@@ -3843,15 +5823,21 @@ async def _resolve_session_or_task(state: _InteractiveChatState, token: str) -> 
     return session, task, session_id
 
 
-async def _resolve_runtime_control_target(state: _InteractiveChatState, target: str = "") -> tuple[str, str]:
-    from opc.layer2_organization.company_runtime_identity import load_company_runtime_identity_index
+async def _resolve_runtime_control_target(
+    state: _InteractiveChatState, target: str = ""
+) -> tuple[str, str]:
+    from opc.layer2_organization.company_runtime_identity import (
+        load_company_runtime_identity_index,
+    )
 
     store = _require_chat_store(state, label="Session store")
     if store is None:
         return "", ""
     raw_target = str(target or "").strip() or str(state.session_id or "").strip()
     if not raw_target:
-        console.print("[warning]No current session. Use /session list or /session create first.[/warning]")
+        console.print(
+            "[warning]No current session. Use /session list or /session create first.[/warning]"
+        )
         return "", ""
     project_id = _current_project_id(state.engine)
     identity_index = await load_company_runtime_identity_index(store, project_id)
@@ -3859,34 +5845,43 @@ async def _resolve_runtime_control_target(state: _InteractiveChatState, target: 
     if task is not None:
         task_project_id = str(getattr(task, "project_id", "") or "default")
         if task_project_id != project_id:
-            console.print(f"[warning]Target belongs to project '{task_project_id}'. Switch project first.[/warning]")
+            console.print(
+                f"[warning]Target belongs to project '{task_project_id}'. Switch project first.[/warning]"
+            )
             return "", ""
         runtime_identity = identity_index.resolve(task_id=raw_target)
         if runtime_identity is not None:
             return raw_target, runtime_identity.runtime_session_id
-        return str(getattr(task, "id", "") or ""), str(getattr(task, "session_id", "") or getattr(task, "parent_session_id", "") or "")
-    runtime_identity = (
-        identity_index.resolve(runtime_session_id=raw_target)
-        or identity_index.resolve(task_session_id=raw_target)
-    )
+        return str(getattr(task, "id", "") or ""), str(
+            getattr(task, "session_id", "")
+            or getattr(task, "parent_session_id", "")
+            or ""
+        )
+    runtime_identity = identity_index.resolve(
+        runtime_session_id=raw_target
+    ) or identity_index.resolve(task_session_id=raw_target)
     if runtime_identity is not None:
         control_task_id = (
-            runtime_identity.ui_anchor_task_id
-            or runtime_identity.config_source_task_id
+            runtime_identity.ui_anchor_task_id or runtime_identity.config_source_task_id
         )
         if control_task_id:
             return control_task_id, runtime_identity.runtime_session_id
-    session = await store.get_session(raw_target) if hasattr(store, "get_session") else None
+    session = (
+        await store.get_session(raw_target) if hasattr(store, "get_session") else None
+    )
     if session is None:
         console.print(f"[warning]Task or session not found: {raw_target}[/warning]")
         return "", ""
     session_project_id = str(getattr(session, "project_id", "") or "default")
     if session_project_id != project_id:
-        console.print(f"[warning]Target belongs to project '{session_project_id}'. Switch project first.[/warning]")
+        console.print(
+            f"[warning]Target belongs to project '{session_project_id}'. Switch project first.[/warning]"
+        )
         return "", ""
     tasks = list(identity_index.tasks)
     candidates = [
-        item for item in tasks
+        item
+        for item in tasks
         if str(getattr(item, "session_id", "") or "") == raw_target
     ]
     if not candidates:
@@ -3903,7 +5898,9 @@ async def _resolve_runtime_control_target(state: _InteractiveChatState, target: 
     return str(getattr(task_mode_anchor, "id", "") or ""), raw_target
 
 
-def _make_cli_runtime_control_context(state: _InteractiveChatState, controller: ChatTurnController | None = None) -> Any:
+def _make_cli_runtime_control_context(
+    state: _InteractiveChatState, controller: ChatTurnController | None = None
+) -> Any:
     from opc.plugins.office_ui.services import ModeState, OfficeServiceContext
 
     context = OfficeServiceContext(
@@ -3921,7 +5918,11 @@ def _make_cli_runtime_control_context(state: _InteractiveChatState, controller: 
     context.active_runtime_children = state.active_runtime_children
 
     def cancel_session_tasks(_task_id: str) -> None:
-        if controller is not None and controller.active_task is not None and not controller.active_task.done():
+        if (
+            controller is not None
+            and controller.active_task is not None
+            and not controller.active_task.done()
+        ):
             controller.active_task.cancel()
 
     context.cancel_session_tasks = cancel_session_tasks
@@ -3948,10 +5949,9 @@ async def _company_runtime_identity_for_session(
         # The interactive session may be a role/work-item session.  Resolve it
         # as a task session after trying the canonical root session so both UI
         # roots and child channels converge on the same company runtime.
-        identity = (
-            identity_index.resolve(runtime_session_id=runtime_session_id)
-            or identity_index.resolve(task_session_id=runtime_session_id)
-        )
+        identity = identity_index.resolve(
+            runtime_session_id=runtime_session_id
+        ) or identity_index.resolve(task_session_id=runtime_session_id)
     except Exception:
         return None
     return identity
@@ -3990,7 +5990,11 @@ async def _company_runtime_execution_identity(
     )
 
 
-async def _handle_stop_slash(state: _InteractiveChatState, args: list[str], controller: ChatTurnController | None = None) -> None:
+async def _handle_stop_slash(
+    state: _InteractiveChatState,
+    args: list[str],
+    controller: ChatTurnController | None = None,
+) -> None:
     if len(args) > 1:
         console.print("[warning]Usage: /stop [task_id|session_id][/warning]")
         return
@@ -4002,20 +6006,35 @@ async def _handle_stop_slash(state: _InteractiveChatState, args: list[str], cont
 
     context = _make_cli_runtime_control_context(state, controller)
     try:
-        result = await OfficeServices(context).session.stop(project_id=_current_project_id(state.engine), target=target or session_id or task_id)
+        result = await OfficeServices(context).session.stop(
+            project_id=_current_project_id(state.engine),
+            target=target or session_id or task_id,
+        )
     except ServiceError as exc:
         console.print(f"[warning]{escape(exc.message)}[/warning]")
         return
     payload = dict(result.payload)
-    state.runtime_control_state = str(payload.get("runtime_control_state") or payload.get("status") or "stopped")
+    state.runtime_control_state = str(
+        payload.get("runtime_control_state") or payload.get("status") or "stopped"
+    )
     state.runtime_control_task_id = str(payload.get("task_id") or task_id)
-    state.runtime_control_session_id = str(payload.get("resume_parent_session_id") or payload.get("session_id") or session_id)
+    state.runtime_control_session_id = str(
+        payload.get("resume_parent_session_id")
+        or payload.get("session_id")
+        or session_id
+    )
     state.runtime_control_checkpoint_id = str(payload.get("checkpoint_id") or "")
-    console.print("[success]Stopped.[/success] [dim]Send a message to revise, or /continue to resume.[/dim]")
+    console.print(
+        "[success]Stopped.[/success] [dim]Send a message to revise, or /continue to resume.[/dim]"
+    )
 
 
-async def _runtime_control_execution_identity(state: _InteractiveChatState, task_id: str) -> Any:
-    from opc.layer2_organization.company_runtime_identity import load_company_runtime_identity_index
+async def _runtime_control_execution_identity(
+    state: _InteractiveChatState, task_id: str
+) -> Any:
+    from opc.layer2_organization.company_runtime_identity import (
+        load_company_runtime_identity_index,
+    )
     from opc.plugins.office_ui.execution_identity import execution_identity_from_task
 
     store = getattr(state.engine, "store", None)
@@ -4028,7 +6047,9 @@ async def _runtime_control_execution_identity(state: _InteractiveChatState, task
             )
             runtime_identity = identity_index.resolve(task_id=task_id)
             task = identity_index.task(
-                runtime_identity.config_source_task_id if runtime_identity is not None else task_id
+                runtime_identity.config_source_task_id
+                if runtime_identity is not None
+                else task_id
             )
         except Exception:
             task = None
@@ -4046,7 +6067,11 @@ async def _runtime_control_execution_identity(state: _InteractiveChatState, task
     )
 
 
-async def _handle_continue_slash(state: _InteractiveChatState, args: list[str], controller: ChatTurnController | None = None) -> None:
+async def _handle_continue_slash(
+    state: _InteractiveChatState,
+    args: list[str],
+    controller: ChatTurnController | None = None,
+) -> None:
     target = ""
     message_parts = list(args)
     if message_parts:
@@ -4055,7 +6080,12 @@ async def _handle_continue_slash(state: _InteractiveChatState, args: list[str], 
         is_target = False
         if store is not None:
             try:
-                is_target = bool((hasattr(store, "get_task") and await store.get_task(first)) or (hasattr(store, "get_session") and await store.get_session(first)))
+                is_target = bool(
+                    (hasattr(store, "get_task") and await store.get_task(first))
+                    or (
+                        hasattr(store, "get_session") and await store.get_session(first)
+                    )
+                )
             except Exception:
                 is_target = False
         if is_target:
@@ -4072,12 +6102,19 @@ async def _handle_continue_slash(state: _InteractiveChatState, args: list[str], 
         )
         return
     if controller is not None and controller.is_busy:
-        if checkpoint is None and state.runtime_control_state not in {"suspended", "stopped"}:
-            console.print("[warning]Busy: wait for the current turn or /stop it before /continue.[/warning]")
+        if checkpoint is None and state.runtime_control_state not in {
+            "suspended",
+            "stopped",
+        }:
+            console.print(
+                "[warning]Busy: wait for the current turn or /stop it before /continue.[/warning]"
+            )
             return
     metadata: dict[str, Any] = {"ui_force_resume": True}
     if checkpoint is not None:
-        metadata["response_to_checkpoint_id"] = str(getattr(checkpoint, "checkpoint_id", "") or "")
+        metadata["response_to_checkpoint_id"] = str(
+            getattr(checkpoint, "checkpoint_id", "") or ""
+        )
         metadata["response_to_checkpoint_type"] = str(
             getattr(checkpoint, "checkpoint_type", "") or "company_runtime_suspended"
         )
@@ -4095,7 +6132,9 @@ async def _handle_continue_slash(state: _InteractiveChatState, args: list[str], 
     state.runtime_control_state = "resuming"
     state.runtime_control_task_id = task_id
     state.runtime_control_session_id = session_id or state.session_id
-    state.runtime_control_checkpoint_id = str(getattr(checkpoint, "checkpoint_id", "") or "")
+    state.runtime_control_checkpoint_id = str(
+        getattr(checkpoint, "checkpoint_id", "") or ""
+    )
     if controller is not None:
         await controller.submit_item(item)
     else:
@@ -4110,7 +6149,9 @@ async def _handle_continue_slash(state: _InteractiveChatState, args: list[str], 
         state.org_id = identity.org_id
         state.preferred_agent = identity.preferred_agent
         try:
-            await _process_interactive_chat_message(state, content, message_metadata=metadata)
+            await _process_interactive_chat_message(
+                state, content, message_metadata=metadata
+            )
         finally:
             state.session_id = previous_session_id
             state.mode = previous_mode
@@ -4129,15 +6170,23 @@ async def _show_session_detail(state: _InteractiveChatState, args: list[str]) ->
         console.print(f"[warning]{exc}[/warning]")
         return
     if not args:
-        console.print("[warning]Usage: /session show <session_id|task_id> [--limit N] [--full][/warning]")
+        console.print(
+            "[warning]Usage: /session show <session_id|task_id> [--limit N] [--full][/warning]"
+        )
         return
     session, task, session_id = await _resolve_session_or_task(state, args[0])
     if not session_id:
         console.print(f"[warning]Session or task not found: {args[0]}[/warning]")
         return
-    project_id = str(getattr(session, "project_id", None) or getattr(task, "project_id", None) or "default")
+    project_id = str(
+        getattr(session, "project_id", None)
+        or getattr(task, "project_id", None)
+        or "default"
+    )
     if project_id != _current_project_id(state.engine):
-        console.print(f"[warning]Target belongs to project '{project_id}'. Switch project first.[/warning]")
+        console.print(
+            f"[warning]Target belongs to project '{project_id}'. Switch project first.[/warning]"
+        )
         return
     table = Table(title=f"Session {session_id}", show_header=False)
     table.add_column("Field", style="cyan", no_wrap=True)
@@ -4146,9 +6195,15 @@ async def _show_session_detail(state: _InteractiveChatState, args: list[str]) ->
     table.add_row("Project", project_id)
     if task:
         table.add_row("Task", str(getattr(task, "id", "") or ""))
-        table.add_row("Task title", _clip_text(getattr(task, "title", "") or "(untitled)", 120, full=full))
+        table.add_row(
+            "Task title",
+            _clip_text(getattr(task, "title", "") or "(untitled)", 120, full=full),
+        )
     if session:
-        table.add_row("Title", _clip_text(getattr(session, "title", "") or "(untitled)", 120, full=full))
+        table.add_row(
+            "Title",
+            _clip_text(getattr(session, "title", "") or "(untitled)", 120, full=full),
+        )
         table.add_row("Mode", str(getattr(session, "mode", "") or ""))
         table.add_row("Status", str(getattr(session, "status", "") or ""))
         table.add_row("Updated", _format_datetime(getattr(session, "updated_at", None)))
@@ -4157,16 +6212,34 @@ async def _show_session_detail(state: _InteractiveChatState, args: list[str]) ->
     _render_transcript_table(transcript, limit=limit)
 
 
-async def _handle_session_slash(state: _InteractiveChatState, args: list[str], controller: ChatTurnController | None = None) -> None:
+async def _handle_session_slash(
+    state: _InteractiveChatState,
+    args: list[str],
+    controller: ChatTurnController | None = None,
+) -> None:
     if not args:
         console.print(f"[info]Current session: {state.session_id}[/info]")
         await _render_sessions(state, [])
-        console.print("[dim]Use /session list, /session resume <session_id>, /session <session_id>, /session new, /session create [title], or /session delete <task_id> --yes.[/dim]")
+        console.print(
+            "[dim]Use /session list, /session resume <session_id>, /session <session_id>, /session new, /session create [title], or /session delete <task_id> --yes.[/dim]"
+        )
         return
     subcommand = args[0].lower()
     rest = args[1:]
     known_subcommands = {
-        "list", "ls", "new", "create", "resume", "show", "config", "send", "rename", "delete", "stop", "continue", "complete",
+        "list",
+        "ls",
+        "new",
+        "create",
+        "resume",
+        "show",
+        "config",
+        "send",
+        "rename",
+        "delete",
+        "stop",
+        "continue",
+        "complete",
     }
     if len(args) == 1 and subcommand not in known_subcommands:
         await _resume_chat_session(state, args[0])
@@ -4180,8 +6253,12 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
     if subcommand == "create":
         try:
             rest, mode = _extract_option(rest, "--mode", default=state.mode)
-            rest, profile = _extract_option(rest, "--company-profile", default=state.company_profile)
-            rest, agent = _extract_option(rest, "--agent", default=state.preferred_agent)
+            rest, profile = _extract_option(
+                rest, "--company-profile", default=state.company_profile
+            )
+            rest, agent = _extract_option(
+                rest, "--agent", default=state.preferred_agent
+            )
             rest, org_id = _extract_option(rest, "--org", default=None)
         except ValueError as exc:
             console.print(f"[warning]{exc}[/warning]")
@@ -4201,7 +6278,9 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
         )
         if payload:
             state.session_id = str(payload.get("session_id") or state.session_id)
-            console.print(f"[success]Created session:[/success] {state.session_id} task={payload.get('task_id')}")
+            console.print(
+                f"[success]Created session:[/success] {state.session_id} task={payload.get('task_id')}"
+            )
         return
     if subcommand == "resume":
         await _resume_chat_session(state, rest[0] if rest else "")
@@ -4211,7 +6290,9 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
         return
     if subcommand == "config":
         if not rest:
-            console.print("[warning]Usage: /session config <task_id> [--mode ...] [--agent ...] [--org ...][/warning]")
+            console.print(
+                "[warning]Usage: /session config <task_id> [--mode ...] [--agent ...] [--org ...][/warning]"
+            )
             return
         task_id = rest[0]
         opts = rest[1:]
@@ -4224,7 +6305,9 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
             console.print(f"[warning]{exc}[/warning]")
             return
         if opts:
-            console.print("[warning]Usage: /session config <task_id> [--mode ...] [--agent ...] [--org ...][/warning]")
+            console.print(
+                "[warning]Usage: /session config <task_id> [--mode ...] [--agent ...] [--org ...][/warning]"
+            )
             return
         payload = await _run_chat_office_service(
             state,
@@ -4263,7 +6346,9 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
         return
     if subcommand == "rename":
         if len(rest) < 2:
-            console.print("[warning]Usage: /session rename <task_id|session_id> <title>[/warning]")
+            console.print(
+                "[warning]Usage: /session rename <task_id|session_id> <title>[/warning]"
+            )
             return
         await _rename_task_and_session(state, rest[0], " ".join(rest[1:]))
         return
@@ -4271,7 +6356,9 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
         if not rest:
             console.print("[warning]Usage: /session delete <task_id> --yes[/warning]")
             return
-        await _delete_task_and_session(state, rest[0], rest[1:], usage="/session delete <task_id> --yes")
+        await _delete_task_and_session(
+            state, rest[0], rest[1:], usage="/session delete <task_id> --yes"
+        )
         return
     if subcommand == "stop":
         await _handle_stop_slash(state, rest, controller=controller)
@@ -4283,23 +6370,40 @@ async def _handle_session_slash(state: _InteractiveChatState, args: list[str], c
         if not rest:
             console.print("[warning]Usage: /session complete <task_id>[/warning]")
             return
-        operation = lambda svc: svc.session.complete(project_id=_current_project_id(state.engine), task_id=rest[0])
+
+        async def operation(svc: Any) -> Any:
+            return await svc.session.complete(
+                project_id=_current_project_id(state.engine),
+                task_id=rest[0],
+            )
+
         payload = await _run_chat_office_service(state, operation)
         if payload:
             console.print(f"[success]Completed session:[/success] {rest[0]}")
         return
-    console.print("[warning]Usage: /session [list|new|create|resume <session_id>|show <session_id|task_id>|config <task_id>|send <task_id> <message>|rename <task_id|session_id> <title>|delete <task_id> --yes|stop [target]|continue [target] [message]|complete <task_id>][/warning]")
+    console.print(
+        "[warning]Usage: /session [list|new|create|resume <session_id>|show <session_id|task_id>|config <task_id>|send <task_id> <message>|rename <task_id|session_id> <title>|delete <task_id> --yes|stop [target]|continue [target] [message]|complete <task_id>][/warning]"
+    )
 
 
 def _task_title(task: Any) -> str:
-    return _clip_text(getattr(task, "title", "") or getattr(task, "description", "") or "(untitled)", 80)
+    return _clip_text(
+        getattr(task, "title", "") or getattr(task, "description", "") or "(untitled)",
+        80,
+    )
 
 
 def _task_title_for_view(task: Any, *, full: bool = False) -> str:
-    return _clip_text(getattr(task, "title", "") or getattr(task, "description", "") or "(untitled)", 80, full=full)
+    return _clip_text(
+        getattr(task, "title", "") or getattr(task, "description", "") or "(untitled)",
+        80,
+        full=full,
+    )
 
 
-def _require_chat_store(state: _InteractiveChatState, *, label: str = "Task store") -> Any | None:
+def _require_chat_store(
+    state: _InteractiveChatState, *, label: str = "Task store"
+) -> Any | None:
     store = getattr(state.engine, "store", None)
     if not store:
         console.print(f"[warning]{label} is not available.[/warning]")
@@ -4307,7 +6411,9 @@ def _require_chat_store(state: _InteractiveChatState, *, label: str = "Task stor
     return store
 
 
-async def _get_task_for_current_project(state: _InteractiveChatState, task_id: str) -> Any | None:
+async def _get_task_for_current_project(
+    state: _InteractiveChatState, task_id: str
+) -> Any | None:
     store = _require_chat_store(state)
     if store is None:
         return None
@@ -4320,7 +6426,9 @@ async def _get_task_for_current_project(state: _InteractiveChatState, task_id: s
         return None
     project_id = str(getattr(task, "project_id", "") or "default")
     if project_id != _current_project_id(state.engine):
-        console.print(f"[warning]Task belongs to project '{project_id}'. Switch project first with /project {project_id}.[/warning]")
+        console.print(
+            f"[warning]Task belongs to project '{project_id}'. Switch project first with /project {project_id}.[/warning]"
+        )
         return None
     return task
 
@@ -4331,12 +6439,16 @@ def _parse_delete_yes(args: list[str], *, usage: str) -> bool:
         console.print(f"[warning]Usage: {usage}[/warning]")
         return False
     if "--yes" not in args:
-        console.print(f"[warning]Destructive command requires --yes. Usage: {usage}[/warning]")
+        console.print(
+            f"[warning]Destructive command requires --yes. Usage: {usage}[/warning]"
+        )
         return False
     return True
 
 
-def _extract_option(args: list[str], name: str, *, default: str | None = None) -> tuple[list[str], str | None]:
+def _extract_option(
+    args: list[str], name: str, *, default: str | None = None
+) -> tuple[list[str], str | None]:
     remaining: list[str] = []
     value = default
     idx = 0
@@ -4358,10 +6470,34 @@ def _extract_option(args: list[str], name: str, *, default: str | None = None) -
     return remaining, value
 
 
+def _extract_repeated_option(args: list[str], name: str) -> tuple[list[str], list[str]]:
+    remaining: list[str] = []
+    values: list[str] = []
+    idx = 0
+    prefix = f"{name}="
+    while idx < len(args):
+        token = args[idx]
+        if token == name:
+            if idx + 1 >= len(args):
+                raise ValueError(f"Missing value for {name}.")
+            values.append(args[idx + 1])
+            idx += 2
+            continue
+        if token.startswith(prefix):
+            values.append(token.split("=", 1)[1])
+            idx += 1
+            continue
+        remaining.append(token)
+        idx += 1
+    return remaining, values
+
+
 def _require_yes_arg(args: list[str], *, usage: str) -> tuple[list[str], bool]:
     remaining = [arg for arg in args if arg != "--yes"]
     if "--yes" not in args:
-        console.print(f"[warning]Destructive command requires --yes. Usage: {usage}[/warning]")
+        console.print(
+            f"[warning]Destructive command requires --yes. Usage: {usage}[/warning]"
+        )
         return remaining, False
     return remaining, True
 
@@ -4391,7 +6527,9 @@ def _refresh_cli_org_runtime(state: _InteractiveChatState) -> None:
         if callable(configure_tools) and callable(tool_names):
             configure_tools(tool_names())
     except Exception as exc:
-        console.print(f"[warning]Saved config, but current org runtime refresh failed: {exc}. Restart opc chat if needed.[/warning]")
+        console.print(
+            f"[warning]Saved config, but current org runtime refresh failed: {exc}. Restart opc chat if needed.[/warning]"
+        )
 
 
 def _coerce_task_status(value: Any) -> Any | None:
@@ -4413,7 +6551,9 @@ async def _transition_task_status(
     target_label: str,
 ) -> None:
     from opc.core.models import TaskStatus
-    from opc.layer2_organization.work_item_transition import apply_task_status_transition
+    from opc.layer2_organization.work_item_transition import (
+        apply_task_status_transition,
+    )
 
     store = _require_chat_store(state)
     if store is None:
@@ -4425,8 +6565,12 @@ async def _transition_task_status(
     old_status = _coerce_task_status(getattr(task, "status", None))
     terminal_statuses = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}
     if old_status in terminal_statuses and target_status not in terminal_statuses:
-        old_label = old_status.value if old_status else _value_text(getattr(task, "status", ""))
-        console.print(f"[warning]Cannot move terminal task {old_label} back to {target_label}.[/warning]")
+        old_label = (
+            old_status.value if old_status else _value_text(getattr(task, "status", ""))
+        )
+        console.print(
+            f"[warning]Cannot move terminal task {old_label} back to {target_label}.[/warning]"
+        )
         return
 
     old_label = _value_text(getattr(task, "status", ""))
@@ -4440,7 +6584,9 @@ async def _transition_task_status(
     except Exception as exc:
         console.print(f"[error]Failed to transition task {task_id}: {exc}[/error]")
         return
-    console.print(f"[success]Task {task_id} moved: {old_label} -> {target_status.value}[/success]")
+    console.print(
+        f"[success]Task {task_id} moved: {old_label} -> {target_status.value}[/success]"
+    )
 
 
 async def _rename_task_and_session(
@@ -4464,19 +6610,33 @@ async def _rename_task_and_session(
     current_project = _current_project_id(state.engine)
     task = await store.get_task(target) if hasattr(store, "get_task") else None
     if task and str(getattr(task, "project_id", "") or "default") != current_project:
-        console.print(f"[warning]Task belongs to project '{getattr(task, 'project_id', '')}'. Switch project first with /project {getattr(task, 'project_id', '')}.[/warning]")
+        console.print(
+            f"[warning]Task belongs to project '{getattr(task, 'project_id', '')}'. Switch project first with /project {getattr(task, 'project_id', '')}.[/warning]"
+        )
         return
     session = None
     session_id = ""
     if task is None and hasattr(store, "get_session"):
         session = await store.get_session(target)
-        if session and str(getattr(session, "project_id", "") or "default") != current_project:
-            console.print(f"[warning]Session belongs to project '{getattr(session, 'project_id', '')}'. Switch project first with /project {getattr(session, 'project_id', '')}.[/warning]")
+        if (
+            session
+            and str(getattr(session, "project_id", "") or "default") != current_project
+        ):
+            console.print(
+                f"[warning]Session belongs to project '{getattr(session, 'project_id', '')}'. Switch project first with /project {getattr(session, 'project_id', '')}.[/warning]"
+            )
             return
         if session and hasattr(store, "get_tasks"):
             session_id = str(getattr(session, "session_id", "") or target)
             tasks = await store.get_tasks(project_id=current_project)
-            task = next((item for item in tasks if str(getattr(item, "session_id", "") or "") == session_id), None)
+            task = next(
+                (
+                    item
+                    for item in tasks
+                    if str(getattr(item, "session_id", "") or "") == session_id
+                ),
+                None,
+            )
     if task is None and session is None:
         console.print(f"[warning]Task or session not found: {target}[/warning]")
         return
@@ -4495,10 +6655,14 @@ async def _rename_task_and_session(
         await store.save_session(session)
         session_id = str(getattr(session, "session_id", "") or session_id)
     task_id = str(getattr(task, "id", "") or "") if task is not None else ""
-    console.print(f"[success]Renamed {f'task {task_id}' if task_id else 'session'}{f' / session {session_id}' if session_id else ''}: {title}[/success]")
+    console.print(
+        f"[success]Renamed {f'task {task_id}' if task_id else 'session'}{f' / session {session_id}' if session_id else ''}: {title}[/success]"
+    )
 
 
-async def _delete_task_and_session(state: _InteractiveChatState, task_id: str, args: list[str], *, usage: str) -> None:
+async def _delete_task_and_session(
+    state: _InteractiveChatState, task_id: str, args: list[str], *, usage: str
+) -> None:
     store = _require_chat_store(state)
     if store is None:
         return
@@ -4512,19 +6676,27 @@ async def _delete_task_and_session(state: _InteractiveChatState, task_id: str, a
         return
     session_id = str(getattr(task, "session_id", "") or "")
     await store.hard_delete_task(task_id, session_id or None)
-    console.print(f"[success]Deleted task {task_id}{f' / session {session_id}' if session_id else ''}.[/success]")
+    console.print(
+        f"[success]Deleted task {task_id}{f' / session {session_id}' if session_id else ''}.[/success]"
+    )
 
 
-async def _handle_task_move_slash(state: _InteractiveChatState, args: list[str]) -> None:
+async def _handle_task_move_slash(
+    state: _InteractiveChatState, args: list[str]
+) -> None:
     if len(args) != 2:
-        console.print("[warning]Usage: /task move <task_id> todo|in-progress|done|blocked|failed|cancelled[/warning]")
+        console.print(
+            "[warning]Usage: /task move <task_id> todo|in-progress|done|blocked|failed|cancelled[/warning]"
+        )
         return
     from opc.presentation.kanban import column_to_task_status
 
     target_label = args[1].strip().lower().replace("_", "-")
     target_status = column_to_task_status(target_label)
     if target_status is None:
-        console.print("[warning]Unsupported target. Use todo, in-progress, done, blocked, failed, or cancelled.[/warning]")
+        console.print(
+            "[warning]Unsupported target. Use todo, in-progress, done, blocked, failed, or cancelled.[/warning]"
+        )
         return
     await _transition_task_status(
         state,
@@ -4535,7 +6707,9 @@ async def _handle_task_move_slash(state: _InteractiveChatState, args: list[str])
     )
 
 
-async def _handle_task_done_slash(state: _InteractiveChatState, args: list[str]) -> None:
+async def _handle_task_done_slash(
+    state: _InteractiveChatState, args: list[str]
+) -> None:
     if len(args) != 1:
         console.print("[warning]Usage: /task done <task_id>[/warning]")
         return
@@ -4571,9 +6745,13 @@ async def _handle_tasks_slash(state: _InteractiveChatState, args: list[str]) -> 
             status = TaskStatus(status_token)
         except ValueError:
             valid = ", ".join(item.value for item in TaskStatus)
-            console.print(f"[warning]Unknown task status '{args[0]}'. Valid: {valid}[/warning]")
+            console.print(
+                f"[warning]Unknown task status '{args[0]}'. Valid: {valid}[/warning]"
+            )
             return
-    tasks = await state.engine.store.get_tasks(project_id=_current_project_id(state.engine), status=status)
+    tasks = await state.engine.store.get_tasks(
+        project_id=_current_project_id(state.engine), status=status
+    )
     tasks = tasks[:limit]
     if not tasks:
         console.print("[info]No tasks found for this project.[/info]")
@@ -4609,7 +6787,9 @@ async def _show_task_detail(state: _InteractiveChatState, args: list[str]) -> No
         console.print(f"[warning]{exc}[/warning]")
         return
     if not args:
-        console.print("[warning]Usage: /task show <task_id> [--limit N] [--full][/warning]")
+        console.print(
+            "[warning]Usage: /task show <task_id> [--limit N] [--full][/warning]"
+        )
         return
     task = await state.engine.store.get_task(args[0])
     if not task:
@@ -4617,13 +6797,20 @@ async def _show_task_detail(state: _InteractiveChatState, args: list[str]) -> No
         return
     project_id = str(getattr(task, "project_id", "") or "default")
     if project_id != _current_project_id(state.engine):
-        console.print(f"[warning]Task belongs to project '{project_id}'. Switch project first.[/warning]")
+        console.print(
+            f"[warning]Task belongs to project '{project_id}'. Switch project first.[/warning]"
+        )
         return
     table = Table(title=f"Task {getattr(task, 'id', '')}", show_header=False)
     table.add_column("Field", style="cyan", no_wrap=True)
     table.add_column("Value")
-    table.add_row("Title", _clip_text(getattr(task, "title", "") or "(untitled)", 120, full=full))
-    table.add_row("Description", _clip_text(getattr(task, "description", "") or "", 240, full=full))
+    table.add_row(
+        "Title", _clip_text(getattr(task, "title", "") or "(untitled)", 120, full=full)
+    )
+    table.add_row(
+        "Description",
+        _clip_text(getattr(task, "description", "") or "", 240, full=full),
+    )
     table.add_row("Status", _value_text(getattr(task, "status", "")))
     table.add_row("Project", project_id)
     table.add_row("Session", str(getattr(task, "session_id", "") or ""))
@@ -4633,13 +6820,26 @@ async def _show_task_detail(state: _InteractiveChatState, args: list[str]) -> No
     table.add_row("Tags", ", ".join(str(tag) for tag in tags) if tags else "")
     result = getattr(task, "result", None) or {}
     if isinstance(result, dict):
-        table.add_row("Result", _clip_text(result.get("content", "") or result.get("summary", ""), 240, full=full))
+        table.add_row(
+            "Result",
+            _clip_text(
+                result.get("content", "") or result.get("summary", ""), 240, full=full
+            ),
+        )
         artifacts = result.get("artifacts", []) or []
         if not isinstance(artifacts, list):
             artifacts = [artifacts]
-        table.add_row("Artifacts", _clip_text(", ".join(str(item) for item in artifacts), 240, full=full))
+        table.add_row(
+            "Artifacts",
+            _clip_text(", ".join(str(item) for item in artifacts), 240, full=full),
+        )
     metadata = getattr(task, "metadata", {}) or {}
-    table.add_row("Metadata keys", ", ".join(sorted(str(key) for key in metadata.keys())) if isinstance(metadata, dict) else "")
+    table.add_row(
+        "Metadata keys",
+        ", ".join(sorted(str(key) for key in metadata.keys()))
+        if isinstance(metadata, dict)
+        else "",
+    )
     console.print(table)
     session_id = str(getattr(task, "session_id", "") or "")
     if session_id:
@@ -4649,7 +6849,9 @@ async def _show_task_detail(state: _InteractiveChatState, args: list[str]) -> No
 
 async def _handle_task_slash(state: _InteractiveChatState, args: list[str]) -> None:
     if not args:
-        console.print("[warning]Usage: /task [show|move|done|rename|delete] ...[/warning]")
+        console.print(
+            "[warning]Usage: /task [show|move|done|rename|delete] ...[/warning]"
+        )
         return
     subcommand = args[0].lower()
     if subcommand == "show":
@@ -4666,19 +6868,25 @@ async def _handle_task_slash(state: _InteractiveChatState, args: list[str]) -> N
         if len(rest) < 2:
             console.print("[warning]Usage: /task rename <task_id> <title>[/warning]")
             return
-        await _rename_task_and_session(state, rest[0], " ".join(rest[1:]), usage="/task rename <task_id> <title>")
+        await _rename_task_and_session(
+            state, rest[0], " ".join(rest[1:]), usage="/task rename <task_id> <title>"
+        )
         return
     if subcommand == "delete":
         rest = args[1:]
         if not rest:
             console.print("[warning]Usage: /task delete <task_id> --yes[/warning]")
             return
-        await _delete_task_and_session(state, rest[0], rest[1:], usage="/task delete <task_id> --yes")
+        await _delete_task_and_session(
+            state, rest[0], rest[1:], usage="/task delete <task_id> --yes"
+        )
         return
     await _show_task_detail(state, args)
 
 
-async def _handle_checkpoints_slash(state: _InteractiveChatState, args: list[str]) -> None:
+async def _handle_checkpoints_slash(
+    state: _InteractiveChatState, args: list[str]
+) -> None:
     if not getattr(state.engine, "store", None):
         console.print("[warning]Checkpoint store is not available.[/warning]")
         return
@@ -4690,7 +6898,9 @@ async def _handle_checkpoints_slash(state: _InteractiveChatState, args: list[str
     if args:
         console.print("[warning]Usage: /checkpoints [--limit N] [--full][/warning]")
         return
-    checkpoints = await state.engine.store.get_pending_checkpoints(project_id=_current_project_id(state.engine))
+    checkpoints = await state.engine.store.get_pending_checkpoints(
+        project_id=_current_project_id(state.engine)
+    )
     checkpoints = checkpoints[:limit]
     if not checkpoints:
         console.print("[info]No pending checkpoints for this project.[/info]")
@@ -4719,13 +6929,22 @@ def _render_org_slash(state: _InteractiveChatState) -> None:
     summary = Table(title="Organization", show_header=False)
     summary.add_column("Field", style="cyan", no_wrap=True)
     summary.add_column("Value")
-    summary.add_row("Organization", str(getattr(org, "organization_name", "") or getattr(org, "company_name", "") or ""))
+    summary.add_row(
+        "Organization",
+        str(
+            getattr(org, "organization_name", "")
+            or getattr(org, "company_name", "")
+            or ""
+        ),
+    )
     summary.add_row("Company", str(getattr(org, "company_name", "") or ""))
     summary.add_row("Default mode", str(getattr(org, "default_mode", "") or ""))
     summary.add_row("Company profile", str(getattr(org, "company_profile", "") or ""))
     summary.add_row("Topology", str(getattr(org, "topology", "") or ""))
     summary.add_row("Execution model", str(getattr(org, "execution_model", "") or ""))
-    summary.add_row("Final decider", str(getattr(org, "final_decider_role_id", "") or ""))
+    summary.add_row(
+        "Final decider", str(getattr(org, "final_decider_role_id", "") or "")
+    )
     console.print(summary)
 
     roles = list(getattr(org, "roles", []) or [])
@@ -4802,7 +7021,11 @@ def _render_org_slash(state: _InteractiveChatState) -> None:
                     str(getattr(seat, "seat_id", "") or ""),
                     str(getattr(seat, "name", "") or ""),
                     str(getattr(seat, "role_id", "") or ""),
-                    str(getattr(seat, "manager_role_id", "") or getattr(seat, "manager_seat_id", "") or ""),
+                    str(
+                        getattr(seat, "manager_role_id", "")
+                        or getattr(seat, "manager_seat_id", "")
+                        or ""
+                    ),
                     str(getattr(seat, "seat_kind", "") or ""),
                 )
             console.print(seat_table)
@@ -4822,30 +7045,40 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
 
     if command == "role":
         if not rest:
-            console.print("[warning]Usage: /org role add|update|delete|bulk-add ...[/warning]")
+            console.print(
+                "[warning]Usage: /org role add|update|delete|bulk-add ...[/warning]"
+            )
             return
         action = rest[0].lower()
         values = rest[1:]
         if action == "add":
             try:
                 values, name = _extract_option(values, "--name")
-                values, responsibility = _extract_option(values, "--responsibility", default="")
-                values, reports_to = _extract_option(values, "--reports-to", default="owner")
+                values, responsibility = _extract_option(
+                    values, "--responsibility", default=""
+                )
+                values, reports_to = _extract_option(
+                    values, "--reports-to", default="owner"
+                )
             except ValueError as exc:
                 console.print(f"[warning]{exc}[/warning]")
                 return
             if len(values) != 1:
-                console.print("[warning]Usage: /org role add <role_id> [--name ...] [--responsibility ...] [--reports-to ...][/warning]")
+                console.print(
+                    "[warning]Usage: /org role add <role_id> [--name ...] [--responsibility ...] [--reports-to ...][/warning]"
+                )
                 return
             role_id = values[0]
             payload = await _run_chat_office_service(
                 state,
-                lambda svc: svc.org.add_role({
-                    "role_id": role_id,
-                    "name": name or role_id,
-                    "responsibility": responsibility or "",
-                    "reports_to": reports_to or "owner",
-                }),
+                lambda svc: svc.org.add_role(
+                    {
+                        "role_id": role_id,
+                        "name": name or role_id,
+                        "responsibility": responsibility or "",
+                        "reports_to": reports_to or "owner",
+                    }
+                ),
             )
         elif action == "update":
             try:
@@ -4859,7 +7092,9 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
                 console.print(f"[warning]{exc}[/warning]")
                 return
             if len(values) != 1:
-                console.print("[warning]Usage: /org role update <role_id> [--name ...] [--responsibility ...][/warning]")
+                console.print(
+                    "[warning]Usage: /org role update <role_id> [--name ...] [--responsibility ...][/warning]"
+                )
                 return
             updates = {
                 key: value
@@ -4875,24 +7110,44 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
                 updates["can_spawn"] = _split_csv(can_spawn)
             if tools is not None:
                 updates["tools"] = _split_csv(tools)
-            payload = await _run_chat_office_service(state, lambda svc: svc.org.update_role(values[0], updates))
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.org.update_role(values[0], updates)
+            )
         elif action == "delete":
             if not values:
-                console.print("[warning]Usage: /org role delete <role_id> --yes[/warning]")
+                console.print(
+                    "[warning]Usage: /org role delete <role_id> --yes[/warning]"
+                )
                 return
-            remaining, ok = _require_yes_arg(values[1:], usage="/org role delete <role_id> --yes")
+            remaining, ok = _require_yes_arg(
+                values[1:], usage="/org role delete <role_id> --yes"
+            )
             if not ok or remaining:
                 return
-            payload = await _run_chat_office_service(state, lambda svc: svc.org.delete_role(values[0]))
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.org.delete_role(values[0])
+            )
         elif action == "bulk-add":
             if len(values) != 1:
-                console.print("[warning]Usage: /org role bulk-add <json-or-yaml-file>[/warning]")
+                console.print(
+                    "[warning]Usage: /org role bulk-add <json-or-yaml-file>[/warning]"
+                )
                 return
             loaded = _load_structured_payload(file_path=values[0])
-            roles = loaded.get("roles", []) if isinstance(loaded, dict) else loaded if isinstance(loaded, list) else []
-            payload = await _run_chat_office_service(state, lambda svc: svc.org.bulk_add_roles(list(roles or [])))
+            roles = (
+                loaded.get("roles", [])
+                if isinstance(loaded, dict)
+                else loaded
+                if isinstance(loaded, list)
+                else []
+            )
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.org.bulk_add_roles(list(roles or []))
+            )
         else:
-            console.print("[warning]Usage: /org role add|update|delete|bulk-add ...[/warning]")
+            console.print(
+                "[warning]Usage: /org role add|update|delete|bulk-add ...[/warning]"
+            )
             return
         if payload:
             _refresh_cli_org_runtime(state)
@@ -4909,10 +7164,17 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
             console.print(f"[warning]{exc}[/warning]")
             return
         if values:
-            console.print("[warning]Usage: /org policy update [--payload JSON/YAML|--file path] [--profile custom][/warning]")
+            console.print(
+                "[warning]Usage: /org policy update [--payload JSON/YAML|--file path] [--profile custom][/warning]"
+            )
             return
         data = _load_structured_payload(payload=payload_text, file_path=file_path)
-        payload = await _run_chat_office_service(state, lambda svc: svc.org.update_runtime_policy(data, profile=profile or "custom"))
+        payload = await _run_chat_office_service(
+            state,
+            lambda svc: svc.org.update_runtime_policy(
+                data, profile=profile or "custom"
+            ),
+        )
         if payload:
             _refresh_cli_org_runtime(state)
             _emit_payload(payload)
@@ -4926,9 +7188,16 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
             console.print(f"[warning]{exc}[/warning]")
             return
         if values:
-            console.print("[warning]Usage: /org strategy update --final-decider <role_id>[/warning]")
+            console.print(
+                "[warning]Usage: /org strategy update --final-decider <role_id>[/warning]"
+            )
             return
-        payload = await _run_chat_office_service(state, lambda svc: svc.org.update_org_strategy(final_decider_role_id=final_decider))
+        payload = await _run_chat_office_service(
+            state,
+            lambda svc: svc.org.update_org_strategy(
+                final_decider_role_id=final_decider
+            ),
+        )
         if payload:
             _refresh_cli_org_runtime(state)
             _emit_payload(payload)
@@ -4938,7 +7207,9 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
         remaining, ok = _require_yes_arg(rest, usage="/org reset --yes")
         if not ok or remaining:
             return
-        payload = await _run_chat_office_service(state, lambda svc: svc.org.reset_architecture())
+        payload = await _run_chat_office_service(
+            state, lambda svc: svc.org.reset_architecture()
+        )
         if payload:
             _refresh_cli_org_runtime(state)
             _emit_payload(payload)
@@ -4946,33 +7217,83 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
 
     if command == "saved":
         if not rest:
-            console.print("[warning]Usage: /org saved list|save|load|delete ...[/warning]")
+            console.print(
+                "[warning]Usage: /org saved list|create|save|load|delete ...[/warning]"
+            )
             return
         action = rest[0].lower()
         values = rest[1:]
         if action == "list":
-            payload = await _run_chat_office_service(state, lambda svc: svc.org.saved_list())
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.org.saved_list()
+            )
+        elif action == "create":
+            try:
+                values, member_specs = _extract_repeated_option(values, "--member")
+                values, members_file = _extract_option(values, "--members-file")
+            except ValueError as exc:
+                console.print(f"[warning]{exc}[/warning]")
+                return
+            if len(values) != 1:
+                console.print(
+                    "[warning]Usage: /org saved create <name> --member <JSON|name|responsibility|parent> ... [--members-file path][/warning]"
+                )
+                return
+            try:
+                parsed_members = _parse_org_members(
+                    member_specs=member_specs, file_path=members_file
+                )
+            except (OSError, ValueError, TypeError) as exc:
+                console.print(f"[warning]{exc}[/warning]")
+                return
+            payload = await _run_chat_current_office_service(
+                state,
+                lambda svc: svc.org.saved_create(
+                    organization_name=values[0], members=parsed_members
+                ),
+            )
+            if payload:
+                state.config = state.engine.config
+                state.mode = "org"
+                state.company_profile = "custom"
+                state.org_id = str(
+                    payload.get("organization_id") or payload.get("name") or ""
+                )
         elif action == "save":
             if not values:
-                console.print("[warning]Usage: /org saved save <name> [--overwrite][/warning]")
+                console.print(
+                    "[warning]Usage: /org saved save <name> [--overwrite][/warning]"
+                )
                 return
             overwrite = "--overwrite" in values[1:]
-            payload = await _run_chat_office_service(state, lambda svc: svc.org.saved_save_as(values[0], overwrite=overwrite))
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.org.saved_save_as(values[0], overwrite=overwrite)
+            )
         elif action == "load":
             if len(values) != 1:
                 console.print("[warning]Usage: /org saved load <name>[/warning]")
                 return
-            payload = await _run_chat_office_service(state, lambda svc: svc.org.saved_load(values[0]))
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.org.saved_load(values[0])
+            )
         elif action == "delete":
             if not values:
-                console.print("[warning]Usage: /org saved delete <name> --yes[/warning]")
+                console.print(
+                    "[warning]Usage: /org saved delete <name> --yes[/warning]"
+                )
                 return
-            remaining, ok = _require_yes_arg(values[1:], usage="/org saved delete <name> --yes")
+            remaining, ok = _require_yes_arg(
+                values[1:], usage="/org saved delete <name> --yes"
+            )
             if not ok or remaining:
                 return
-            payload = await _run_chat_office_service(state, lambda svc: svc.org.saved_delete(values[0]))
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.org.saved_delete(values[0])
+            )
         else:
-            console.print("[warning]Usage: /org saved list|save|load|delete ...[/warning]")
+            console.print(
+                "[warning]Usage: /org saved list|create|save|load|delete ...[/warning]"
+            )
             return
         if payload:
             _refresh_cli_org_runtime(state)
@@ -4980,7 +7301,9 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
         return
 
     if command == "export":
-        payload = await _run_chat_office_service(state, lambda svc: svc.org.export_config())
+        payload = await _run_chat_office_service(
+            state, lambda svc: svc.org.export_config()
+        )
         if payload:
             _emit_payload(payload)
         return
@@ -4991,17 +7314,23 @@ async def _handle_org_slash(state: _InteractiveChatState, args: list[str]) -> No
             return
         dry_run = "--dry-run" in rest[1:]
         raw = Path(rest[0]).read_text(encoding="utf-8")
-        payload = await _run_chat_office_service(state, lambda svc: svc.org.import_config(raw, dry_run=dry_run))
+        payload = await _run_chat_office_service(
+            state, lambda svc: svc.org.import_config(raw, dry_run=dry_run)
+        )
         if payload:
             if not dry_run:
                 _refresh_cli_org_runtime(state)
             _emit_payload(payload)
         return
 
-    console.print("[warning]Usage: /org [info|role|policy|strategy|reset|saved|export|import] ...[/warning]")
+    console.print(
+        "[warning]Usage: /org [info|role|policy|strategy|reset|saved|export|import] ...[/warning]"
+    )
 
 
-def _render_talent_templates(templates: list[Any], *, title: str = "Talent Templates") -> None:
+def _render_talent_templates(
+    templates: list[Any], *, title: str = "Talent Templates"
+) -> None:
     if not templates:
         console.print("[info]No talent templates found.[/info]")
         return
@@ -5017,7 +7346,9 @@ def _render_talent_templates(templates: list[Any], *, title: str = "Talent Templ
             str(getattr(template, "id", "") or ""),
             str(getattr(template, "name", "") or ""),
             str(getattr(template, "category", "") or ""),
-            ", ".join(str(item) for item in (getattr(template, "domains", []) or [])[:4]),
+            ", ".join(
+                str(item) for item in (getattr(template, "domains", []) or [])[:4]
+            ),
             str(getattr(template, "preferred_external_agent", "") or ""),
             _clip_text(getattr(template, "description", "") or "", 100),
         )
@@ -5049,7 +7380,9 @@ def _render_talent_employees(employees: list[Any]) -> None:
 
 async def _handle_talent_slash(state: _InteractiveChatState, args: list[str]) -> None:
     if not args:
-        console.print("[warning]Usage: /talent [list|employees|scan|import|import-repo|hire|employee|import-agent] ...[/warning]")
+        console.print(
+            "[warning]Usage: /talent [list|employees|scan|import|import-repo|hire|employee|import-agent] ...[/warning]"
+        )
         return
     market = TalentMarket(get_opc_home(), state.config)
     command = args[0].lower()
@@ -5062,16 +7395,22 @@ async def _handle_talent_slash(state: _InteractiveChatState, args: list[str]) ->
             _render_talent_employees(market.list_employees())
             return
         if command == "scan":
-            _render_talent_templates(market.scan_local_talent(), title="Local Talent Templates")
+            _render_talent_templates(
+                market.scan_local_talent(), title="Local Talent Templates"
+            )
             return
         if command == "import":
             if not rest:
-                console.print("[warning]Usage: /talent import <template_id...>[/warning]")
+                console.print(
+                    "[warning]Usage: /talent import <template_id...>[/warning]"
+                )
                 return
             templates = market.import_local_templates(rest)
             _save_cli_config(state)
             _refresh_cli_org_runtime(state)
-            console.print(f"[success]Resolved {len(templates)} local talent templates.[/success]")
+            console.print(
+                f"[success]Resolved {len(templates)} local talent templates.[/success]"
+            )
             _render_talent_templates(templates)
             return
         if command == "import-repo":
@@ -5081,39 +7420,58 @@ async def _handle_talent_slash(state: _InteractiveChatState, args: list[str]) ->
             templates = market.import_from_repo(_talent_repo_path(rest[0]))
             _save_cli_config(state)
             _refresh_cli_org_runtime(state)
-            console.print(f"[success]Imported {len(templates)} talent templates from repo.[/success]")
+            console.print(
+                f"[success]Imported {len(templates)} talent templates from repo.[/success]"
+            )
             _render_talent_templates(templates)
             return
         if command == "hire":
             rest, employee_name = _extract_option(rest, "--name")
             if len(rest) != 2:
-                console.print("[warning]Usage: /talent hire <template_id> <role_id> [--name ...][/warning]")
+                console.print(
+                    "[warning]Usage: /talent hire <template_id> <role_id> [--name ...][/warning]"
+                )
                 return
-            employee = market.hire_template(rest[0], rest[1], employee_name=employee_name)
+            employee = market.hire_template(
+                rest[0], rest[1], employee_name=employee_name
+            )
             _save_cli_config(state)
             _refresh_cli_org_runtime(state)
-            console.print(f"[success]Hired {employee.name} into role `{employee.role_id}` as `{employee.employee_id}`.[/success]")
+            console.print(
+                f"[success]Hired {employee.name} into role `{employee.role_id}` as `{employee.employee_id}`.[/success]"
+            )
             return
         if command in {"employee", "detail"}:
             if len(rest) != 1:
-                console.print("[warning]Usage: /talent employee <employee_id>[/warning]")
+                console.print(
+                    "[warning]Usage: /talent employee <employee_id>[/warning]"
+                )
                 return
-            payload = await _run_chat_office_service(state, lambda svc: svc.talent.employee_detail(rest[0]))
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.talent.employee_detail(rest[0])
+            )
             if payload:
                 _emit_payload(payload)
             return
         if command in {"import-agent", "import-employee-as-agent"}:
             if len(rest) != 1:
-                console.print("[warning]Usage: /talent import-agent <employee_id>[/warning]")
+                console.print(
+                    "[warning]Usage: /talent import-agent <employee_id>[/warning]"
+                )
                 return
-            payload = await _run_chat_office_service(state, lambda svc: svc.talent.import_employee_as_agent(employee_id=rest[0]))
+            payload = await _run_chat_office_service(
+                state,
+                lambda svc: svc.talent.import_employee_as_agent(employee_id=rest[0]),
+            )
             if payload:
                 _emit_payload(payload)
             return
     except Exception as exc:
         console.print(f"[error]Talent command failed: {exc}[/error]")
         return
-    console.print("[warning]Usage: /talent [list|employees|scan|import|import-repo|hire|employee|import-agent] ...[/warning]")
+    console.print(
+        "[warning]Usage: /talent [list|employees|scan|import|import-repo|hire|employee|import-agent] ...[/warning]"
+    )
 
 
 def _package_value(package: Any, name: str, default: Any = "") -> Any:
@@ -5149,13 +7507,17 @@ def _render_market_packages(packages: list[Any]) -> None:
 
 async def _handle_market_slash(state: _InteractiveChatState, args: list[str]) -> None:
     if not args:
-        console.print("[warning]Usage: /market [browse|preview|list|presets|apply-preset|install|uninstall|export] ...[/warning]")
+        console.print(
+            "[warning]Usage: /market [browse|preview|list|presets|apply-preset|install|uninstall|export] ...[/warning]"
+        )
         return
     command = args[0].lower()
     rest = args[1:]
     try:
         if command == "browse":
-            payload = await _run_chat_office_service(state, lambda svc: svc.market.browse())
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.market.browse()
+            )
             if payload:
                 _emit_payload(payload)
             return
@@ -5163,12 +7525,16 @@ async def _handle_market_slash(state: _InteractiveChatState, args: list[str]) ->
             if len(rest) != 1:
                 console.print("[warning]Usage: /market preview <preset_id>[/warning]")
                 return
-            payload = await _run_chat_office_service(state, lambda svc: svc.market.preview(rest[0]))
+            payload = await _run_chat_office_service(
+                state, lambda svc: svc.market.preview(rest[0])
+            )
             if payload:
                 _emit_payload(payload)
             return
         if command == "list":
-            _render_market_packages(list(getattr(state.config.org, "installed_packages", []) or []))
+            _render_market_packages(
+                list(getattr(state.config.org, "installed_packages", []) or [])
+            )
             return
         if command == "presets":
             from opc.market.architecture_registry import get_all_presets
@@ -5178,30 +7544,26 @@ async def _handle_market_slash(state: _InteractiveChatState, args: list[str]) ->
         if command == "apply-preset":
             rest, strategy = _extract_option(rest, "--strategy", default="overwrite")
             if len(rest) != 1 or strategy not in {"namespace", "overwrite"}:
-                console.print("[warning]Usage: /market apply-preset <preset_id> [--strategy namespace|overwrite][/warning]")
+                console.print(
+                    "[warning]Usage: /market apply-preset <preset_id> [--strategy namespace|overwrite][/warning]"
+                )
                 return
-            from opc.market.architecture_registry import apply_architecture_preset_to_config
-
-            info = apply_architecture_preset_to_config(
-                state.config,
-                rest[0],
-                strategy=strategy or "overwrite",
-                clear_existing=True,
+            payload = await _run_chat_current_office_service(
+                state,
+                lambda svc: svc.market.apply_preset(
+                    preset_id=rest[0], strategy=strategy or "overwrite"
+                ),
             )
-            state.mode = "company"
-            state.company_profile = "custom"
-            _save_cli_config(state)
-            _refresh_cli_org_runtime(state)
-            console.print(
-                f"[success]Applied preset {info.package_id}: "
-                f"{len(info.role_ids)} roles, {len(info.work_item_template_ids or info.template_ids)} templates.[/success]"
-            )
-            console.print("[info]Mode set to company; company_profile=custom[/info]")
+            if payload:
+                _refresh_cli_org_runtime(state)
+                _emit_payload(payload)
             return
         if command == "install":
             rest, strategy = _extract_option(rest, "--strategy", default="namespace")
             if len(rest) != 1 or strategy not in {"namespace", "overwrite"}:
-                console.print("[warning]Usage: /market install <path> [--strategy namespace|overwrite][/warning]")
+                console.print(
+                    "[warning]Usage: /market install <path> [--strategy namespace|overwrite][/warning]"
+                )
                 return
             from opc.market import PackageLoader, SandboxChecker
 
@@ -5213,27 +7575,39 @@ async def _handle_market_slash(state: _InteractiveChatState, args: list[str]) ->
             if not report.passed:
                 for error in report.errors:
                     console.print(f"[error]{error}[/error]")
-                console.print("[error]Package failed security check. Installation aborted.[/error]")
+                console.print(
+                    "[error]Package failed security check. Installation aborted.[/error]"
+                )
                 return
             conflicts = loader.detect_conflicts(package)
             if conflicts.has_conflicts:
                 for role_id in conflicts.role_conflicts:
                     console.print(f"[warning]Role conflict: {role_id}[/warning]")
                 for template_id in conflicts.template_conflicts:
-                    console.print(f"[warning]Template conflict: {template_id}[/warning]")
+                    console.print(
+                        f"[warning]Template conflict: {template_id}[/warning]"
+                    )
             info = loader.install(package, strategy=strategy or "namespace")
             _save_cli_config(state)
             _refresh_cli_org_runtime(state)
-            console.print(f"[success]Installed {info.package_id}: {len(info.role_ids)} roles, {len(info.template_ids)} templates.[/success]")
+            console.print(
+                f"[success]Installed {info.package_id}: {len(info.role_ids)} roles, {len(info.template_ids)} templates.[/success]"
+            )
             return
         if command == "uninstall":
             if not rest:
-                console.print("[warning]Usage: /market uninstall <package_id> --yes[/warning]")
+                console.print(
+                    "[warning]Usage: /market uninstall <package_id> --yes[/warning]"
+                )
                 return
-            remaining, ok = _require_yes_arg(rest[1:], usage="/market uninstall <package_id> --yes")
+            remaining, ok = _require_yes_arg(
+                rest[1:], usage="/market uninstall <package_id> --yes"
+            )
             if not ok or remaining:
                 if remaining:
-                    console.print("[warning]Usage: /market uninstall <package_id> --yes[/warning]")
+                    console.print(
+                        "[warning]Usage: /market uninstall <package_id> --yes[/warning]"
+                    )
                 return
             from opc.market import PackageLoader
 
@@ -5252,7 +7626,9 @@ async def _handle_market_slash(state: _InteractiveChatState, args: list[str]) ->
             rest, version = _extract_option(rest, "--version", default="1.0.0")
             rest, output_dir = _extract_option(rest, "--output-dir", default=".")
             if rest or not package_id or not name:
-                console.print("[warning]Usage: /market export --id <package_id> --name <name> [--desc ...] [--version ...] [--output-dir ...][/warning]")
+                console.print(
+                    "[warning]Usage: /market export --id <package_id> --name <name> [--desc ...] [--version ...] [--output-dir ...][/warning]"
+                )
                 return
             from opc.market import PackageExporter
 
@@ -5264,12 +7640,16 @@ async def _handle_market_slash(state: _InteractiveChatState, args: list[str]) ->
                 version=version or "1.0.0",
             )
             out_path = exporter.write_to_path(package, Path(output_dir or "."))
-            console.print(f"[success]Exported package {package_id} to {out_path}.[/success]")
+            console.print(
+                f"[success]Exported package {package_id} to {out_path}.[/success]"
+            )
             return
     except Exception as exc:
         console.print(f"[error]Market command failed: {exc}[/error]")
         return
-    console.print("[warning]Usage: /market [browse|preview|list|presets|apply-preset|install|uninstall|export] ...[/warning]")
+    console.print(
+        "[warning]Usage: /market [browse|preview|list|presets|apply-preset|install|uninstall|export] ...[/warning]"
+    )
 
 
 def _render_reorg_proposals(proposals: list[Any]) -> None:
@@ -5298,14 +7678,32 @@ def _render_reorg_proposals(proposals: list[Any]) -> None:
 
 
 def _render_reorg_detail(proposal: Any) -> None:
-    table = Table(title=f"Reorg {getattr(proposal, 'proposal_id', '')}", show_header=False)
+    table = Table(
+        title=f"Reorg {getattr(proposal, 'proposal_id', '')}", show_header=False
+    )
     table.add_column("Field", style="cyan", no_wrap=True)
     table.add_column("Value")
-    for field_name in ("proposal_id", "title", "status", "scope", "risk_level", "initiated_by", "summary", "rationale", "approval_notes"):
-        table.add_row(field_name, _clip_text(_value_text(getattr(proposal, field_name, "")), 260))
+    for field_name in (
+        "proposal_id",
+        "title",
+        "status",
+        "scope",
+        "risk_level",
+        "initiated_by",
+        "summary",
+        "rationale",
+        "approval_notes",
+    ):
+        table.add_row(
+            field_name, _clip_text(_value_text(getattr(proposal, field_name, "")), 260)
+        )
     console.print(table)
     detail = {
-        "changeset": getattr(getattr(proposal, "changeset", None), "__dict__", getattr(proposal, "changeset", None)),
+        "changeset": getattr(
+            getattr(proposal, "changeset", None),
+            "__dict__",
+            getattr(proposal, "changeset", None),
+        ),
         "impact_summary": getattr(proposal, "impact_summary", {}) or {},
         "metadata": getattr(proposal, "metadata", {}) or {},
     }
@@ -5314,7 +7712,9 @@ def _render_reorg_detail(proposal: Any) -> None:
 
 async def _handle_reorg_slash(state: _InteractiveChatState, args: list[str]) -> None:
     if not args:
-        console.print("[warning]Usage: /reorg [list|show|approve|deny|apply] ...[/warning]")
+        console.print(
+            "[warning]Usage: /reorg [list|show|approve|deny|apply] ...[/warning]"
+        )
         return
     command = args[0].lower()
     rest = args[1:]
@@ -5327,7 +7727,9 @@ async def _handle_reorg_slash(state: _InteractiveChatState, args: list[str]) -> 
             if rest:
                 console.print("[warning]Usage: /reorg list [--limit N][/warning]")
                 return
-            proposals = await state.engine.store.list_reorg_proposals(_current_project_id(state.engine), limit=limit)
+            proposals = await state.engine.store.list_reorg_proposals(
+                _current_project_id(state.engine), limit=limit
+            )
             _render_reorg_proposals(proposals)
             return
         if command == "show":
@@ -5343,7 +7745,9 @@ async def _handle_reorg_slash(state: _InteractiveChatState, args: list[str]) -> 
         if command in {"approve", "deny"}:
             rest, notes = _extract_option(rest, "--notes", default="")
             if len(rest) != 1:
-                console.print(f"[warning]Usage: /reorg {command} <proposal_id> [--notes ...][/warning]")
+                console.print(
+                    f"[warning]Usage: /reorg {command} <proposal_id> [--notes ...][/warning]"
+                )
                 return
             approved = command == "approve"
             proposal = await state.engine.approve_company_reorg(
@@ -5351,16 +7755,24 @@ async def _handle_reorg_slash(state: _InteractiveChatState, args: list[str]) -> 
                 approved=approved,
                 notes=notes or ("Approved via CLI." if approved else "Denied via CLI."),
             )
-            console.print(f"[success]Reorg {proposal.proposal_id} {'approved' if approved else 'denied'}.[/success]")
+            console.print(
+                f"[success]Reorg {proposal.proposal_id} {'approved' if approved else 'denied'}.[/success]"
+            )
             return
         if command == "apply":
             if not rest:
-                console.print("[warning]Usage: /reorg apply <proposal_id> --yes[/warning]")
+                console.print(
+                    "[warning]Usage: /reorg apply <proposal_id> --yes[/warning]"
+                )
                 return
-            remaining, ok = _require_yes_arg(rest[1:], usage="/reorg apply <proposal_id> --yes")
+            remaining, ok = _require_yes_arg(
+                rest[1:], usage="/reorg apply <proposal_id> --yes"
+            )
             if not ok or remaining:
                 if remaining:
-                    console.print("[warning]Usage: /reorg apply <proposal_id> --yes[/warning]")
+                    console.print(
+                        "[warning]Usage: /reorg apply <proposal_id> --yes[/warning]"
+                    )
                 return
             result = await state.engine.apply_company_reorg(rest[0])
             _refresh_cli_org_runtime(state)
@@ -5373,7 +7785,9 @@ async def _handle_reorg_slash(state: _InteractiveChatState, args: list[str]) -> 
     console.print("[warning]Usage: /reorg [list|show|approve|deny|apply] ...[/warning]")
 
 
-def _render_key_value_table(title: str, rows: list[tuple[str, Any]], *, full: bool = False) -> None:
+def _render_key_value_table(
+    title: str, rows: list[tuple[str, Any]], *, full: bool = False
+) -> None:
     table = Table(title=title, show_header=False)
     table.add_column("Field", style="cyan", no_wrap=True)
     table.add_column("Value")
@@ -5418,7 +7832,9 @@ def _runtime_row_value(row: Any, key: str, default: Any = "") -> Any:
     return getattr(row, key, default)
 
 
-async def _handle_work_items_slash(state: _InteractiveChatState, args: list[str]) -> None:
+async def _handle_work_items_slash(
+    state: _InteractiveChatState, args: list[str]
+) -> None:
     if not args:
         args = ["list"]
     command = args[0].lower()
@@ -5431,7 +7847,9 @@ async def _handle_work_items_slash(state: _InteractiveChatState, args: list[str]
             rest, role_id = _extract_option(rest, "--role", default=None)
             rest, status = _extract_option(rest, "--status", default=None)
             if rest:
-                console.print("[warning]Usage: /work-items list [--role <role_id>] [--status <status>] [--limit N][/warning]")
+                console.print(
+                    "[warning]Usage: /work-items list [--role <role_id>] [--status <status>] [--limit N][/warning]"
+                )
                 return
             payload = await _run_chat_current_office_service(
                 state,
@@ -5444,7 +7862,9 @@ async def _handle_work_items_slash(state: _InteractiveChatState, args: list[str]
                 ),
             )
             if payload:
-                items = list(payload.get("items", []) or payload.get("work_items", []) or [])
+                items = list(
+                    payload.get("items", []) or payload.get("work_items", []) or []
+                )
                 if not items:
                     console.print("[info]No work items found.[/info]")
                     return
@@ -5461,7 +7881,11 @@ async def _handle_work_items_slash(state: _InteractiveChatState, args: list[str]
                         _clip_text(item.get("title", "") or "", 70, full=full),
                         str(item.get("role_id", "") or ""),
                         str(item.get("status", "") or item.get("phase", "") or ""),
-                        str(item.get("task_id", "") or item.get("runtime_task_id", "") or ""),
+                        str(
+                            item.get("task_id", "")
+                            or item.get("runtime_task_id", "")
+                            or ""
+                        ),
                         str(item.get("session_id", "") or ""),
                     )
                 console.print(table)
@@ -5469,11 +7893,17 @@ async def _handle_work_items_slash(state: _InteractiveChatState, args: list[str]
         if command == "show":
             rest, limit, _full = _parse_view_args(rest, default=50)
             if len(rest) != 1:
-                console.print("[warning]Usage: /work-items show <work_item_id> [--limit N][/warning]")
+                console.print(
+                    "[warning]Usage: /work-items show <work_item_id> [--limit N][/warning]"
+                )
                 return
             payload = await _run_chat_current_office_service(
                 state,
-                lambda svc: svc.work_item.show(project_id=_current_project_id(state.engine), work_item_id=rest[0], limit=limit),
+                lambda svc: svc.work_item.show(
+                    project_id=_current_project_id(state.engine),
+                    work_item_id=rest[0],
+                    limit=limit,
+                ),
             )
             if payload:
                 _emit_payload(payload)
@@ -5483,7 +7913,9 @@ async def _handle_work_items_slash(state: _InteractiveChatState, args: list[str]
             rest, role_id = _extract_option(rest, "--role", default=None)
             work_item_id = rest[0] if rest else ""
             if len(rest) > 1:
-                console.print("[warning]Usage: /work-items logs [work_item_id] [--role <role_id>] [--limit N][/warning]")
+                console.print(
+                    "[warning]Usage: /work-items logs [work_item_id] [--role <role_id>] [--limit N][/warning]"
+                )
                 return
             payload = await _run_chat_current_office_service(
                 state,
@@ -5515,7 +7947,9 @@ async def _handle_work_items_slash(state: _InteractiveChatState, args: list[str]
     except ValueError as exc:
         console.print(f"[warning]{exc}[/warning]")
         return
-    console.print("[warning]Usage: /work-items list|show|logs|role-status ...[/warning]")
+    console.print(
+        "[warning]Usage: /work-items list|show|logs|role-status ...[/warning]"
+    )
 
 
 async def _list_runtime_sessions_for_scope(
@@ -5538,13 +7972,23 @@ async def _list_runtime_sessions_for_scope(
     except TypeError:
         rows = await store.list_runtime_sessions(project_id=project_id)
         if task_id:
-            rows = [row for row in rows if str(_runtime_row_value(row, "task_id", "") or "") == task_id]
+            rows = [
+                row
+                for row in rows
+                if str(_runtime_row_value(row, "task_id", "") or "") == task_id
+            ]
         if session_id:
-            rows = [row for row in rows if str(_runtime_row_value(row, "session_id", "") or "") == session_id]
+            rows = [
+                row
+                for row in rows
+                if str(_runtime_row_value(row, "session_id", "") or "") == session_id
+            ]
         return rows[:limit]
 
 
-def _render_runtime_sessions(rows: list[Any], *, title: str = "Runtime Sessions", full: bool = False) -> None:
+def _render_runtime_sessions(
+    rows: list[Any], *, title: str = "Runtime Sessions", full: bool = False
+) -> None:
     if not rows:
         console.print("[info]No runtime sessions found.[/info]")
         return
@@ -5593,7 +8037,9 @@ def _render_external_sessions(rows: list[Any], *, full: bool = False) -> None:
     console.print(table)
 
 
-def _render_checkpoint_table(checkpoints: list[Any], *, title: str, full: bool = False) -> None:
+def _render_checkpoint_table(
+    checkpoints: list[Any], *, title: str, full: bool = False
+) -> None:
     if not checkpoints:
         console.print("[info]No checkpoints found.[/info]")
         return
@@ -5628,7 +8074,9 @@ async def _handle_runtime_slash(state: _InteractiveChatState, args: list[str]) -
         console.print(f"[warning]{exc}. Try /runtime --limit 20.[/warning]")
         return
     if args:
-        console.print("[warning]Usage: /runtime [--limit N] [--full]. Try /help.[/warning]")
+        console.print(
+            "[warning]Usage: /runtime [--limit N] [--full]. Try /help.[/warning]"
+        )
         return
 
     snapshot = {}
@@ -5643,9 +8091,20 @@ async def _handle_runtime_slash(state: _InteractiveChatState, args: list[str]) -
                 ("tool", snapshot.get("current_tool") or ""),
                 ("queue", snapshot.get("queue_depth", 0)),
                 ("stream_queue", snapshot.get("stream_queue_depth", 0)),
-                ("context_remaining", f"{snapshot.get('context_remaining_pct')}%" if snapshot.get("context_remaining_pct") not in (None, "") else ""),
-                ("turn_cost", f"${float(snapshot.get('turn_cost_usd', 0.0) or 0.0):.4f}"),
-                ("session_cost", f"${float(snapshot.get('session_cost_usd', 0.0) or 0.0):.4f}"),
+                (
+                    "context_remaining",
+                    f"{snapshot.get('context_remaining_pct')}%"
+                    if snapshot.get("context_remaining_pct") not in (None, "")
+                    else "",
+                ),
+                (
+                    "turn_cost",
+                    f"${float(snapshot.get('turn_cost_usd', 0.0) or 0.0):.4f}",
+                ),
+                (
+                    "session_cost",
+                    f"${float(snapshot.get('session_cost_usd', 0.0) or 0.0):.4f}",
+                ),
                 ("approvals", snapshot.get("pending_permission_count", 0)),
                 ("checkpoint", snapshot.get("checkpoint_hint", "")),
             ],
@@ -5656,7 +8115,9 @@ async def _handle_runtime_slash(state: _InteractiveChatState, args: list[str]) -
 
     tasks = await store.get_tasks(project_id=_current_project_id(state.engine))
     terminal = {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED}
-    active_tasks = [task for task in tasks if getattr(task, "status", None) not in terminal]
+    active_tasks = [
+        task for task in tasks if getattr(task, "status", None) not in terminal
+    ]
     if active_tasks:
         table = Table(title=f"Active Tasks ({len(active_tasks[:limit])})")
         table.add_column("Task ID")
@@ -5684,13 +8145,19 @@ async def _handle_runtime_slash(state: _InteractiveChatState, args: list[str]) -
     _render_runtime_sessions(_dedupe_runtime_rows(runtime_rows), full=full)
 
     if hasattr(store, "list_external_sessions"):
-        external = await store.list_external_sessions(project_id=_current_project_id(state.engine), limit=limit)
+        external = await store.list_external_sessions(
+            project_id=_current_project_id(state.engine), limit=limit
+        )
     else:
         external = []
     _render_external_sessions(external, full=full)
 
-    checkpoints = await store.get_pending_checkpoints(project_id=_current_project_id(state.engine))
-    _render_checkpoint_table(checkpoints[:limit], title="Pending Checkpoints", full=full)
+    checkpoints = await store.get_pending_checkpoints(
+        project_id=_current_project_id(state.engine)
+    )
+    _render_checkpoint_table(
+        checkpoints[:limit], title="Pending Checkpoints", full=full
+    )
 
 
 async def _resolve_logs_target(
@@ -5710,12 +8177,18 @@ async def _resolve_logs_target(
     if task:
         task_project = str(getattr(task, "project_id", "") or "default")
         if task_project != project_id:
-            console.print(f"[warning]Task belongs to project '{task_project}'. Switch project first with /project {task_project}.[/warning]")
+            console.print(
+                f"[warning]Task belongs to project '{task_project}'. Switch project first with /project {task_project}.[/warning]"
+            )
             return None, None, [], None
         session_id = str(getattr(task, "session_id", "") or "")
         if session_id and hasattr(store, "get_session"):
             session = await store.get_session(session_id)
-        runtime_rows.extend(await _list_runtime_sessions_for_scope(store, project_id=project_id, task_id=target, limit=limit))
+        runtime_rows.extend(
+            await _list_runtime_sessions_for_scope(
+                store, project_id=project_id, task_id=target, limit=limit
+            )
+        )
         runtime_id = _runtime_session_id_from_task(task)
         if runtime_id and hasattr(store, "get_runtime_session"):
             row = await store.get_runtime_session(runtime_id)
@@ -5727,16 +8200,24 @@ async def _resolve_logs_target(
     if session:
         session_project = str(getattr(session, "project_id", "") or "default")
         if session_project != project_id:
-            console.print(f"[warning]Session belongs to project '{session_project}'. Switch project first with /project {session_project}.[/warning]")
+            console.print(
+                f"[warning]Session belongs to project '{session_project}'. Switch project first with /project {session_project}.[/warning]"
+            )
             return None, None, [], None
-        runtime_rows.extend(await _list_runtime_sessions_for_scope(store, project_id=project_id, session_id=target, limit=limit))
+        runtime_rows.extend(
+            await _list_runtime_sessions_for_scope(
+                store, project_id=project_id, session_id=target, limit=limit
+            )
+        )
         return None, session, _dedupe_runtime_rows(runtime_rows), None
     if hasattr(store, "get_runtime_session"):
         runtime_row = await store.get_runtime_session(target)
     if runtime_row:
         runtime_project = str(runtime_row.get("project_id", "") or "default")
         if runtime_project != project_id:
-            console.print(f"[warning]Runtime session belongs to project '{runtime_project}'. Switch project first with /project {runtime_project}.[/warning]")
+            console.print(
+                f"[warning]Runtime session belongs to project '{runtime_project}'. Switch project first with /project {runtime_project}.[/warning]"
+            )
             return None, None, [], None
         task_id = str(runtime_row.get("task_id", "") or "")
         session_id = str(runtime_row.get("session_id", "") or "")
@@ -5763,8 +8244,14 @@ def _render_task_progress(task: Any, *, limit: int, full: bool = False) -> None:
     console.print(table)
 
 
-async def _render_runtime_log_tables(store: Any, runtime_rows: list[Any], *, limit: int, full: bool = False) -> None:
-    runtime_ids = [_row_runtime_session_id(row) for row in runtime_rows if _row_runtime_session_id(row)]
+async def _render_runtime_log_tables(
+    store: Any, runtime_rows: list[Any], *, limit: int, full: bool = False
+) -> None:
+    runtime_ids = [
+        _row_runtime_session_id(row)
+        for row in runtime_rows
+        if _row_runtime_session_id(row)
+    ]
     if not runtime_ids:
         console.print("[info]No runtime session logs found.[/info]")
         return
@@ -5787,7 +8274,9 @@ async def _render_runtime_log_tables(store: Any, runtime_rows: list[Any], *, lim
         if hasattr(store, "list_runtime_transcript_entries"):
             entries = (await store.list_runtime_transcript_entries(runtime_id))[-limit:]
             if entries:
-                table = Table(title=f"Runtime Transcript: {runtime_id} ({len(entries)})")
+                table = Table(
+                    title=f"Runtime Transcript: {runtime_id} ({len(entries)})"
+                )
                 table.add_column("Created")
                 table.add_column("Role")
                 table.add_column("Type")
@@ -5829,7 +8318,11 @@ async def _render_runtime_log_tables(store: Any, runtime_rows: list[Any], *, lim
                     )
                 console.print(table)
         if hasattr(store, "list_runtime_permission_grants"):
-            grants = (await store.list_runtime_permission_grants(runtime_session_id=runtime_id))[-limit:]
+            grants = (
+                await store.list_runtime_permission_grants(
+                    runtime_session_id=runtime_id
+                )
+            )[-limit:]
             if grants:
                 table = Table(title=f"Permission Grants: {runtime_id} ({len(grants)})")
                 table.add_column("Scope")
@@ -5853,8 +8346,18 @@ def _clip_log_text(value: Any, limit: int = 1600, *, full: bool = False) -> str:
     return text[: max(0, limit - 3)].rstrip() + "..."
 
 
-_EXTERNAL_TRANSCRIPT_RE = re.compile(r"^\[External:(?P<agent>[^:\]]+):(?P<kind>[^\]]+)\]\s*(?P<body>.*)$", re.S)
-_STAFFING_CONTROL_REPLIES = {"approve", "approved", "auto", "auto recruit", "deny", "stop", "cancel"}
+_EXTERNAL_TRANSCRIPT_RE = re.compile(
+    r"^\[External:(?P<agent>[^:\]]+):(?P<kind>[^\]]+)\]\s*(?P<body>.*)$", re.S
+)
+_STAFFING_CONTROL_REPLIES = {
+    "approve",
+    "approved",
+    "auto",
+    "auto recruit",
+    "deny",
+    "stop",
+    "cancel",
+}
 _IMPORTANT_WORK_ITEM_EVENTS = {
     "approval_requested",
     "approval_resolved",
@@ -5884,7 +8387,17 @@ class _WorkItemLogCell:
 def _runtime_tool_payload_text(value: dict[str, Any], *, full: bool = False) -> str:
     if not isinstance(value, dict):
         return _clip_log_text(value, full=full)
-    for key in ("command", "cmd", "summary", "result_summary", "stdout", "stderr", "output", "text", "message"):
+    for key in (
+        "command",
+        "cmd",
+        "summary",
+        "result_summary",
+        "stdout",
+        "stderr",
+        "output",
+        "text",
+        "message",
+    ):
         if value.get(key):
             text = str(value.get(key) or "")
             if key in {"command", "cmd"}:
@@ -5920,7 +8433,15 @@ def _runtime_tool_result_text(value: Any, *, full: bool = False) -> str:
     if not isinstance(value, dict):
         return _clip_log_text(value, full=full)
     parts: list[str] = []
-    for key in ("stdout", "stderr", "output", "result_summary", "summary", "text", "message"):
+    for key in (
+        "stdout",
+        "stderr",
+        "output",
+        "result_summary",
+        "summary",
+        "text",
+        "message",
+    ):
         if value.get(key):
             parts.append(str(value.get(key) or "").strip())
     if parts:
@@ -5987,70 +8508,90 @@ def _runtime_stream_event_cells(
     item = event.get("item") if isinstance(event.get("item"), dict) else {}
     item_type = str(item.get("type", "") or "").strip()
 
-    if event_type in {"thread.started", "turn.started", "turn.completed", "turn.failed"}:
+    if event_type in {
+        "thread.started",
+        "turn.started",
+        "turn.completed",
+        "turn.failed",
+    }:
         if not full:
             return []
-        return [_WorkItemLogCell(
-            kind="event",
-            created_at=created_at,
-            label=f"runtime {event_type}",
-            content=_json_summary(event, limit=1000, full=full),
-            order=50,
-        )]
+        return [
+            _WorkItemLogCell(
+                kind="event",
+                created_at=created_at,
+                label=f"runtime {event_type}",
+                content=_json_summary(event, limit=1000, full=full),
+                order=50,
+            )
+        ]
 
-    if item_type == "agent_message" and event_type in {"item.completed", "item.started"}:
+    if item_type == "agent_message" and event_type in {
+        "item.completed",
+        "item.started",
+    }:
         text = str(item.get("text", "") or "").strip()
         if not text:
             return []
-        return [_WorkItemLogCell(
-            kind="thinking",
-            created_at=created_at,
-            label=agent,
-            content=text,
-            order=15,
-        )]
+        return [
+            _WorkItemLogCell(
+                kind="thinking",
+                created_at=created_at,
+                label=agent,
+                content=text,
+                order=15,
+            )
+        ]
 
     if item_type == "command_execution":
         if skip_tool_events:
             return []
         if event_type == "item.started":
-            return [_WorkItemLogCell(
-                kind="tool_call",
-                created_at=created_at,
-                label="command_execution",
-                content=_command_text_from_codex_item(item, full=full),
-                order=30,
-            )]
+            return [
+                _WorkItemLogCell(
+                    kind="tool_call",
+                    created_at=created_at,
+                    label="command_execution",
+                    content=_command_text_from_codex_item(item, full=full),
+                    order=30,
+                )
+            ]
         if event_type == "item.completed":
             status = str(item.get("status", "") or "").strip()
             exit_code = item.get("exit_code")
             content = _codex_command_output_text(item, full=full)
-            return [_WorkItemLogCell(
-                kind="tool_result",
-                created_at=created_at,
-                label="command_execution",
-                content=content,
-                order=35,
-                status=status,
-                exit_code=exit_code,
-            )]
+            return [
+                _WorkItemLogCell(
+                    kind="tool_result",
+                    created_at=created_at,
+                    label="command_execution",
+                    content=content,
+                    order=35,
+                    status=status,
+                    exit_code=exit_code,
+                )
+            ]
 
     if not full:
         return []
-    return [_WorkItemLogCell(
-        kind="event",
-        created_at=created_at,
-        label=f"runtime {event_type}",
-        content=_json_summary(event, limit=1000, full=full),
-        order=50,
-    )]
+    return [
+        _WorkItemLogCell(
+            kind="event",
+            created_at=created_at,
+            label=f"runtime {event_type}",
+            content=_json_summary(event, limit=1000, full=full),
+            order=50,
+        )
+    ]
 
 
 def _is_staffing_transcript_noise(role: str, content: str) -> bool:
     normalized = " ".join(str(content or "").strip().lower().split())
     if not normalized:
         return False
-    if role == "assistant" and normalized.startswith("company mode has a pending manual staffing selection"):
+    if role == "assistant" and normalized.startswith(
+        "company mode has a pending manual staffing selection"
+    ):
         return True
     if role == "user" and normalized in _STAFFING_CONTROL_REPLIES:
         return True
@@ -6073,10 +8614,22 @@ def _event_is_high_signal(event_type: str) -> bool:
         return False
     if normalized in _IMPORTANT_WORK_ITEM_EVENTS:
         return True
-    return any(token in normalized for token in ("approval", "checkpoint", "escalation", "fail", "error", "blocked"))
+    return any(
+        token in normalized
+        for token in (
+            "approval",
+            "checkpoint",
+            "escalation",
+            "fail",
+            "error",
+            "blocked",
+        )
+    )
 
 
-def _render_codex_block(content: Any, *, prefix: str = "  ", style: str = "", full: bool = False) -> None:
+def _render_codex_block(
+    content: Any, *, prefix: str = "  ", style: str = "", full: bool = False
+) -> None:
     body = _clip_log_text(content, full=full)
     if not body:
         return
@@ -6126,7 +8679,11 @@ def _render_work_item_log_cell(cell: _WorkItemLogCell, *, full: bool = False) ->
         if cell.exit_code is not None and str(cell.exit_code) != "":
             status_bits.append(f"exit_code={cell.exit_code}")
         suffix = f" ({', '.join(status_bits)})" if status_bits else ""
-        style = "success" if cell.status in {"", "completed", "success", "succeeded"} else "error"
+        style = (
+            "success"
+            if cell.status in {"", "completed", "success", "succeeded"}
+            else "error"
+        )
         console.print(f"{timestamp}[{style}]{escape(heading + suffix)}[/{style}]")
         _render_codex_block(cell.content, prefix="  ", full=full)
     elif cell.kind in {"permission", "event", "handoff"}:
@@ -6138,7 +8695,9 @@ def _render_work_item_log_cell(cell: _WorkItemLogCell, *, full: bool = False) ->
         _render_codex_block(cell.content, prefix="  ", full=full)
 
 
-def _render_work_item_logs_payload(payload: dict[str, Any], *, limit: int, full: bool = False) -> None:
+def _render_work_item_logs_payload(
+    payload: dict[str, Any], *, limit: int, full: bool = False
+) -> None:
     title_bits = []
     if payload.get("role_id"):
         title_bits.append(f"role={payload['role_id']}")
@@ -6146,13 +8705,19 @@ def _render_work_item_logs_payload(payload: dict[str, Any], *, limit: int, full:
         title_bits.append(f"work_item={str(payload['work_item_id'])[:12]}")
     if payload.get("session_id"):
         title_bits.append(f"session={str(payload['session_id'])[:8]}")
-    scope_title = "Work Item Logs" + (f" ({', '.join(title_bits)})" if title_bits else "")
+    scope_title = "Work Item Logs" + (
+        f" ({', '.join(title_bits)})" if title_bits else ""
+    )
     console.print(f"[bold]{escape(scope_title)}[/bold]")
 
     work_items = list(payload.get("work_items", []) or [])[:limit]
     for item in work_items:
         status = str(item.get("phase", "") or item.get("kanban_column", "") or "")
-        runtime = str(item.get("role_runtime_session_id", "") or item.get("claimed_by_role_runtime_session_id", "") or "").strip()
+        runtime = str(
+            item.get("role_runtime_session_id", "")
+            or item.get("claimed_by_role_runtime_session_id", "")
+            or ""
+        ).strip()
         suffix = f" [{status}]" if status else ""
         if runtime:
             suffix += f" runtime={_short_runtime_ref(runtime, full=full)}"
@@ -6184,19 +8749,23 @@ def _render_work_item_logs_payload(payload: dict[str, Any], *, limit: int, full:
             "system": "system",
             "subagent": agent_id or "subagent",
         }.get(role, agent_id or role or "assistant")
-        timeline.append(_WorkItemLogCell(
-            kind="user" if role == "user" else "assistant",
-            created_at=getattr(message, "created_at", None),
-            label=sender,
-            content=content,
-            order=10,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind="user" if role == "user" else "assistant",
+                created_at=getattr(message, "created_at", None),
+                label=sender,
+                content=content,
+                order=10,
+            )
+        )
 
     for entry in list(payload.get("runtime_transcript_entries", []) or [])[-limit:]:
         content = str(entry.get("content", "") or "")
         if not content:
             continue
-        stream_cells = _runtime_stream_event_cells(entry, full=full, skip_tool_events=bool(structured_tool_calls))
+        stream_cells = _runtime_stream_event_cells(
+            entry, full=full, skip_tool_events=bool(structured_tool_calls)
+        )
         if stream_cells:
             timeline.extend(stream_cells)
             continue
@@ -6226,82 +8795,107 @@ def _render_work_item_logs_payload(payload: dict[str, Any], *, limit: int, full:
             else:
                 kind = "assistant"
                 label = agent
-        timeline.append(_WorkItemLogCell(
-            kind=kind,
-            created_at=entry.get("created_at"),
-            label=label,
-            content=content,
-            order=order,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind=kind,
+                created_at=entry.get("created_at"),
+                label=label,
+                content=content,
+                order=order,
+            )
+        )
 
     for call in structured_tool_calls[-limit:]:
         tool_name = str(call.get("tool_name", "") or "tool")
-        timeline.append(_WorkItemLogCell(
-            kind="tool_call",
-            created_at=call.get("created_at"),
-            label=tool_name,
-            content=_runtime_tool_command_text(call.get("arguments", {}) or {}, full=full),
-            order=30,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind="tool_call",
+                created_at=call.get("created_at"),
+                label=tool_name,
+                content=_runtime_tool_command_text(
+                    call.get("arguments", {}) or {}, full=full
+                ),
+                order=30,
+            )
+        )
 
     for result in list(payload.get("runtime_tool_results", []) or [])[-limit:]:
         tool_name = str(result.get("tool_name", "") or "tool")
         status, exit_code = _runtime_tool_result_status(result.get("payload", {}) or {})
-        timeline.append(_WorkItemLogCell(
-            kind="tool_result",
-            created_at=result.get("created_at"),
-            label=tool_name,
-            content=_runtime_tool_result_text(result.get("payload", {}) or {}, full=full),
-            order=35,
-            status=status,
-            exit_code=exit_code,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind="tool_result",
+                created_at=result.get("created_at"),
+                label=tool_name,
+                content=_runtime_tool_result_text(
+                    result.get("payload", {}) or {}, full=full
+                ),
+                order=35,
+                status=status,
+                exit_code=exit_code,
+            )
+        )
 
     for event in list(payload.get("events", []) or [])[-limit:]:
         event_type = str(event.get("event_type", "") or "event")
         if not full and not _event_is_high_signal(event_type):
             continue
         work_item_id = str(event.get("work_item_id", "") or "")[:12]
-        timeline.append(_WorkItemLogCell(
-            kind="event",
-            created_at=event.get("created_at"),
-            label=f"event {event_type}",
-            content=f"{work_item_id} {_json_summary(event.get('payload', {}) or {}, limit=1000, full=full)}".strip(),
-            order=50,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind="event",
+                created_at=event.get("created_at"),
+                label=f"event {event_type}",
+                content=f"{work_item_id} {_json_summary(event.get('payload', {}) or {}, limit=1000, full=full)}".strip(),
+                order=50,
+            )
+        )
 
     for event in list(payload.get("runtime_events", []) or [])[-limit:]:
         event_type = str(event.get("event_type", "") or "runtime")
         if not full and not _event_is_high_signal(event_type):
             continue
-        timeline.append(_WorkItemLogCell(
-            kind="event",
-            created_at=event.get("created_at"),
-            label=f"runtime {event_type}",
-            content=_json_summary(event.get("payload", {}) or {}, limit=1000, full=full),
-            order=50,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind="event",
+                created_at=event.get("created_at"),
+                label=f"runtime {event_type}",
+                content=_json_summary(
+                    event.get("payload", {}) or {}, limit=1000, full=full
+                ),
+                order=50,
+            )
+        )
 
     for grant in list(payload.get("runtime_permission_grants", []) or [])[-limit:]:
-        timeline.append(_WorkItemLogCell(
-            kind="permission",
-            created_at=grant.get("created_at"),
-            label="permission",
-            content=f"{grant.get('scope', '')} {grant.get('tool_name', '')}: {grant.get('candidate', '')}".strip(),
-            order=45,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind="permission",
+                created_at=grant.get("created_at"),
+                label="permission",
+                content=f"{grant.get('scope', '')} {grant.get('tool_name', '')}: {grant.get('candidate', '')}".strip(),
+                order=45,
+            )
+        )
 
     for handoff in list(payload.get("handoffs", []) or [])[-limit:]:
-        timeline.append(_WorkItemLogCell(
-            kind="handoff",
-            created_at=handoff.get("created_at"),
-            label=f"handoff {handoff.get('from_role', '')}->{handoff.get('to_role', '')}",
-            content=str(handoff.get("summary", "") or _json_summary(handoff, limit=1000, full=full)),
-            order=40,
-        ))
+        timeline.append(
+            _WorkItemLogCell(
+                kind="handoff",
+                created_at=handoff.get("created_at"),
+                label=f"handoff {handoff.get('from_role', '')}->{handoff.get('to_role', '')}",
+                content=str(
+                    handoff.get("summary", "")
+                    or _json_summary(handoff, limit=1000, full=full)
+                ),
+                order=40,
+            )
+        )
 
     if not timeline and not work_items:
-        console.print("[info]No role/work-item logs found for the current session.[/info]")
+        console.print(
+            "[info]No role/work-item logs found for the current session.[/info]"
+        )
         return
 
     timeline.sort(key=lambda item: (str(item.created_at or ""), item.order, item.label))
@@ -6318,14 +8912,22 @@ async def _handle_logs_slash(state: _InteractiveChatState, args: list[str]) -> N
     try:
         args, limit, full = _parse_view_args(args)
     except ValueError as exc:
-        console.print(f"[warning]{exc}. Try /logs <task_id|session_id> --limit 20.[/warning]")
+        console.print(
+            f"[warning]{exc}. Try /logs <task_id|session_id> --limit 20.[/warning]"
+        )
         return
     if len(args) != 1:
-        console.print("[warning]Usage: /logs <task_id|session_id> [--limit N] [--full]. Try /session list or /tasks.[/warning]")
+        console.print(
+            "[warning]Usage: /logs <task_id|session_id> [--limit N] [--full]. Try /session list or /tasks.[/warning]"
+        )
         return
-    task, session, runtime_rows, missing = await _resolve_logs_target(state, args[0], limit=limit)
+    task, session, runtime_rows, missing = await _resolve_logs_target(
+        state, args[0], limit=limit
+    )
     if missing:
-        console.print(f"[warning]No task, session, or runtime session found for {missing}. Try /session list or /tasks.[/warning]")
+        console.print(
+            f"[warning]No task, session, or runtime session found for {missing}. Try /session list or /tasks.[/warning]"
+        )
         return
     if task:
         _render_key_value_table(
@@ -6356,18 +8958,27 @@ async def _handle_logs_slash(state: _InteractiveChatState, args: list[str]) -> N
     await _render_runtime_log_tables(store, runtime_rows, limit=limit, full=full)
 
 
-async def _task_scope_ids_for_comms(state: _InteractiveChatState, task: Any) -> list[str]:
+async def _task_scope_ids_for_comms(
+    state: _InteractiveChatState, task: Any
+) -> list[str]:
     task_id = str(getattr(task, "id", "") or "").strip()
     metadata = dict(getattr(task, "metadata", {}) or {})
     scope = {task_id}
-    scope.update(str(item).strip() for item in list(metadata.get("execution_task_ids", []) or []) if str(item).strip())
+    scope.update(
+        str(item).strip()
+        for item in list(metadata.get("execution_task_ids", []) or [])
+        if str(item).strip()
+    )
     parent_session_id = str(getattr(task, "session_id", "") or "").strip()
     store = getattr(state.engine, "store", None)
     if parent_session_id and store and hasattr(store, "get_tasks"):
         try:
             tasks = await store.get_tasks(project_id=_current_project_id(state.engine))
             for candidate in tasks:
-                if str(getattr(candidate, "parent_session_id", "") or "").strip() == parent_session_id:
+                if (
+                    str(getattr(candidate, "parent_session_id", "") or "").strip()
+                    == parent_session_id
+                ):
                     scope.add(str(getattr(candidate, "id", "") or "").strip())
         except Exception:
             pass
@@ -6377,7 +8988,9 @@ async def _task_scope_ids_for_comms(state: _InteractiveChatState, task: Any) -> 
 
 def _render_agent_messages(messages: list[Any], *, full: bool = False) -> None:
     if not messages:
-        console.print("[info]No company-mode messages found for this task scope.[/info]")
+        console.print(
+            "[info]No company-mode messages found for this task scope.[/info]"
+        )
         return
     table = Table(title=f"Company Messages ({len(messages)})")
     table.add_column("Time")
@@ -6436,21 +9049,31 @@ async def _handle_comms_slash(state: _InteractiveChatState, args: list[str]) -> 
         console.print(f"[warning]{exc}. Try /comms <task_id>.[/warning]")
         return
     if len(args) != 1:
-        console.print("[warning]Usage: /comms <task_id> [--limit N] [--full]. Try /tasks.[/warning]")
+        console.print(
+            "[warning]Usage: /comms <task_id> [--limit N] [--full]. Try /tasks.[/warning]"
+        )
         return
     task = await _get_task_for_current_project(state, args[0])
     if task is None:
         return
     scope_ids = await _task_scope_ids_for_comms(state, task)
     console.print(f"[info]Comms task scope: {', '.join(scope_ids)}[/info]")
-    messages = await store.list_agent_messages_for_tasks(scope_ids, limit=limit) if hasattr(store, "list_agent_messages_for_tasks") else []
+    messages = (
+        await store.list_agent_messages_for_tasks(scope_ids, limit=limit)
+        if hasattr(store, "list_agent_messages_for_tasks")
+        else []
+    )
     _render_agent_messages(messages, full=full)
 
     records: list[Any] = []
     if hasattr(store, "get_handoff_records"):
         seen: set[str] = set()
         for task_id in scope_ids:
-            for record in await store.get_handoff_records(project_id=_current_project_id(state.engine), task_id=task_id, limit=limit):
+            for record in await store.get_handoff_records(
+                project_id=_current_project_id(state.engine),
+                task_id=task_id,
+                limit=limit,
+            ):
                 handoff_id = str(getattr(record, "handoff_id", "") or "")
                 if handoff_id and handoff_id not in seen:
                     seen.add(handoff_id)
@@ -6460,24 +9083,42 @@ async def _handle_comms_slash(state: _InteractiveChatState, args: list[str]) -> 
     metadata = dict(getattr(task, "metadata", {}) or {})
     context_snapshot = dict(getattr(task, "context_snapshot", {}) or {})
     notes = []
-    for key in ("structured_review_verdict", "review_verdict", "review_notes", "handoff_context", "handoff_to"):
+    for key in (
+        "structured_review_verdict",
+        "review_verdict",
+        "review_notes",
+        "handoff_context",
+        "handoff_to",
+    ):
         if metadata.get(key):
             notes.append((key, _json_summary(metadata.get(key), full=full)))
         if context_snapshot.get(key):
-            notes.append((f"context.{key}", _json_summary(context_snapshot.get(key), full=full)))
+            notes.append(
+                (f"context.{key}", _json_summary(context_snapshot.get(key), full=full))
+            )
     if notes:
         _render_key_value_table("Review and Handoff Notes", notes, full=full)
     else:
-        console.print("[info]No review notes or handoff context found on the task.[/info]")
+        console.print(
+            "[info]No review notes or handoff context found on the task.[/info]"
+        )
 
 
-def _collect_attachment_refs(value: Any, source: str, out: list[tuple[str, dict[str, Any]]]) -> None:
+def _collect_attachment_refs(
+    value: Any, source: str, out: list[tuple[str, dict[str, Any]]]
+) -> None:
     if isinstance(value, dict):
         if value.get("attachment_id") or value.get("disk_path"):
-            if value.get("filename") or value.get("mime_type") or value.get("disk_path"):
+            if (
+                value.get("filename")
+                or value.get("mime_type")
+                or value.get("disk_path")
+            ):
                 out.append((source, dict(value)))
         for key, nested in value.items():
-            if key in {"attachment_refs", "attachments"} or isinstance(nested, (dict, list)):
+            if key in {"attachment_refs", "attachments"} or isinstance(
+                nested, (dict, list)
+            ):
                 _collect_attachment_refs(nested, source, out)
         return
     if isinstance(value, list):
@@ -6485,7 +9126,9 @@ def _collect_attachment_refs(value: Any, source: str, out: list[tuple[str, dict[
             _collect_attachment_refs(item, source, out)
 
 
-async def _handle_attachments_slash(state: _InteractiveChatState, args: list[str]) -> None:
+async def _handle_attachments_slash(
+    state: _InteractiveChatState, args: list[str]
+) -> None:
     store = _require_chat_store(state, label="Attachment store")
     if store is None:
         return
@@ -6501,21 +9144,39 @@ async def _handle_attachments_slash(state: _InteractiveChatState, args: list[str
     if state.session_id and hasattr(store, "get_session"):
         session = await store.get_session(state.session_id)
         if session:
-            _collect_attachment_refs(getattr(session, "metadata", {}) or {}, f"session:{state.session_id}", refs)
+            _collect_attachment_refs(
+                getattr(session, "metadata", {}) or {},
+                f"session:{state.session_id}",
+                refs,
+            )
     if state.session_id and hasattr(store, "get_session_transcript"):
         transcript = await store.get_session_transcript(state.session_id)
         for idx, item in enumerate(transcript):
             if isinstance(item, dict):
                 message = item.get("message")
-                _collect_attachment_refs(getattr(message, "metadata", {}) or {}, f"message:{idx}", refs)
+                _collect_attachment_refs(
+                    getattr(message, "metadata", {}) or {}, f"message:{idx}", refs
+                )
                 for part in item.get("parts", []) or []:
-                    payload = part.get("payload", {}) if isinstance(part, dict) else getattr(part, "payload", {})
+                    payload = (
+                        part.get("payload", {})
+                        if isinstance(part, dict)
+                        else getattr(part, "payload", {})
+                    )
                     _collect_attachment_refs(payload, f"message:{idx}", refs)
     if hasattr(store, "get_tasks"):
         for task in await store.get_tasks(project_id=_current_project_id(state.engine)):
             if str(getattr(task, "session_id", "") or "") == state.session_id:
-                _collect_attachment_refs(getattr(task, "metadata", {}) or {}, f"task:{getattr(task, 'id', '')}", refs)
-                _collect_attachment_refs(getattr(task, "result", {}) or {}, f"task:{getattr(task, 'id', '')}", refs)
+                _collect_attachment_refs(
+                    getattr(task, "metadata", {}) or {},
+                    f"task:{getattr(task, 'id', '')}",
+                    refs,
+                )
+                _collect_attachment_refs(
+                    getattr(task, "result", {}) or {},
+                    f"task:{getattr(task, 'id', '')}",
+                    refs,
+                )
     deduped: list[tuple[str, dict[str, Any]]] = []
     seen: set[str] = set()
     for source, ref in refs:
@@ -6553,23 +9214,41 @@ async def _handle_mode_slash(state: _InteractiveChatState, args: list[str]) -> N
         table.add_column("Current", justify="center")
         table.add_column("Command")
         table.add_row("task", "*" if state.mode == "task" else "", "/mode task")
-        table.add_row("company/corporate", "*" if state.mode == "company" and state.company_profile == "corporate" else "", "/mode company corporate")
-        table.add_row("company/custom", "*" if state.mode == "company" and state.company_profile == "custom" else "", "/mode company custom")
+        table.add_row(
+            "company/corporate",
+            "*"
+            if state.mode == "company" and state.company_profile == "corporate"
+            else "",
+            "/mode company corporate",
+        )
+        table.add_row(
+            "company/custom",
+            "*"
+            if state.mode == "company" and state.company_profile == "custom"
+            else "",
+            "/mode company custom",
+        )
         console.print(table)
-        console.print(f"[info]Current mode: {state.mode}; company_profile={state.company_profile}[/info]")
+        console.print(
+            f"[info]Current mode: {state.mode}; company_profile={state.company_profile}[/info]"
+        )
         return
     mode = args[0].strip().lower()
     if mode == "project":
         mode = "task"
     if mode not in _VALID_CHAT_MODES:
-        console.print("[warning]Usage: /mode [task|company] [corporate|custom][/warning]")
+        console.print(
+            "[warning]Usage: /mode [task|company] [corporate|custom][/warning]"
+        )
         return
     next_company_profile = state.company_profile
     if mode == "company":
         if len(args) >= 2:
             profile = args[1].strip().lower()
             if profile not in _VALID_COMPANY_PROFILES:
-                console.print("[warning]Company profile must be corporate or custom.[/warning]")
+                console.print(
+                    "[warning]Company profile must be corporate or custom.[/warning]"
+                )
                 return
             next_company_profile = profile
     state.mode = mode
@@ -6587,10 +9266,18 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
         table.add_column("Current", justify="center")
         table.add_column("Command")
         for agent in ["native", "codex", "claude_code", "cursor", "opencode"]:
-            table.add_row(agent, "*" if state.preferred_agent == agent else "", f"/agent {agent}")
-        table.add_row("system default", "*" if state.preferred_agent is None else "", "/agent none")
+            table.add_row(
+                agent, "*" if state.preferred_agent == agent else "", f"/agent {agent}"
+            )
+        table.add_row(
+            "system default",
+            "*" if state.preferred_agent is None else "",
+            "/agent none",
+        )
         console.print(table)
-        console.print(f"[info]Preferred agent: {state.preferred_agent or '(system default)'}[/info]")
+        console.print(
+            f"[info]Preferred agent: {state.preferred_agent or '(system default)'}[/info]"
+        )
         return
     command = args[0].strip().lower()
     if command in {"list", "ls"}:
@@ -6602,7 +9289,12 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
         if len(args) != 2:
             console.print("[warning]Usage: /agent detail <agent_id>[/warning]")
             return
-        payload = await _run_chat_office_service(state, lambda svc: svc.agent.detail(project_id=_current_project_id(state.engine), agent_id=args[1]))
+        payload = await _run_chat_office_service(
+            state,
+            lambda svc: svc.agent.detail(
+                project_id=_current_project_id(state.engine), agent_id=args[1]
+            ),
+        )
         if payload:
             _emit_payload(payload)
         return
@@ -6615,11 +9307,18 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
             console.print(f"[warning]{exc}[/warning]")
             return
         if len(rest) != 2:
-            console.print("[warning]Usage: /agent create <name> <role_id> [--description ...] [--office ...][/warning]")
+            console.print(
+                "[warning]Usage: /agent create <name> <role_id> [--description ...] [--office ...][/warning]"
+            )
             return
         payload = await _run_chat_office_service(
             state,
-            lambda svc: svc.agent.create(name=rest[0], role_id=rest[1], office_id=office_id or "office-0", description=description or ""),
+            lambda svc: svc.agent.create(
+                name=rest[0],
+                role_id=rest[1],
+                office_id=office_id or "office-0",
+                description=description or "",
+            ),
         )
         if payload:
             _emit_payload(payload)
@@ -6633,11 +9332,17 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
             console.print(f"[warning]{exc}[/warning]")
             return
         if len(rest) != 1:
-            console.print("[warning]Usage: /agent create-from-template <template_id> [--role <role_id>] [--office ...][/warning]")
+            console.print(
+                "[warning]Usage: /agent create-from-template <template_id> [--role <role_id>] [--office ...][/warning]"
+            )
             return
         payload = await _run_chat_office_service(
             state,
-            lambda svc: svc.agent.create_from_template(template_id=rest[0], role_id=role_id or rest[0], office_id=office_id or "office-0"),
+            lambda svc: svc.agent.create_from_template(
+                template_id=rest[0],
+                role_id=role_id or rest[0],
+                office_id=office_id or "office-0",
+            ),
         )
         if payload:
             _emit_payload(payload)
@@ -6650,9 +9355,16 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
             console.print(f"[warning]{exc}[/warning]")
             return
         if len(rest) != 1:
-            console.print("[warning]Usage: /agent import-employee <employee_id> [--office ...][/warning]")
+            console.print(
+                "[warning]Usage: /agent import-employee <employee_id> [--office ...][/warning]"
+            )
             return
-        payload = await _run_chat_office_service(state, lambda svc: svc.agent.import_employee(employee_id=rest[0], office_id=office_id or "office-0"))
+        payload = await _run_chat_office_service(
+            state,
+            lambda svc: svc.agent.import_employee(
+                employee_id=rest[0], office_id=office_id or "office-0"
+            ),
+        )
         if payload:
             _emit_payload(payload)
         return
@@ -6660,10 +9372,14 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
         if len(args) < 2:
             console.print("[warning]Usage: /agent delete <agent_id> --yes[/warning]")
             return
-        remaining, ok = _require_yes_arg(args[2:], usage="/agent delete <agent_id> --yes")
+        remaining, ok = _require_yes_arg(
+            args[2:], usage="/agent delete <agent_id> --yes"
+        )
         if not ok or remaining:
             return
-        payload = await _run_chat_office_service(state, lambda svc: svc.agent.delete(args[1]))
+        payload = await _run_chat_office_service(
+            state, lambda svc: svc.agent.delete(args[1])
+        )
         if payload:
             _emit_payload(payload)
         return
@@ -6676,11 +9392,18 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
             console.print(f"[warning]{exc}[/warning]")
             return
         if len(rest) != 2:
-            console.print("[warning]Usage: /agent move <agent_id> <office_id> [--seat-zone ...] [--desk ...][/warning]")
+            console.print(
+                "[warning]Usage: /agent move <agent_id> <office_id> [--seat-zone ...] [--desk ...][/warning]"
+            )
             return
         payload = await _run_chat_office_service(
             state,
-            lambda svc: svc.agent.move(agent_id=rest[0], office_id=rest[1], seat_zone=seat_zone, desk_id=desk_id),
+            lambda svc: svc.agent.move(
+                agent_id=rest[0],
+                office_id=rest[1],
+                seat_zone=seat_zone,
+                desk_id=desk_id,
+            ),
         )
         if payload:
             _emit_payload(payload)
@@ -6689,7 +9412,9 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
     if agent in {"none", "auto", "default"}:
         state.preferred_agent = None
         await _persist_chat_context(state)
-        console.print("[success]Preferred agent cleared; using system default.[/success]")
+        console.print(
+            "[success]Preferred agent cleared; using system default.[/success]"
+        )
         return
     if agent not in _VALID_PREFERRED_AGENTS:
         valid = ", ".join(sorted([*_VALID_PREFERRED_AGENTS, "none"]))
@@ -6702,14 +9427,18 @@ async def _handle_agent_slash(state: _InteractiveChatState, args: list[str]) -> 
 
 def _handle_domains_slash(state: _InteractiveChatState, args: list[str]) -> None:
     if not args:
-        console.print(f"[info]Domains: {', '.join(state.domains) if state.domains else '(none)'}[/info]")
+        console.print(
+            f"[info]Domains: {', '.join(state.domains) if state.domains else '(none)'}[/info]"
+        )
         return
     if len(args) == 1 and args[0].strip().lower() in {"clear", "none", "reset"}:
         state.domains = []
         console.print("[success]Domain hints cleared.[/success]")
         return
     state.domains = [arg.strip().lower() for arg in args if arg.strip()]
-    console.print(f"[success]Domains set to: {', '.join(state.domains) if state.domains else '(none)'}[/success]")
+    console.print(
+        f"[success]Domains set to: {', '.join(state.domains) if state.domains else '(none)'}[/success]"
+    )
 
 
 def _staffing_checkpoint_key(checkpoint: Any) -> str:
@@ -6731,10 +9460,18 @@ def _normalize_cli_staffing_selection(value: Any) -> dict[str, str]:
     kind = str(value.get("kind", "") or "").strip().lower()
     if kind in {"employee", "emp"}:
         selected_id = str(value.get("id") or value.get("employee_id") or "").strip()
-        return {"kind": "employee", "id": selected_id} if selected_id else {"kind": "fallback", "id": ""}
+        return (
+            {"kind": "employee", "id": selected_id}
+            if selected_id
+            else {"kind": "fallback", "id": ""}
+        )
     if kind in {"template", "tpl"}:
         selected_id = str(value.get("id") or value.get("template_id") or "").strip()
-        return {"kind": "template", "id": selected_id} if selected_id else {"kind": "fallback", "id": ""}
+        return (
+            {"kind": "template", "id": selected_id}
+            if selected_id
+            else {"kind": "fallback", "id": ""}
+        )
     return {"kind": "fallback", "id": ""}
 
 
@@ -6745,15 +9482,22 @@ def _company_staffing_default_draft(payload: dict[str, Any]) -> dict[str, Any]:
         role_id = str(role.get("role_id", "") or "").strip()
         if not role_id:
             continue
-        selections[role_id] = _normalize_cli_staffing_selection(role.get("default_selection"))
+        selections[role_id] = _normalize_cli_staffing_selection(
+            role.get("default_selection")
+        )
         role_agents[role_id] = (
-            str(role.get("selected_agent") or role.get("default_agent") or "codex").strip().lower().replace("-", "_")
+            str(role.get("selected_agent") or role.get("default_agent") or "codex")
+            .strip()
+            .lower()
+            .replace("-", "_")
             or "codex"
         )
     return {"staffing_selections": selections, "recruitment_role_agents": role_agents}
 
 
-def _company_staffing_resume_metadata(draft: dict[str, Any], checkpoint: Any | None = None) -> dict[str, Any]:
+def _company_staffing_resume_metadata(
+    draft: dict[str, Any], checkpoint: Any | None = None
+) -> dict[str, Any]:
     metadata = {
         "staffing_action": "manual_approve",
         "staffing_selections": dict(draft.get("staffing_selections", {}) or {}),
@@ -6767,7 +9511,9 @@ def _company_staffing_resume_metadata(draft: dict[str, Any], checkpoint: Any | N
     return metadata
 
 
-def _staffing_pool_maps(payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+def _staffing_pool_maps(
+    payload: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     pool = dict(payload.get("staffing_pool", {}) or {})
     employees = {
         str(item.get("employee_id", "") or "").strip(): dict(item)
@@ -6797,12 +9543,17 @@ def _company_staffing_selection_label(selection: Any, payload: dict[str, Any]) -
     return "role-only fallback"
 
 
-def _company_staffing_agent_choices(state: _InteractiveChatState) -> list[dict[str, Any]]:
+def _company_staffing_agent_choices(
+    state: _InteractiveChatState,
+) -> list[dict[str, Any]]:
     available: set[str] = {"native"}
     registry = getattr(state.engine, "adapter_registry", None)
     if registry and callable(getattr(registry, "list_available", None)):
         try:
-            available.update(str(item).strip().lower().replace("-", "_") for item in registry.list_available())
+            available.update(
+                str(item).strip().lower().replace("-", "_")
+                for item in registry.list_available()
+            )
         except Exception:
             pass
     ordered = ["native", "codex", "claude_code", "cursor", "opencode"]
@@ -6817,7 +9568,9 @@ def _company_staffing_agent_choices(state: _InteractiveChatState) -> list[dict[s
     ]
 
 
-def _company_staffing_employee_choices(payload: dict[str, Any], role: dict[str, Any]) -> list[dict[str, Any]]:
+def _company_staffing_employee_choices(
+    payload: dict[str, Any], role: dict[str, Any]
+) -> list[dict[str, Any]]:
     employees, templates = _staffing_pool_maps(payload)
     role_id = str(role.get("role_id", "") or "").strip()
     same_role_ids = [
@@ -6833,7 +9586,9 @@ def _company_staffing_employee_choices(payload: dict[str, Any], role: dict[str, 
         if not employee or employee_id in seen:
             return
         seen.add(employee_id)
-        label = f"{prefix}: {employee.get('employee_name') or employee_id} ({employee_id})"
+        label = (
+            f"{prefix}: {employee.get('employee_name') or employee_id} ({employee_id})"
+        )
         choices.append(
             {
                 "kind": "employee",
@@ -6880,11 +9635,20 @@ def _company_staffing_employee_choices(payload: dict[str, Any], role: dict[str, 
             }
         )
     if bool(role.get("fallback_available", True)):
-        choices.append({"kind": "fallback", "id": "", "label": "fallback: role-only execution", "search": f"fallback role only {role_id}"})
+        choices.append(
+            {
+                "kind": "fallback",
+                "id": "",
+                "label": "fallback: role-only execution",
+                "search": f"fallback role only {role_id}",
+            }
+        )
     return choices
 
 
-def _company_staffing_filter_options(options: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+def _company_staffing_filter_options(
+    options: list[dict[str, Any]], query: str
+) -> list[dict[str, Any]]:
     normalized = str(query or "").strip().lower()
     if not normalized:
         return options
@@ -6894,7 +9658,10 @@ def _company_staffing_filter_options(options: list[dict[str, Any]], query: str) 
     return [
         option
         for option in options
-        if all(token in f"{option.get('label', '')} {option.get('search', '')}".lower() for token in tokens)
+        if all(
+            token in f"{option.get('label', '')} {option.get('search', '')}".lower()
+            for token in tokens
+        )
     ]
 
 
@@ -6906,7 +9673,9 @@ def _render_company_staffing_summary(
     payload = _company_staffing_payload(checkpoint)
     selections = dict(draft.get("staffing_selections", {}) or {})
     role_agents = dict(draft.get("recruitment_role_agents", {}) or {})
-    agent_status = {item["agent"]: item for item in _company_staffing_agent_choices(state)}
+    agent_status = {
+        item["agent"]: item for item in _company_staffing_agent_choices(state)
+    }
     table = Table(title="Company Staffing Preflight")
     table.add_column("Role", style="cyan")
     table.add_column("Employee / Template")
@@ -6917,8 +9686,22 @@ def _render_company_staffing_summary(
         if not role_id:
             continue
         role_label = str(role.get("role_label", "") or role_id)
-        agent = str(role_agents.get(role_id) or role.get("selected_agent") or role.get("default_agent") or "codex").strip().lower().replace("-", "_")
-        status = "available" if agent_status.get(agent, {}).get("available") else "unavailable"
+        agent = (
+            str(
+                role_agents.get(role_id)
+                or role.get("selected_agent")
+                or role.get("default_agent")
+                or "codex"
+            )
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        status = (
+            "available"
+            if agent_status.get(agent, {}).get("available")
+            else "unavailable"
+        )
         table.add_row(
             f"{role_label}\n[dim]{role_id}[/dim]",
             _company_staffing_selection_label(selections.get(role_id), payload),
@@ -6931,9 +9714,13 @@ def _render_company_staffing_summary(
     if summary:
         console.print(f"[dim]{summary}[/dim]")
     if recommended == "auto_recruit":
-        console.print("[info]r auto recruit (recommended) | e edit | a approve selections | c context | d deny | /staffing reopen this editor later[/info]")
+        console.print(
+            "[info]r auto recruit (recommended) | e edit | a approve selections | c context | d deny | /staffing reopen this editor later[/info]"
+        )
     else:
-        console.print("[info]a approve selections | e edit | c context | r auto recruit | d deny | /staffing reopen this editor later[/info]")
+        console.print(
+            "[info]a approve selections | e edit | c context | r auto recruit | d deny | /staffing reopen this editor later[/info]"
+        )
 
 
 def _render_company_staffing_context_preview(
@@ -6942,7 +9729,10 @@ def _render_company_staffing_context_preview(
     draft: dict[str, Any],
 ) -> None:
     payload = _company_staffing_payload(checkpoint)
-    original_message = _clip_text(payload.get("original_message"), 360, full=False) or "(empty request)"
+    original_message = (
+        _clip_text(payload.get("original_message"), 360, full=False)
+        or "(empty request)"
+    )
     selections = dict(draft.get("staffing_selections", {}) or {})
     role_agents = dict(draft.get("recruitment_role_agents", {}) or {})
     table = Table(title="Initial Role Context Preview")
@@ -6955,9 +9745,18 @@ def _render_company_staffing_context_preview(
         if not role_id:
             continue
         role_label = str(role.get("role_label", "") or role_id).strip()
-        role_responsibility = _clip_text(role.get("role_responsibility"), 180, full=False)
-        selected_agent = str(role_agents.get(role_id) or role.get("selected_agent") or role.get("default_agent") or "codex").strip()
-        staffing_label = _company_staffing_selection_label(selections.get(role_id), payload)
+        role_responsibility = _clip_text(
+            role.get("role_responsibility"), 180, full=False
+        )
+        selected_agent = str(
+            role_agents.get(role_id)
+            or role.get("selected_agent")
+            or role.get("default_agent")
+            or "codex"
+        ).strip()
+        staffing_label = _company_staffing_selection_label(
+            selections.get(role_id), payload
+        )
         context_lines = [
             f"Owner request: {original_message}",
         ]
@@ -6976,7 +9775,9 @@ def _render_company_staffing_context_preview(
     console.print(table)
 
 
-async def _latest_company_staffing_checkpoint(state: _InteractiveChatState) -> Any | None:
+async def _latest_company_staffing_checkpoint(
+    state: _InteractiveChatState,
+) -> Any | None:
     getter = getattr(state.engine, "get_latest_pending_checkpoint_for_session", None)
     if not callable(getter) or not state.session_id:
         return None
@@ -6984,12 +9785,17 @@ async def _latest_company_staffing_checkpoint(state: _InteractiveChatState) -> A
         checkpoint = await getter(state.session_id)
     except Exception:
         return None
-    if str(getattr(checkpoint, "checkpoint_type", "") or "") != "company_staffing_selection":
+    if (
+        str(getattr(checkpoint, "checkpoint_type", "") or "")
+        != "company_staffing_selection"
+    ):
         return None
     return checkpoint
 
 
-def _apply_staffing_choice(draft: dict[str, Any], role_id: str, choice: dict[str, Any], *, column: str) -> None:
+def _apply_staffing_choice(
+    draft: dict[str, Any], role_id: str, choice: dict[str, Any], *, column: str
+) -> None:
     if column == "agent":
         agent = str(choice.get("agent", "") or "").strip().lower().replace("-", "_")
         if agent:
@@ -6998,9 +9804,15 @@ def _apply_staffing_choice(draft: dict[str, Any], role_id: str, choice: dict[str
     kind = str(choice.get("kind", "") or "fallback").strip().lower()
     selected_id = str(choice.get("id", "") or "").strip()
     if kind not in {"employee", "template"}:
-        draft.setdefault("staffing_selections", {})[role_id] = {"kind": "fallback", "id": ""}
+        draft.setdefault("staffing_selections", {})[role_id] = {
+            "kind": "fallback",
+            "id": "",
+        }
     else:
-        draft.setdefault("staffing_selections", {})[role_id] = {"kind": kind, "id": selected_id}
+        draft.setdefault("staffing_selections", {})[role_id] = {
+            "kind": kind,
+            "id": selected_id,
+        }
 
 
 def _render_staffing_editor_text(
@@ -7012,7 +9824,11 @@ def _render_staffing_editor_text(
     query: str,
     choice_index: int,
 ) -> str:
-    roles = [dict(role) for role in list(payload.get("staffing_roles", []) or []) if str(role.get("role_id", "") or "").strip()]
+    roles = [
+        dict(role)
+        for role in list(payload.get("staffing_roles", []) or [])
+        if str(role.get("role_id", "") or "").strip()
+    ]
     if not roles:
         return "No staffing roles are available.\nPress q to exit."
     row_index = max(0, min(row_index, len(roles) - 1))
@@ -7035,12 +9851,27 @@ def _render_staffing_editor_text(
     for idx, item in enumerate(roles):
         item_role_id = str(item.get("role_id", "") or "")
         marker = ">" if idx == row_index else " "
-        selected = _company_staffing_selection_label(selections.get(item_role_id), payload)
-        agent = str(role_agents.get(item_role_id) or item.get("selected_agent") or item.get("default_agent") or "codex")
-        lines.append(f"{marker} {item.get('role_label') or item_role_id} [{item_role_id}]")
+        selected = _company_staffing_selection_label(
+            selections.get(item_role_id), payload
+        )
+        agent = str(
+            role_agents.get(item_role_id)
+            or item.get("selected_agent")
+            or item.get("default_agent")
+            or "codex"
+        )
+        lines.append(
+            f"{marker} {item.get('role_label') or item_role_id} [{item_role_id}]"
+        )
         lines.append(f"    Employee/Template: {selected}")
         lines.append(f"    Agent: {agent}")
-    lines.extend(["", f"Editing {role.get('role_label') or role_id} / {column_name}", f"Search: {query or '(all)'}"])
+    lines.extend(
+        [
+            "",
+            f"Editing {role.get('role_label') or role_id} / {column_name}",
+            f"Search: {query or '(all)'}",
+        ]
+    )
     if not matches:
         lines.append("  no matches")
     for idx, option in enumerate(matches):
@@ -7055,9 +9886,15 @@ async def _edit_company_staffing_draft(
     draft: dict[str, Any],
 ) -> dict[str, Any] | None:
     payload = _company_staffing_payload(checkpoint)
-    roles = [dict(role) for role in list(payload.get("staffing_roles", []) or []) if str(role.get("role_id", "") or "").strip()]
+    roles = [
+        dict(role)
+        for role in list(payload.get("staffing_roles", []) or [])
+        if str(role.get("role_id", "") or "").strip()
+    ]
     if not roles:
-        console.print("[warning]This staffing checkpoint has no roles to edit.[/warning]")
+        console.print(
+            "[warning]This staffing checkpoint has no roles to edit.[/warning]"
+        )
         return draft
     working = {
         "staffing_selections": dict(draft.get("staffing_selections", {}) or {}),
@@ -7092,10 +9929,14 @@ async def _edit_company_staffing_draft(
         choice_index = 0
 
     def _render() -> str:
-        return _render_staffing_editor_text(state, payload, working, row_index, column_index, query, choice_index)
+        return _render_staffing_editor_text(
+            state, payload, working, row_index, column_index, query, choice_index
+        )
 
     @kb.add("up")
-    def _up(event) -> None:  # pragma: no cover - exercised through prompt_toolkit in real terminals
+    def _up(
+        event,
+    ) -> None:  # pragma: no cover - exercised through prompt_toolkit in real terminals
         nonlocal row_index, choice_index
         if query:
             choice_index = max(0, choice_index - 1)
@@ -7140,7 +9981,12 @@ async def _edit_company_staffing_draft(
         if not options:
             return
         role_id = str(roles[row_index].get("role_id", "") or "")
-        _apply_staffing_choice(working, role_id, options[min(choice_index, len(options) - 1)], column="agent" if column_index else "employee")
+        _apply_staffing_choice(
+            working,
+            role_id,
+            options[min(choice_index, len(options) - 1)],
+            column="agent" if column_index else "employee",
+        )
         query = ""
         _reset_choice()
 
@@ -7168,7 +10014,9 @@ async def _edit_company_staffing_draft(
             _reset_choice()
 
     app_editor = Application(
-        layout=Layout(HSplit([Window(content=FormattedTextControl(_render), wrap_lines=False)])),
+        layout=Layout(
+            HSplit([Window(content=FormattedTextControl(_render), wrap_lines=False)])
+        ),
         key_bindings=kb,
         full_screen=False,
     )
@@ -7179,9 +10027,15 @@ async def _edit_company_staffing_draft(
     return working if saved else None
 
 
-def _edit_company_staffing_draft_fallback(payload: dict[str, Any], draft: dict[str, Any]) -> dict[str, Any]:
-    console.print("[warning]Interactive editor unavailable. Use text overrides; blank line saves.[/warning]")
-    console.print("Examples: senior_engineer=emp:employee-id | senior_engineer=tpl:template-id | senior_engineer=fallback | agent senior_engineer=codex")
+def _edit_company_staffing_draft_fallback(
+    payload: dict[str, Any], draft: dict[str, Any]
+) -> dict[str, Any]:
+    console.print(
+        "[warning]Interactive editor unavailable. Use text overrides; blank line saves.[/warning]"
+    )
+    console.print(
+        "Examples: senior_engineer=emp:employee-id | senior_engineer=tpl:template-id | senior_engineer=fallback | agent senior_engineer=codex"
+    )
     roles = {
         str(role.get("role_id", "") or "").strip()
         for role in list(payload.get("staffing_roles", []) or [])
@@ -7203,21 +10057,34 @@ def _edit_company_staffing_draft_fallback(payload: dict[str, Any], draft: dict[s
             if role_id not in roles:
                 console.print(f"[warning]Unknown role: {role_id}[/warning]")
                 continue
-            draft.setdefault("recruitment_role_agents", {})[role_id] = agent.lower().replace("-", "_")
+            draft.setdefault("recruitment_role_agents", {})[role_id] = (
+                agent.lower().replace("-", "_")
+            )
             continue
         if "=" not in raw:
-            console.print("[warning]Usage: <role_id>=emp:<id> | <role_id>=tpl:<id> | <role_id>=fallback[/warning]")
+            console.print(
+                "[warning]Usage: <role_id>=emp:<id> | <role_id>=tpl:<id> | <role_id>=fallback[/warning]"
+            )
             continue
         role_id, selection = [part.strip() for part in raw.split("=", 1)]
         if role_id not in roles:
             console.print(f"[warning]Unknown role: {role_id}[/warning]")
             continue
         if selection.lower().startswith("emp:"):
-            draft.setdefault("staffing_selections", {})[role_id] = {"kind": "employee", "id": selection.split(":", 1)[1].strip()}
+            draft.setdefault("staffing_selections", {})[role_id] = {
+                "kind": "employee",
+                "id": selection.split(":", 1)[1].strip(),
+            }
         elif selection.lower().startswith("tpl:"):
-            draft.setdefault("staffing_selections", {})[role_id] = {"kind": "template", "id": selection.split(":", 1)[1].strip()}
+            draft.setdefault("staffing_selections", {})[role_id] = {
+                "kind": "template",
+                "id": selection.split(":", 1)[1].strip(),
+            }
         else:
-            draft.setdefault("staffing_selections", {})[role_id] = {"kind": "fallback", "id": ""}
+            draft.setdefault("staffing_selections", {})[role_id] = {
+                "kind": "fallback",
+                "id": "",
+            }
 
 
 async def _resume_company_staffing_checkpoint(
@@ -7238,7 +10105,11 @@ async def _resume_company_staffing_checkpoint(
         metadata = {"staffing_action": "deny"}
     else:
         content = "approve"
-        metadata = _company_staffing_resume_metadata(draft or _company_staffing_default_draft(_company_staffing_payload(checkpoint)), checkpoint)
+        metadata = _company_staffing_resume_metadata(
+            draft
+            or _company_staffing_default_draft(_company_staffing_payload(checkpoint)),
+            checkpoint,
+        )
     if action in {"auto", "deny"}:
         checkpoint_id = str(getattr(checkpoint, "checkpoint_id", "") or "").strip()
         if checkpoint_id:
@@ -7275,21 +10146,33 @@ async def _resume_company_staffing_checkpoint(
         _print_response(response, state.no_markdown)
 
 
-async def _maybe_run_company_staffing_preflight(state: _InteractiveChatState, controller: ChatTurnController | None = None) -> bool:
+async def _maybe_run_company_staffing_preflight(
+    state: _InteractiveChatState, controller: ChatTurnController | None = None
+) -> bool:
     checkpoint = await _latest_company_staffing_checkpoint(state)
     if checkpoint is None:
         return False
     key = _staffing_checkpoint_key(checkpoint)
-    draft = state.company_staffing_drafts.setdefault(key, _company_staffing_default_draft(_company_staffing_payload(checkpoint)))
+    draft = state.company_staffing_drafts.setdefault(
+        key, _company_staffing_default_draft(_company_staffing_payload(checkpoint))
+    )
     while True:
         _render_company_staffing_summary(state, checkpoint, draft)
         try:
-            choice = console.input("[bold]Company preflight [a/e/c/r/d]: [/bold]").strip().lower()
+            choice = (
+                console.input("[bold]Company preflight [a/e/c/r/d]: [/bold]")
+                .strip()
+                .lower()
+            )
         except (EOFError, KeyboardInterrupt):
-            console.print("[warning]Staffing selection left pending. Reopen with /staffing.[/warning]")
+            console.print(
+                "[warning]Staffing selection left pending. Reopen with /staffing.[/warning]"
+            )
             return True
         if choice in {"a", "approve", "y", "yes", ""}:
-            await _resume_company_staffing_checkpoint(state, checkpoint, action="approve", draft=draft, controller=controller)
+            await _resume_company_staffing_checkpoint(
+                state, checkpoint, action="approve", draft=draft, controller=controller
+            )
             state.company_staffing_drafts.pop(key, None)
             return True
         if choice in {"e", "edit"}:
@@ -7303,11 +10186,15 @@ async def _maybe_run_company_staffing_preflight(state: _InteractiveChatState, co
             _render_company_staffing_context_preview(state, checkpoint, draft)
             continue
         if choice in {"r", "auto", "auto recruit", "autorecruit"}:
-            await _resume_company_staffing_checkpoint(state, checkpoint, action="auto", draft=draft, controller=controller)
+            await _resume_company_staffing_checkpoint(
+                state, checkpoint, action="auto", draft=draft, controller=controller
+            )
             state.company_staffing_drafts.pop(key, None)
             return True
         if choice in {"d", "deny", "cancel", "stop", "n", "no"}:
-            await _resume_company_staffing_checkpoint(state, checkpoint, action="deny", draft=draft, controller=controller)
+            await _resume_company_staffing_checkpoint(
+                state, checkpoint, action="deny", draft=draft, controller=controller
+            )
             state.company_staffing_drafts.pop(key, None)
             return True
         console.print("[warning]Choose a, e, c, r, or d.[/warning]")
@@ -7351,7 +10238,9 @@ async def _handle_company_staffing_shortcut(
         _company_staffing_default_draft(_company_staffing_payload(checkpoint)),
     )
     if choice in {"a", "approve", "y", "yes"}:
-        await _resume_company_staffing_checkpoint(state, checkpoint, action="approve", draft=draft, controller=controller)
+        await _resume_company_staffing_checkpoint(
+            state, checkpoint, action="approve", draft=draft, controller=controller
+        )
         state.company_staffing_drafts.pop(key, None)
         return True
     if choice in {"e", "edit"}:
@@ -7366,30 +10255,46 @@ async def _handle_company_staffing_shortcut(
         _render_company_staffing_context_preview(state, checkpoint, draft)
         return True
     if choice in {"r", "auto", "auto recruit", "autorecruit"}:
-        await _resume_company_staffing_checkpoint(state, checkpoint, action="auto", draft=draft, controller=controller)
+        await _resume_company_staffing_checkpoint(
+            state, checkpoint, action="auto", draft=draft, controller=controller
+        )
         state.company_staffing_drafts.pop(key, None)
         return True
     if choice in {"d", "deny", "cancel", "stop", "n", "no"}:
-        await _resume_company_staffing_checkpoint(state, checkpoint, action="deny", draft=draft, controller=controller)
+        await _resume_company_staffing_checkpoint(
+            state, checkpoint, action="deny", draft=draft, controller=controller
+        )
         state.company_staffing_drafts.pop(key, None)
         return True
     return False
 
 
-async def _handle_staffing_slash(state: _InteractiveChatState, args: list[str], controller: ChatTurnController | None = None) -> None:
+async def _handle_staffing_slash(
+    state: _InteractiveChatState,
+    args: list[str],
+    controller: ChatTurnController | None = None,
+) -> None:
     if args and args[0].strip().lower() not in {"context", "ctx", "preview"}:
         console.print("[warning]Usage: /staffing [context][/warning]")
         return
-    if not args and not await _maybe_run_company_staffing_preflight(state, controller=controller):
-        console.print("[info]No pending company staffing selection for this session.[/info]")
+    if not args and not await _maybe_run_company_staffing_preflight(
+        state, controller=controller
+    ):
+        console.print(
+            "[info]No pending company staffing selection for this session.[/info]"
+        )
         return
     if args:
         checkpoint = await _latest_company_staffing_checkpoint(state)
         if checkpoint is None:
-            console.print("[info]No pending company staffing selection for this session.[/info]")
+            console.print(
+                "[info]No pending company staffing selection for this session.[/info]"
+            )
             return
         key = _staffing_checkpoint_key(checkpoint)
-        draft = state.company_staffing_drafts.setdefault(key, _company_staffing_default_draft(_company_staffing_payload(checkpoint)))
+        draft = state.company_staffing_drafts.setdefault(
+            key, _company_staffing_default_draft(_company_staffing_payload(checkpoint))
+        )
         _render_company_staffing_context_preview(state, checkpoint, draft)
 
 
@@ -7439,12 +10344,18 @@ def _print_busy_slash_block(command: str) -> None:
     console.print(
         f"[warning]Busy: /{escape(command)} changes chat context or runtime state, so it is blocked while a turn is running.[/warning]"
     )
-    console.print("[dim]Available now: /stop, /kanban, /runtime, /work-items, /logs, /comms, /queue, /status.[/dim]")
+    console.print(
+        "[dim]Available now: /stop, /kanban, /runtime, /work-items, /logs, /comms, /queue, /status.[/dim]"
+    )
 
 
-async def _handle_queue_slash(controller: ChatTurnController | None, args: list[str]) -> None:
+async def _handle_queue_slash(
+    controller: ChatTurnController | None, args: list[str]
+) -> None:
     if controller is None:
-        console.print("[warning]/queue is only available in interactive chat.[/warning]")
+        console.print(
+            "[warning]/queue is only available in interactive chat.[/warning]"
+        )
         return
     command = args[0].lower() if args else "list"
     if command in {"list", "ls"}:
@@ -7481,7 +10392,9 @@ async def _handle_queue_slash(controller: ChatTurnController | None, args: list[
         if item is None:
             console.print("[warning]No queued prompt at that index.[/warning]")
             return
-        console.print(f"[success]Dropped queued prompt #{index}:[/success] {_clip_text(item.text, 80)}")
+        console.print(
+            f"[success]Dropped queued prompt #{index}:[/success] {_clip_text(item.text, 80)}"
+        )
         return
     if command == "clear":
         count = controller.clear()
@@ -7490,7 +10403,9 @@ async def _handle_queue_slash(controller: ChatTurnController | None, args: list[
     console.print("[warning]Usage: /queue list|drop <n>|clear[/warning]")
 
 
-def _board_launch_args(state: _InteractiveChatState, args: list[str], *, default_view: str = "kanban") -> list[str]:
+def _board_launch_args(
+    state: _InteractiveChatState, args: list[str], *, default_view: str = "kanban"
+) -> list[str]:
     view = default_view
     work_item = ""
     role = ""
@@ -7534,9 +10449,13 @@ def _board_launch_args(state: _InteractiveChatState, args: list[str], *, default
     return cmd
 
 
-async def _launch_board_inspector(state: _InteractiveChatState, args: list[str], *, default_view: str = "kanban") -> None:
+async def _launch_board_inspector(
+    state: _InteractiveChatState, args: list[str], *, default_view: str = "kanban"
+) -> None:
     cmd = _board_launch_args(state, args, default_view=default_view)
-    console.print("[dim]Opening read-only board inspector. Press q or Ctrl-Q in board to return to chat.[/dim]")
+    console.print(
+        "[dim]Opening read-only board inspector. Press q or Ctrl-Q in board to return to chat.[/dim]"
+    )
     display = state.runtime_display
     if hasattr(display, "enter_sidecar_quiet"):
         display.enter_sidecar_quiet()
@@ -7544,12 +10463,18 @@ async def _launch_board_inspector(state: _InteractiveChatState, args: list[str],
         process = await asyncio.create_subprocess_exec(*cmd)
         await process.wait()
     except FileNotFoundError as exc:
-        console.print(f"[warning]Could not launch board inspector: {escape(str(exc))}[/warning]")
+        console.print(
+            f"[warning]Could not launch board inspector: {escape(str(exc))}[/warning]"
+        )
     finally:
         quiet_events = 0
         if hasattr(display, "exit_sidecar_quiet"):
             quiet_events = int(display.exit_sidecar_quiet() or 0)
-        suffix = f" Suppressed {quiet_events} runtime event(s); use /logs or /board logs to inspect them." if quiet_events else ""
+        suffix = (
+            f" Suppressed {quiet_events} runtime event(s); use /logs or /board logs to inspect them."
+            if quiet_events
+            else ""
+        )
         console.print(f"[dim]Returned to chat.{suffix}[/dim]")
 
 
@@ -7574,7 +10499,9 @@ async def _fetch_kanban_items(
             task_preferred_agent=state.preferred_agent or "native",
         ),
     )
-    scoped_session_id = None if project_scope else str(session_id or state.session_id or "").strip()
+    scoped_session_id = (
+        None if project_scope else str(session_id or state.session_id or "").strip()
+    )
     result = await WorkItemService(context).list(
         project_id=_current_project_id(state.engine),
         session_id=scoped_session_id,
@@ -7587,20 +10514,24 @@ async def _fetch_kanban_items(
 def _kanban_items_fingerprint(items: list[dict[str, Any]]) -> str:
     rows = []
     for item in items:
-        rows.append((
-            str(item.get("work_item_id", "") or ""),
-            str(item.get("title", "") or ""),
-            str(item.get("role_id", "") or ""),
-            str(item.get("phase", "") or ""),
-            str(item.get("kanban_column", "") or ""),
-            str(item.get("runtime_task_id", "") or ""),
-            str(item.get("session_id", "") or ""),
-            str(item.get("updated_at", "") or ""),
-        ))
+        rows.append(
+            (
+                str(item.get("work_item_id", "") or ""),
+                str(item.get("title", "") or ""),
+                str(item.get("role_id", "") or ""),
+                str(item.get("phase", "") or ""),
+                str(item.get("kanban_column", "") or ""),
+                str(item.get("runtime_task_id", "") or ""),
+                str(item.get("session_id", "") or ""),
+                str(item.get("updated_at", "") or ""),
+            )
+        )
     return json.dumps(sorted(rows), ensure_ascii=False, sort_keys=True)
 
 
-def _render_kanban_items(items: list[dict[str, Any]], *, title: str = "Kanban Work Items") -> None:
+def _render_kanban_items(
+    items: list[dict[str, Any]], *, title: str = "Kanban Work Items"
+) -> None:
     if not items:
         console.print("[info]No company work items found yet.[/info]")
         return
@@ -7630,11 +10561,17 @@ def _render_kanban_items(items: list[dict[str, Any]], *, title: str = "Kanban Wo
     console.print(table)
 
 
-async def _handle_kanban_slash(state: _InteractiveChatState, args: list[str], controller: ChatTurnController | None = None) -> None:
+async def _handle_kanban_slash(
+    state: _InteractiveChatState,
+    args: list[str],
+    controller: ChatTurnController | None = None,
+) -> None:
     normalized = [arg.strip().lower() for arg in args]
     if normalized and normalized[0] in {"stop", "off", "clear"}:
         if controller is None:
-            console.print("[warning]Kanban live watch is only available in interactive chat.[/warning]")
+            console.print(
+                "[warning]Kanban live watch is only available in interactive chat.[/warning]"
+            )
             return
         await controller.stop_kanban_watch()
         return
@@ -7649,11 +10586,19 @@ async def _handle_kanban_slash(state: _InteractiveChatState, args: list[str], co
             console.print("[warning]Usage: /kanban [once|stop|all][/warning]")
             return
     session_id = str(state.session_id or "").strip()
-    title = "Kanban Work Items (project)" if project_scope else f"Kanban Work Items (session {session_id[:8]})"
+    title = (
+        "Kanban Work Items (project)"
+        if project_scope
+        else f"Kanban Work Items (session {session_id[:8]})"
+    )
     try:
-        items = await _fetch_kanban_items(state, limit=100, session_id=session_id, project_scope=project_scope)
+        items = await _fetch_kanban_items(
+            state, limit=100, session_id=session_id, project_scope=project_scope
+        )
     except Exception as exc:
-        console.print(f"[warning]Could not load kanban work items: {escape(str(exc))}[/warning]")
+        console.print(
+            f"[warning]Could not load kanban work items: {escape(str(exc))}[/warning]"
+        )
         return
     _render_kanban_items(items, title=title)
     if watch and controller is not None:
@@ -7672,7 +10617,11 @@ async def _handle_board_slash(state: _InteractiveChatState, args: list[str]) -> 
     await _launch_board_inspector(state, args, default_view="kanban")
 
 
-async def _handle_chat_slash_command(state: _InteractiveChatState, user_input: str, controller: ChatTurnController | None = None) -> bool:
+async def _handle_chat_slash_command(
+    state: _InteractiveChatState,
+    user_input: str,
+    controller: ChatTurnController | None = None,
+) -> bool:
     if not user_input.startswith("/"):
         return False
     try:
@@ -7686,7 +10635,11 @@ async def _handle_chat_slash_command(state: _InteractiveChatState, user_input: s
 
     command = _canonical_slash_command(parts[0])
     args = parts[1:]
-    if controller is not None and controller.is_busy and command in _slash_command_names():
+    if (
+        controller is not None
+        and controller.is_busy
+        and command in _slash_command_names()
+    ):
         policy = _busy_slash_policy(command, args)
         if policy == BusyCommandPolicy.BLOCKED_WHEN_BUSY:
             _print_busy_slash_block(command)
@@ -7750,7 +10703,9 @@ async def _handle_chat_slash_command(state: _InteractiveChatState, user_input: s
     elif command == "board":
         await _handle_board_slash(state, args)
     else:
-        console.print(f"[warning]Unknown command: /{escape(command)}. Try /help for available commands.[/warning]")
+        console.print(
+            f"[warning]Unknown command: /{escape(command)}. Try /help for available commands.[/warning]"
+        )
     return True
 
 
@@ -7801,9 +10756,7 @@ async def _process_interactive_chat_message(
         handoff_identity = None
         runtime_identity = await _company_runtime_identity_for_session(state)
         runtime_checkpoint = (
-            runtime_identity.checkpoint
-            if runtime_identity is not None
-            else None
+            runtime_identity.checkpoint if runtime_identity is not None else None
         )
         explicit_runtime_type = str(
             (effective_metadata or {}).get("response_to_checkpoint_type", "") or ""
@@ -7827,9 +10780,9 @@ async def _process_interactive_chat_message(
             checkpoint_type = str(
                 getattr(runtime_checkpoint, "checkpoint_type", "") or ""
             ).strip()
-            checkpoint_status = str(
-                getattr(runtime_checkpoint, "status", "") or ""
-            ).strip().lower()
+            checkpoint_status = (
+                str(getattr(runtime_checkpoint, "status", "") or "").strip().lower()
+            )
             if (
                 not explicit_runtime_id
                 or explicit_runtime_id != checkpoint_id
@@ -7846,9 +10799,9 @@ async def _process_interactive_chat_message(
             execution_origin_task_id = runtime_identity.ui_anchor_task_id or None
             handoff_identity = runtime_identity
         elif effective_metadata is None and runtime_checkpoint is not None:
-            checkpoint_status = str(
-                getattr(runtime_checkpoint, "status", "") or ""
-            ).strip().lower()
+            checkpoint_status = (
+                str(getattr(runtime_checkpoint, "status", "") or "").strip().lower()
+            )
             if checkpoint_status != "pending":
                 raise RuntimeError(
                     f"Company runtime checkpoint is {checkpoint_status or 'not pending'}."
@@ -7858,8 +10811,13 @@ async def _process_interactive_chat_message(
                     "Company runtime checkpoint does not match the current session."
                 )
             effective_metadata = {
-                "response_to_checkpoint_id": str(getattr(runtime_checkpoint, "checkpoint_id", "") or ""),
-                "response_to_checkpoint_type": str(getattr(runtime_checkpoint, "checkpoint_type", "") or "company_runtime_suspended"),
+                "response_to_checkpoint_id": str(
+                    getattr(runtime_checkpoint, "checkpoint_id", "") or ""
+                ),
+                "response_to_checkpoint_type": str(
+                    getattr(runtime_checkpoint, "checkpoint_type", "")
+                    or "company_runtime_suspended"
+                ),
             }
             execution_session_id = runtime_identity.runtime_session_id
             execution_origin_task_id = runtime_identity.ui_anchor_task_id or None
@@ -7889,9 +10847,7 @@ async def _process_interactive_chat_message(
             mode=execution_mode,
             org_id=execution_org_id or None,
             company_profile=(
-                execution_company_profile
-                if execution_mode == "company"
-                else None
+                execution_company_profile if execution_mode == "company" else None
             ),
             preferred_agent=execution_preferred_agent,
             domains=list(state.domains),
@@ -7903,25 +10859,38 @@ async def _process_interactive_chat_message(
         handled_staffing_preflight = False
         if state.mode == "company":
             if interactive_followups:
-                handled_staffing_preflight = await _maybe_run_company_staffing_preflight(state)
+                handled_staffing_preflight = (
+                    await _maybe_run_company_staffing_preflight(state)
+                )
             else:
                 checkpoint = await _latest_company_staffing_checkpoint(state)
                 if checkpoint is not None:
                     key = _staffing_checkpoint_key(checkpoint)
                     draft = state.company_staffing_drafts.setdefault(
                         key,
-                        _company_staffing_default_draft(_company_staffing_payload(checkpoint)),
+                        _company_staffing_default_draft(
+                            _company_staffing_payload(checkpoint)
+                        ),
                     )
                     _render_company_staffing_summary(state, checkpoint, draft)
-                    console.print("[dim]Type a/e/c/r/d at opc>; /staffing is only a fallback reopen command.[/dim]")
+                    console.print(
+                        "[dim]Type a/e/c/r/d at opc>; /staffing is only a fallback reopen command.[/dim]"
+                    )
                     handled_staffing_preflight = True
-        if hasattr(state.runtime_display, "render_status") and not handled_staffing_preflight:
+        if (
+            hasattr(state.runtime_display, "render_status")
+            and not handled_staffing_preflight
+        ):
             await state.runtime_display.render_status(force=True)
-        if not state.runtime_display.has_streamed_content and not handled_staffing_preflight:
+        if (
+            not state.runtime_display.has_streamed_content
+            and not handled_staffing_preflight
+        ):
             _print_response(response, state.no_markdown)
         if effective_metadata and (
             effective_metadata.get("ui_force_resume")
-            or str(effective_metadata.get("response_to_checkpoint_type", "") or "") in {
+            or str(effective_metadata.get("response_to_checkpoint_type", "") or "")
+            in {
                 "company_runtime_suspended",
                 "company_runtime_interrupted",
             }
@@ -7979,15 +10948,17 @@ async def _interactive_mode(
         restore_agent=not explicit_agent,
     )
 
-    console.print(Panel(
-        f"[bold]OPC v{__version__}[/bold] — One-Person Company\n"
-        f"Model: {config.llm.default_model}\n"
-        f"Current mode: {state.mode}"
-        f"{f' ({state.company_profile})' if state.mode == 'company' else ''}\n"
-        f"Current agent: {state.preferred_agent or 'system'}\n"
-        f"Choose a project and session to begin.",
-        border_style="blue",
-    ))
+    console.print(
+        Panel(
+            f"[bold]OPC v{__version__}[/bold] — One-Person Company\n"
+            f"Model: {config.llm.default_model}\n"
+            f"Current mode: {state.mode}"
+            f"{f' ({state.company_profile})' if state.mode == 'company' else ''}\n"
+            f"Current agent: {state.preferred_agent or 'system'}\n"
+            f"Choose a project and session to begin.",
+            border_style="blue",
+        )
+    )
     try:
         await _run_interactive_startup_selector(state, explicit_project=bool(project))
     except KeyboardInterrupt:
@@ -8026,7 +10997,9 @@ async def _interactive_mode(
             if user_input in ("/quit", "/exit", "exit", "quit"):
                 break
             if user_input.startswith("/"):
-                await _handle_chat_slash_command(state, user_input, controller=controller)
+                await _handle_chat_slash_command(
+                    state, user_input, controller=controller
+                )
                 continue
             if await _handle_company_staffing_shortcut(state, user_input, controller):
                 continue
@@ -8035,7 +11008,9 @@ async def _interactive_mode(
             continue
 
     except ImportError:
-        console.print("[warning]prompt-toolkit not available, using basic input[/warning]")
+        console.print(
+            "[warning]prompt-toolkit not available, using basic input[/warning]"
+        )
         while True:
             await _print_pending_checkpoint_hint(state.engine, state.session_id)
             try:
@@ -8050,7 +11025,9 @@ async def _interactive_mode(
             if not user_input:
                 continue
             if user_input.startswith("/"):
-                await _handle_chat_slash_command(state, user_input, controller=controller)
+                await _handle_chat_slash_command(
+                    state, user_input, controller=controller
+                )
                 continue
             if await _handle_company_staffing_shortcut(state, user_input, controller):
                 continue
@@ -8063,7 +11040,9 @@ async def _interactive_mode(
         console.print("[info]Goodbye![/info]")
 
 
-async def _interactive_secretary_mode(config, project: str | None, no_markdown: bool) -> None:
+async def _interactive_secretary_mode(
+    config, project: str | None, no_markdown: bool
+) -> None:
     engine, runtime_display = _create_cli_engine(config, project)
 
     try:
@@ -8072,13 +11051,15 @@ async def _interactive_secretary_mode(config, project: str | None, no_markdown: 
         console.print(f"[error]Failed to initialize: {escape(str(e))}[/error]")
         return
 
-    console.print(Panel(
-        f"[bold]OPC Secretary[/bold]\n"
-        f"Model: {config.llm.default_model}\n"
-        f"Project: {project or '(none)'}\n"
-        f"Commands: /quit, /project <id>, /new-session, /sessions, /resume <session_id>, /policies, /help",
-        border_style="green",
-    ))
+    console.print(
+        Panel(
+            f"[bold]OPC Secretary[/bold]\n"
+            f"Model: {config.llm.default_model}\n"
+            f"Project: {project or '(none)'}\n"
+            f"Commands: /quit, /project <id>, /new-session, /sessions, /resume <session_id>, /policies, /help",
+            border_style="green",
+        )
+    )
 
     try:
         from prompt_toolkit import PromptSession
@@ -8086,11 +11067,17 @@ async def _interactive_secretary_mode(config, project: str | None, no_markdown: 
 
         history_path = engine.opc_home / "secretary_cli_history"
         prompt = PromptSession(history=FileHistory(str(history_path)))
-        current_session_id, restored_latest = await _resolve_secretary_session_id(engine)
+        current_session_id, restored_latest = await _resolve_secretary_session_id(
+            engine
+        )
         if restored_latest:
-            console.print(f"[info]Restored recent secretary session: {current_session_id}[/info]")
+            console.print(
+                f"[info]Restored recent secretary session: {current_session_id}[/info]"
+            )
         else:
-            console.print(f"[info]Started a new secretary session: {current_session_id}[/info]")
+            console.print(
+                f"[info]Started a new secretary session: {current_session_id}[/info]"
+            )
 
         while True:
             try:
@@ -8109,21 +11096,36 @@ async def _interactive_secretary_mode(config, project: str | None, no_markdown: 
                 await engine.shutdown()
                 engine, runtime_display = _create_cli_engine(config, new_project)
                 await engine.initialize()
-                current_session_id, restored_latest = await _resolve_secretary_session_id(engine)
+                (
+                    current_session_id,
+                    restored_latest,
+                ) = await _resolve_secretary_session_id(engine)
                 console.print(f"[info]Switched to project: {new_project}[/info]")
                 if restored_latest:
-                    console.print(f"[info]Restored recent secretary session: {current_session_id}[/info]")
+                    console.print(
+                        f"[info]Restored recent secretary session: {current_session_id}[/info]"
+                    )
                 else:
-                    console.print(f"[info]Started a new secretary session: {current_session_id}[/info]")
+                    console.print(
+                        f"[info]Started a new secretary session: {current_session_id}[/info]"
+                    )
                 continue
             if user_input == "/new-session":
                 current_session_id = str(uuid.uuid4())
-                console.print(f"[info]Started a new secretary session: {current_session_id}[/info]")
+                console.print(
+                    f"[info]Started a new secretary session: {current_session_id}[/info]"
+                )
                 continue
             if user_input == "/sessions":
-                sessions = await engine.secretary.list_sessions(engine.project_id, limit=20) if engine.secretary else []
+                sessions = (
+                    await engine.secretary.list_sessions(engine.project_id, limit=20)
+                    if engine.secretary
+                    else []
+                )
                 if not sessions:
-                    console.print("[info]No secretary sessions found for this project.[/info]")
+                    console.print(
+                        "[info]No secretary sessions found for this project.[/info]"
+                    )
                 else:
                     console.print("[bold]Recent secretary sessions:[/bold]")
                     for item in sessions:
@@ -8132,9 +11134,15 @@ async def _interactive_secretary_mode(config, project: str | None, no_markdown: 
                 continue
             if user_input.startswith("/resume "):
                 requested_session_id = user_input.split(" ", 1)[1].strip()
-                target = await engine.store.get_session(requested_session_id) if engine.store else None
+                target = (
+                    await engine.store.get_session(requested_session_id)
+                    if engine.store
+                    else None
+                )
                 if not target or target.metadata.get("interface") != "secretary":
-                    console.print(f"[warning]Secretary session not found: {requested_session_id}[/warning]")
+                    console.print(
+                        f"[warning]Secretary session not found: {requested_session_id}[/warning]"
+                    )
                     continue
                 current_project = engine.project_id or "default"
                 target_project = target.project_id or "default"
@@ -8147,10 +11155,16 @@ async def _interactive_secretary_mode(config, project: str | None, no_markdown: 
                     )
                     continue
                 current_session_id = requested_session_id
-                console.print(f"[info]Resumed secretary session: {current_session_id}[/info]")
+                console.print(
+                    f"[info]Resumed secretary session: {current_session_id}[/info]"
+                )
                 continue
             if user_input == "/policies":
-                summary = engine.secretary.describe_policies(engine.project_id) if engine.secretary else ""
+                summary = (
+                    engine.secretary.describe_policies(engine.project_id)
+                    if engine.secretary
+                    else ""
+                )
                 _print_response(summary, no_markdown)
                 continue
             if user_input == "/help":
@@ -8176,7 +11190,9 @@ async def _interactive_secretary_mode(config, project: str | None, no_markdown: 
                 _print_response(payload.get("response", ""), no_markdown)
 
     except ImportError:
-        console.print("[warning]prompt-toolkit not available, using basic input[/warning]")
+        console.print(
+            "[warning]prompt-toolkit not available, using basic input[/warning]"
+        )
     finally:
         await engine.shutdown()
         console.print("[info]Goodbye![/info]")
@@ -8184,6 +11200,7 @@ async def _interactive_secretary_mode(config, project: str | None, no_markdown: 
 
 async def _show_cost_summary(config) -> None:
     from opc.core.config import get_opc_home
+
     db_path = get_opc_home() / "global.db"
     if not db_path.exists():
         return
@@ -8192,9 +11209,11 @@ async def _show_cost_summary(config) -> None:
     try:
         costs = await store.get_total_cost()
         if costs["total_calls"] > 0:
-            console.print(f"\n[bold]Cost Summary:[/bold]")
+            console.print("\n[bold]Cost Summary:[/bold]")
             console.print(f"  Total calls: {costs['total_calls']}")
-            console.print(f"  Total tokens: {costs['total_tokens_in'] + costs['total_tokens_out']}")
+            console.print(
+                f"  Total tokens: {costs['total_tokens_in'] + costs['total_tokens_out']}"
+            )
             console.print(f"  Total cost: ${costs['total_cost']:.4f}")
     finally:
         await store.close()
@@ -8212,7 +11231,7 @@ async def _show_autonomy_summary(config, project: str | None = None) -> None:
     await store.initialize()
     try:
         stats = await store.get_autonomy_stats(project_id=project)
-        console.print(f"\n[bold]Autonomy Summary:[/bold]")
+        console.print("\n[bold]Autonomy Summary:[/bold]")
         console.print(f"  Decisions: {stats['total']}")
         console.print(f"  Auto-approved: {stats['auto_approved']}")
         console.print(f"  Escalated: {stats['escalated']}")
@@ -8220,7 +11239,9 @@ async def _show_autonomy_summary(config, project: str | None = None) -> None:
         console.print(f"  Auto-approval rate: {stats['auto_approval_rate']:.0%}")
 
         prefs = PreferenceManager(get_opc_home())
-        learned = prefs.get_autonomy_preferences(project_id=project).get("learned_actions", {})
+        learned = prefs.get_autonomy_preferences(project_id=project).get(
+            "learned_actions", {}
+        )
         if learned:
             console.print("  Learned actions:")
             for name, data in list(learned.items())[:10]:
@@ -8230,7 +11251,9 @@ async def _show_autonomy_summary(config, project: str | None = None) -> None:
                     f"explicit_allow={data.get('explicit_allow', False)}, "
                     f"explicit_deny={data.get('explicit_deny', False)}"
                 )
-        allowlist_lines = ApprovalAllowlistManager(get_opc_home()).summarize(project_id=project, limit=10)
+        allowlist_lines = ApprovalAllowlistManager(get_opc_home()).summarize(
+            project_id=project, limit=10
+        )
         if allowlist_lines:
             console.print("  Persisted allowlist:")
             for line in allowlist_lines:
@@ -8290,26 +11313,44 @@ async def _print_pending_checkpoint_hint(engine, session_id: str) -> None:
             "Start normal follow-up work from the regular conversation after this review is handled.[/info]"
         )
         return
-    if checkpoint.checkpoint_type in {"task_user_input", "task_peer_wait", "company_peer_wait"}:
-        console.print("[info]Pending checkpoint for this session. Your next reply will resume that confirmation flow.[/info]")
+    if checkpoint.checkpoint_type in {
+        "task_user_input",
+        "task_peer_wait",
+        "company_peer_wait",
+    }:
+        console.print(
+            "[info]Pending checkpoint for this session. Your next reply will resume that confirmation flow.[/info]"
+        )
 
 
-def _print_interactive_status(engine, state: _InteractiveChatState | None = None) -> None:
+def _print_interactive_status(
+    engine, state: _InteractiveChatState | None = None
+) -> None:
     if state is not None:
         _print_context_status(state)
     if getattr(engine, "llm", None):
         stats = getattr(engine.llm, "stats", {}) or {}
-        model = getattr(getattr(getattr(engine, "config", None), "llm", None), "default_model", "unknown")
+        model = getattr(
+            getattr(getattr(engine, "config", None), "llm", None),
+            "default_model",
+            "unknown",
+        )
         console.print(f"  Model: {model}")
         console.print(f"  Project: {_current_project_id(engine)}")
-        console.print(f"  Tokens: in={stats.get('tokens_in', 0)}, out={stats.get('tokens_out', 0)}")
+        console.print(
+            f"  Tokens: in={stats.get('tokens_in', 0)}, out={stats.get('tokens_out', 0)}"
+        )
         console.print(f"  Cost: ${float(stats.get('estimated_cost', 0.0) or 0.0):.4f}")
     if getattr(engine, "adapter_registry", None):
         available = engine.adapter_registry.list_available()
-        console.print(f"  External agents: {', '.join(available) if available else 'none'}")
+        console.print(
+            f"  External agents: {', '.join(available) if available else 'none'}"
+        )
 
 
-async def _load_recent_primary_session(store: OPCStore | None, project_id: str | None) -> tuple[str | None, str]:
+async def _load_recent_primary_session(
+    store: OPCStore | None, project_id: str | None
+) -> tuple[str | None, str]:
     sessions = await _load_recent_primary_sessions(store, project_id, limit=1)
     if not sessions:
         return None, ""
@@ -8350,10 +11391,14 @@ async def _run_channel_runtime(config, project: str | None) -> None:
             return
         await engine.channel_manager.start_all()
         if not engine.channel_manager.enabled_channels:
-            console.print("[warning]No channels enabled. Update .opc/config/channel_config.yaml first.[/warning]")
+            console.print(
+                "[warning]No channels enabled. Update .opc/config/channel_config.yaml first.[/warning]"
+            )
             return
         _write_channel_runtime_state(engine.channel_manager.enabled_channels)
-        console.print(f"[success]Channel runtime started:[/success] {', '.join(engine.channel_manager.enabled_channels)}")
+        console.print(
+            f"[success]Channel runtime started:[/success] {', '.join(engine.channel_manager.enabled_channels)}"
+        )
         await engine.message_bus.start()
     except KeyboardInterrupt:
         console.print("\n[warning]Stopping channel runtime...[/warning]")
@@ -8363,14 +11408,20 @@ async def _run_channel_runtime(config, project: str | None) -> None:
 
 
 # ── Plugins ────────────────────────────────────────────────────────────────
+from opc.cli.operations import register_operations_cli  # noqa: E402
+
+register_operations_cli(app)
+
 try:
     from opc.plugins.office_ui import register_cli
+
     register_cli(app)
 except ImportError:
     pass
 
 try:
     from opc.plugins.cli_board import register_cli as register_cli_board
+
     register_cli_board(app)
 except ImportError:
     pass

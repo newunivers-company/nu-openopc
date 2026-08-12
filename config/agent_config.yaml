@@ -19,7 +19,7 @@ external_agents:
     resume_session_flag: ""
     run_mode: interactive
     interactive_timeout_seconds: 21600
-    approval_mode: auto
+    approval_mode: user-settings
     extra_args: []
 
   cursor:
@@ -33,7 +33,7 @@ external_agents:
     resume_session_flag: ""
     run_mode: interactive
     interactive_timeout_seconds: 21600
-    approval_mode: full-auto
+    approval_mode: user-settings
     extra_args: []
 
   claude_code:
@@ -47,7 +47,7 @@ external_agents:
     resume_session_flag: ""
     run_mode: interactive
     interactive_timeout_seconds: 21600
-    approval_mode: full-auto
+    approval_mode: user-settings
     extra_args: []
 
   opencode:
@@ -62,7 +62,7 @@ external_agents:
     resume_session_flag: ""
     run_mode: interactive
     interactive_timeout_seconds: 21600
-    approval_mode: full-auto
+    approval_mode: user-settings
     extra_args: []
 
 native_subagents:

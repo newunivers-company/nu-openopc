@@ -2399,6 +2399,159 @@
   flex-shrink: 0;
 }
 
+.msg-composer .composer-input-area:has(.composer-mode-advisor[open]) {
+  overflow: visible;
+}
+
+.composer-mode-advisor {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.composer-mode-advisor > summary {
+  min-height: 30px;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border) 66%);
+  border-radius: 12px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+  list-style: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.composer-mode-advisor > summary::-webkit-details-marker { display: none; }
+.composer-mode-advisor > summary:hover,
+.composer-mode-advisor > summary:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.composer-mode-advisor-panel {
+  position: absolute;
+  z-index: 80;
+  bottom: calc(100% + 12px);
+  left: -7px;
+  display: grid;
+  width: min(430px, calc(100vw - 34px));
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--border) 64%);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.24);
+  color: var(--text);
+}
+
+.composer-mode-advisor-panel header,
+.composer-mode-advisor-panel footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.composer-mode-advisor-panel header > div { display: grid; gap: 3px; }
+.composer-mode-advisor-panel header span,
+.composer-mode-advisor-panel footer > span {
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.composer-mode-advisor-panel header strong { font-size: 15px; }
+.composer-mode-advisor-score {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  font-variant-numeric: tabular-nums;
+}
+.composer-mode-advisor-score.is-company { color: var(--accent); }
+.composer-mode-advisor-score.is-clarify { color: var(--red); }
+
+.composer-mode-advisor-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.composer-mode-advisor-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.composer-mode-advisor-counts label,
+.composer-mode-advisor-options label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+.composer-mode-advisor-panel input[type='number'],
+.composer-mode-advisor-panel select {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 10px;
+}
+.composer-mode-advisor-flags {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+.composer-mode-advisor-flags label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+.composer-mode-advisor-flags input { accent-color: var(--accent); }
+.composer-mode-advisor-panel p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.composer-mode-advisor-panel ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--text-dim);
+  font-size: 9px;
+  line-height: 1.45;
+}
+.composer-mode-advisor-panel footer {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.composer-mode-advisor-panel footer button {
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.composer-mode-advisor-panel footer button:disabled {
+  border-color: var(--border);
+  background: var(--surface-hover);
+  color: var(--text-dim);
+  cursor: default;
+}
+
 .composer-mode-inline {
   display: inline-flex;
   align-items: center;
@@ -2838,6 +2991,8 @@
     border-radius: 16px;
   }
 
+  .composer-mode-advisor { grid-column: 1 / -1; justify-self: start; }
+
   .composer-mode-inline {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -2899,6 +3054,8 @@
     justify-content: stretch;
   }
 
+  .composer-mode-advisor { grid-column: 1 / -1; justify-self: start; }
+
   .composer-mode-inline {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
@@ -2953,6 +3110,11 @@
     grid-template-columns: minmax(68px, auto) minmax(0, 1fr);
     gap: 8px;
     width: 100%;
+  }
+
+  .composer-mode-advisor-panel {
+    left: -7px;
+    width: min(390px, calc(100vw - 28px));
   }
 }
 

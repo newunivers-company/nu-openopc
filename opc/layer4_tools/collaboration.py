@@ -28,7 +28,6 @@ from opc.core.models import (
 from opc.layer2_organization.company_runtime import canonical_role_session_id
 from opc.layer2_organization.phase import (
     DONE_PHASES,
-    IN_REVIEW_PHASES,
     InvalidPhaseTransition,
     kanban_column,
 )
@@ -42,6 +41,7 @@ from opc.layer2_organization.work_item_links import linked_work_item_id_for_task
 from opc.layer2_organization.work_item_runtime import mark_work_item_runtime
 from opc.layer2_organization.work_item_identity import mark_work_item_projection
 from opc.layer2_organization.work_item_transition import (
+    apply_task_status_transition,
     is_prunable_dependency_work_item,
     normalize_dependency_work_item_ids,
     refresh_dependents_for_run,
@@ -1650,7 +1650,6 @@ def create_collaboration_tools(
                 "delegate_work: planning_context was empty in dispatch_required mode — "
                 "auto-filled a placeholder. The calling agent should provide an explicit planning_context."
             )
-        runtime_topology = dict(task.metadata.get("runtime_topology", {}) or {})
         playbook = dict(task.metadata.get("delegation_playbook", {}) or {})
         direct_report_role_ids = {
             str(item).strip()
@@ -2705,7 +2704,6 @@ def create_collaboration_tools(
                             TaskStatus.FAILED,
                             TaskStatus.CANCELLED,
                         }:
-                            runtime_task.status = TaskStatus.CANCELLED
                             runtime_task.execution_lock = False
                             runtime_task.execution_locked_at = None
                             runtime_task.metadata = {
@@ -2714,6 +2712,15 @@ def create_collaboration_tools(
                                 "deleted_by_manager_tool": True,
                                 "cascade_deleted_by_work_item_id": item.work_item_id,
                             }
+                            await apply_task_status_transition(
+                                store,
+                                runtime_task,
+                                target_status_or_phase=TaskStatus.CANCELLED,
+                                reason="manager_deleted_ancestor_work_item",
+                                release_claim=True,
+                                save_plain_task=False,
+                                raise_on_missing_work_item=False,
+                            )
                             if hasattr(store, "save_task"):
                                 await store.save_task(runtime_task)
                 except Exception:

@@ -404,7 +404,6 @@ async def phase_e() -> None:
             )
         )
         # Wait for a durable claim (attempt opened) or a terminal verdict.
-        claimed_seq = None
         outcome = "no-claim"
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
@@ -418,7 +417,6 @@ async def phase_e() -> None:
                 break
             seq = int(metadata.get("attempt_seq", 0) or 0)
             if seq and not bool(metadata.get("attempt_settled", True)):
-                claimed_seq = seq
                 outcome = f"claimed(attempt {seq})"
                 break
             if resume_task.done():

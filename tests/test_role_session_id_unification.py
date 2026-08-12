@@ -18,7 +18,6 @@ foreign reference re-pointed.
 
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from datetime import datetime
@@ -27,7 +26,6 @@ from pathlib import Path
 from opc.core.models import (
     DelegationWorkItem,
     Phase,
-    RoleRuntimeSession,
     Task,
     TaskStatus,
 )

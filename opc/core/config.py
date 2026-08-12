@@ -264,6 +264,39 @@ def allocate_organization_id(config_dir: Path, organization_name: Any, *, prefer
 # Config Models
 # ---------------------------------------------------------------------------
 
+class NULlmRoutingConfig(BaseModel):
+    """Optional bridge to the private NU provider-routing library."""
+
+    enabled: bool = False
+    config_path: str = ""
+    fail_open: bool = True
+    apply_to_tool_calls: bool = False
+    sandboxed_tools: bool = False
+    hardware_profile: str = ""
+    gpu_free_vram_mib: int = Field(default=0, ge=0)
+    max_candidates: int = Field(default=4, ge=1, le=20)
+    allowed_providers: list[str] = Field(default_factory=list)
+    # Real challenger calls are separately and explicitly authorized. The
+    # experiment ID binds a durable, restart-safe budget in SQLite.
+    background_shadow_enabled: bool = False
+    shadow_experiment_id: str = ""
+    shadow_max_total_calls: int = Field(default=0, ge=0, le=1_000_000)
+    shadow_worker_count: int = Field(default=1, ge=1, le=8)
+    shadow_queue_capacity: int = Field(default=32, ge=1, le=10_000)
+    shadow_timeout_seconds: float = Field(default=30.0, gt=0.0, le=600.0)
+    shadow_shutdown_timeout_seconds: float = Field(
+        default=30.0, ge=0.0, le=600.0
+    )
+    shadow_recover_stale_after_seconds: float = Field(
+        default=3600.0, ge=0.0, le=604_800.0
+    )
+    shadow_event_db_path: str = ""
+    workload_map: dict[str, str] = Field(default_factory=lambda: {
+        "coding": "coding",
+        "quick_tasks": "structured_output",
+    })
+
+
 class LLMConfig(BaseModel):
     default_model: str = "anthropic/claude-sonnet-4-20250514"
     api_base: str = ""
@@ -281,13 +314,45 @@ class LLMConfig(BaseModel):
     # take precedence over the scalar value.
     context_window: int = 0
     context_window_overrides: dict[str, int] = Field(default_factory=dict)
+    nu_routing: NULlmRoutingConfig = Field(default_factory=NULlmRoutingConfig)
+
+    def transport_readiness(self) -> dict[str, bool]:
+        """Resolve credentials for the configured endpoint, not any provider."""
+        if self.api_key or (self.api_key_env and os.environ.get(self.api_key_env)):
+            return {"credential_ready": True, "transport_ready": True}
+
+        base = str(self.api_base or "").strip().lower()
+        model = str(self.default_model or "").strip().lower()
+        if base.startswith("http://127.0.0.1") or base.startswith("http://localhost"):
+            return {"credential_ready": True, "transport_ready": True}
+
+        source = base or model
+        provider_envs: tuple[str, ...] = ()
+        mappings = (
+            (("openrouter",), ("OPENROUTER_API_KEY",)),
+            (("anthropic", "claude"), ("ANTHROPIC_API_KEY",)),
+            (("generativelanguage", "gemini", "google"), ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
+            (("azure",), ("AZURE_API_KEY", "AZURE_OPENAI_API_KEY")),
+            (("mistral",), ("MISTRAL_API_KEY",)),
+            (("groq",), ("GROQ_API_KEY",)),
+            (("deepseek",), ("DEEPSEEK_API_KEY",)),
+            (("together",), ("TOGETHERAI_API_KEY",)),
+            (("volcengine", "byteplus", "ark"), ("ARK_API_KEY",)),
+            (("openai", "gpt-", "o1", "o3", "o4"), ("OPENAI_API_KEY",)),
+        )
+        for hints, env_names in mappings:
+            if any(hint in source for hint in hints):
+                provider_envs = env_names
+                break
+        ready = any(bool(os.environ.get(name)) for name in provider_envs)
+        return {"credential_ready": ready, "transport_ready": ready}
 
 
 ExternalAgentApprovalMode = Literal["user-settings", "auto", "full-auto"]
 _EXTERNAL_AGENT_APPROVAL_MODES = {"user-settings", "auto", "full-auto"}
 _LEGACY_EXTERNAL_AGENT_APPROVAL_MODE_MIGRATIONS = {
-    "delegate": "auto",
-    "bypass": "auto",
+    "delegate": "user-settings",
+    "bypass": "user-settings",
 }
 _LEGACY_OPENCODE_DEFAULT_MODEL = "opencode/minimax-m2.5-free"
 
@@ -357,21 +422,20 @@ class ExternalAgentConfig(BaseModel):
     idle_timeout_seconds: int = 900
     startup_timeout_seconds: int = DEFAULT_EXTERNAL_AGENT_STARTUP_TIMEOUT_SECONDS
     status_heartbeat_seconds: int = 30
-    approval_mode: ExternalAgentApprovalMode = "auto"
+    approval_mode: ExternalAgentApprovalMode = "user-settings"
     show_thinking: bool = False
 
 
 class AgentsConfig(BaseModel):
     preferred_order: list[str] = Field(default_factory=lambda: ["claude_code", "cursor", "codex", "opencode"])
     agents: dict[str, ExternalAgentConfig] = Field(default_factory=lambda: {
-        "claude_code": ExternalAgentConfig(command="claude", run_mode="interactive", approval_mode="full-auto"),
-        "cursor": ExternalAgentConfig(command="cursor-agent", run_mode="interactive", approval_mode="full-auto"),
+        "claude_code": ExternalAgentConfig(command="claude", run_mode="interactive"),
+        "cursor": ExternalAgentConfig(command="cursor-agent", run_mode="interactive"),
         "codex": ExternalAgentConfig(command="codex", run_mode="interactive"),
         "opencode": ExternalAgentConfig(
             command="opencode",
             model_flag="--model",
             run_mode="interactive",
-            approval_mode="full-auto",
             show_thinking=True,
         ),
     })
@@ -618,11 +682,11 @@ class SandboxPlatformConfig(BaseModel):
 class SandboxExecutionConfig(BaseModel):
     enabled: bool = False
     default_mode: Literal["off", "workspace-write", "elevated"] = "off"
-    fail_if_unavailable: bool = False
-    allow_direct_fallback: bool = True
+    fail_if_unavailable: bool = True
+    allow_direct_fallback: bool = False
     allow_network: bool = True
     windows: SandboxPlatformConfig = Field(
-        default_factory=lambda: SandboxPlatformConfig(mode="elevated", wrapper="none")
+        default_factory=lambda: SandboxPlatformConfig(mode="off", wrapper="none")
     )
     linux: SandboxPlatformConfig = Field(
         default_factory=lambda: SandboxPlatformConfig(mode="workspace-write", wrapper="auto")
@@ -896,6 +960,170 @@ class MCPServerConfig(BaseModel):
     startup_timeout: float = 30.0
 
 
+class NUResourceGenConfig(BaseModel):
+    """Safe-by-default access to the private NU resource-generation catalog."""
+
+    enabled: bool = False
+    allow_live: bool = False
+    allowed_live_candidates: list[str] = Field(default_factory=list)
+    record_ledger: bool = True
+    record_dry_runs: bool = True
+    ledger_root: str = ""
+    artifact_archive_root: str = ""
+    archive_live_artifacts: bool = True
+    allow_local_quality_execution: bool = True
+    local_quality_candidates: list[str] = Field(
+        default_factory=lambda: ["local_rfdetr_detection_nano"]
+    )
+    max_timeout_seconds: int = Field(default=900, ge=1, le=86_400)
+    max_catalog_results: int = Field(default=50, ge=1, le=200)
+
+
+class OutcomeEvaluationConfig(BaseModel):
+    """Deterministic run acceptance and regression thresholds."""
+
+    minimum_total_score: float = Field(default=0.75, ge=0.0, le=1.0)
+    maximum_regression: float = Field(default=0.05, ge=0.0, le=1.0)
+    quality_weight: float = Field(default=0.45, ge=0.0)
+    evidence_weight: float = Field(default=0.20, ge=0.0)
+    budget_weight: float = Field(default=0.15, ge=0.0)
+    reliability_weight: float = Field(default=0.10, ge=0.0)
+    autonomy_weight: float = Field(default=0.10, ge=0.0)
+    auto_complete_goal_on_pass: bool = True
+
+    def normalized_weights(self) -> dict[str, float]:
+        values = {
+            "quality": self.quality_weight,
+            "evidence": self.evidence_weight,
+            "budget": self.budget_weight,
+            "reliability": self.reliability_weight,
+            "autonomy": self.autonomy_weight,
+        }
+        total = sum(values.values())
+        if total <= 0:
+            raise ValueError("at least one outcome evaluation weight must be positive")
+        return {name: value / total for name, value in values.items()}
+
+
+class DurableOperationsConfig(BaseModel):
+    """Lease, outbox, recovery, and deadlock defaults."""
+
+    lease_seconds: int = Field(default=30, ge=1, le=3600)
+    outbox_max_attempts: int = Field(default=5, ge=1, le=100)
+    retry_base_seconds: int = Field(default=5, ge=1, le=3600)
+    retry_max_seconds: int = Field(default=900, ge=1, le=86_400)
+    deadlock_after_seconds: int = Field(default=900, ge=1, le=604_800)
+    outbox_dispatcher_enabled: bool = True
+    outbox_dispatch_batch_size: int = Field(default=50, ge=1, le=500)
+    outbox_dispatch_poll_seconds: float = Field(default=1.0, ge=0.05, le=60.0)
+
+
+class LearningOperationsConfig(BaseModel):
+    """Promotion policy for self-grown operating assets."""
+
+    minimum_offline_score: float = Field(default=0.75, ge=0.0, le=1.0)
+    minimum_shadow_score: float = Field(default=0.78, ge=0.0, le=1.0)
+    minimum_canary_score: float = Field(default=0.80, ge=0.0, le=1.0)
+    minimum_sample_size: int = Field(default=3, ge=1, le=100_000)
+    maximum_regression: float = Field(default=0.02, ge=0.0, le=1.0)
+
+
+class StaffingOperationsConfig(BaseModel):
+    """Evidence weights for deterministic staffing decisions."""
+
+    quality_weight: float = Field(default=0.35, ge=0.0)
+    domain_weight: float = Field(default=0.20, ge=0.0)
+    reliability_weight: float = Field(default=0.15, ge=0.0)
+    experience_weight: float = Field(default=0.15, ge=0.0)
+    availability_weight: float = Field(default=0.10, ge=0.0)
+    cost_weight: float = Field(default=0.05, ge=0.0)
+
+    def normalized_weights(self) -> dict[str, float]:
+        values = {
+            "quality": self.quality_weight,
+            "domain": self.domain_weight,
+            "reliability": self.reliability_weight,
+            "experience": self.experience_weight,
+            "availability": self.availability_weight,
+            "cost": self.cost_weight,
+        }
+        total = sum(values.values())
+        if total <= 0:
+            raise ValueError("at least one staffing weight must be positive")
+        return {name: value / total for name, value in values.items()}
+
+
+class ProviderOperationsConfig(BaseModel):
+    """Subscription quotas and status-only provider SLO monitoring."""
+
+    subscription_call_limit: int = Field(default=200, ge=0, le=1_000_000)
+    subscription_window_seconds: int = Field(default=86_400, ge=60, le=604_800)
+    subscription_providers: list[str] = Field(
+        default_factory=lambda: ["codex", "claude", "grok"]
+    )
+    status_canary_enabled: bool = True
+    status_canary_interval_seconds: float = Field(
+        default=300.0, ge=1.0, le=86_400.0
+    )
+    slo_min_samples: int = Field(default=3, ge=1, le=10_000)
+    slo_trend_window_samples: int = Field(default=3, ge=1, le=10_000)
+    slo_availability_target: float = Field(default=0.95, ge=0.0, le=1.0)
+    slo_p95_latency_target_ms: float = Field(
+        default=30_000.0, ge=1.0, le=3_600_000.0
+    )
+    canary_expected_model: str = ""
+    readiness_min_observation_seconds: int = Field(
+        default=86_400,
+        ge=0,
+        le=31_536_000,
+    )
+    readiness_time_bucket_seconds: int = Field(
+        default=21_600,
+        ge=60,
+        le=604_800,
+    )
+    readiness_min_time_buckets: int = Field(default=4, ge=1, le=10_000)
+    readiness_min_samples_per_bucket: int = Field(
+        default=1,
+        ge=1,
+        le=10_000,
+    )
+    readiness_max_sample_age_seconds: int = Field(
+        default=1_800,
+        ge=0,
+        le=2_592_000,
+    )
+    readiness_max_gap_seconds: int = Field(
+        default=28_800,
+        ge=60,
+        le=2_592_000,
+    )
+    readiness_failure_drill_max_age_seconds: int = Field(
+        default=2_592_000,
+        ge=60,
+        le=31_536_000,
+    )
+    readiness_required_failure_scenarios: list[str] = Field(
+        default_factory=lambda: [
+            "credential_expiry",
+            "transport_timeout",
+            "quota_exhaustion",
+            "model_drift",
+        ]
+    )
+
+
+class OperationsConfig(BaseModel):
+    """Configuration for the goal-to-learning operating loop."""
+
+    enabled: bool = True
+    evaluation: OutcomeEvaluationConfig = Field(default_factory=OutcomeEvaluationConfig)
+    durable: DurableOperationsConfig = Field(default_factory=DurableOperationsConfig)
+    learning: LearningOperationsConfig = Field(default_factory=LearningOperationsConfig)
+    staffing: StaffingOperationsConfig = Field(default_factory=StaffingOperationsConfig)
+    providers: ProviderOperationsConfig = Field(default_factory=ProviderOperationsConfig)
+
+
 class SystemConfig(BaseModel):
     opc_home: str = ""
     default_channel: str = "cli"
@@ -910,6 +1138,8 @@ class SystemConfig(BaseModel):
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    nu_resource_gen: NUResourceGenConfig = Field(default_factory=NUResourceGenConfig)
+    operations: OperationsConfig = Field(default_factory=OperationsConfig)
     native_runtime: NativeRuntimeConfig = Field(default_factory=NativeRuntimeConfig)
     task_mode: TaskModeConfig = Field(
         default_factory=TaskModeConfig,
@@ -1773,7 +2003,8 @@ class OPCConfig(BaseModel):
                         existing = yaml.safe_load(f) or {}
                     existing_roles = existing.get("roles") or []
                     if existing_roles:
-                        import logging, os as _os
+                        import logging
+                        import os as _os
                         logging.getLogger(__name__).error(
                             "OPCConfig.save(): REFUSED to wipe %d existing roles with "
                             "empty list in custom mode. pid=%d, path=%s. "

@@ -1152,6 +1152,13 @@ async def refresh_dependents_for_run(
                 and target_phase != work_item.phase
                 and target_phase not in DONE_PHASES
             )
+            if clear_claim_on_wake:
+                # The claim identity is mirrored in columns and JSON for
+                # compatibility. Clearing only the columns leaves the claim
+                # CAS permanently fenced by metadata even though the freshly
+                # released READY card looks unowned to the dispatcher.
+                metadata_updates["claimed_by_role_session_id"] = ""
+                metadata_updates["claimed_task_id"] = ""
             if target_phase != work_item.phase or metadata_updates or clear_claim_on_wake:
                 try:
                     await store.update_delegation_work_item(

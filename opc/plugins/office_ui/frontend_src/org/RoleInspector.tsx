@@ -67,6 +67,7 @@ export interface RoleUpdatePatch {
   execution_strategy?: string
   preferred_external_agent?: string | null
   prompt_refs?: string[]
+  skill_refs?: string[]
   tools?: string[]
 }
 
@@ -87,6 +88,7 @@ export function RoleInspector({
   )
   const [extAgent, setExtAgent] = useState<string | null>(role.preferred_external_agent ?? null)
   const [promptRefs, setPromptRefs] = useState<string>((role.prompt_refs ?? []).join('\n'))
+  const [skillRefs, setSkillRefs] = useState<string>((role.skill_refs ?? []).join('\n'))
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   // Reset local state when selected role changes
@@ -103,6 +105,7 @@ export function RoleInspector({
     setExecStrategy(role.runtime_policy?.execution_strategy ?? 'auto')
     setExtAgent(role.preferred_external_agent ?? null)
     setPromptRefs((role.prompt_refs ?? []).join('\n'))
+    setSkillRefs((role.skill_refs ?? []).join('\n'))
     setConfirmDelete(false)
   }, [role])
 
@@ -150,6 +153,13 @@ export function RoleInspector({
     setPromptRefs(v)
     const lines = v.split('\n').map(s => s.trim()).filter(Boolean)
     scheduleSave({ prompt_refs: lines })
+  }
+  const handleSkillRefsChange = (v: string) => {
+    setSkillRefs(v)
+    const lines = Array.from(new Set(
+      v.split('\n').map(item => item.trim()).filter(Boolean),
+    ))
+    scheduleSave({ skill_refs: lines })
   }
   const toggleCanSpawn = (id: string) => {
     const next = new Set(canSpawn)
@@ -303,8 +313,16 @@ export function RoleInspector({
             <span className="ri-meta-value">{role.role_type ?? 'worker'}</span>
           </InspectorField>
           <InspectorField label="Skills">
-            <span className="ri-meta-value">
-              {role.skill_refs && role.skill_refs.length > 0 ? role.skill_refs.join(', ') : '(none)'}
+            <textarea
+              className="ri-textarea ri-textarea-mono"
+              rows={4}
+              placeholder="One installed skill name per line"
+              value={skillRefs}
+              onChange={event => handleSkillRefsChange(event.target.value)}
+              disabled={readOnly}
+            />
+            <span className="ri-field-hint">
+              Assigned skill bodies are content-addressed and injected at runtime.
             </span>
           </InspectorField>
           <InspectorField label="Artifact contract">

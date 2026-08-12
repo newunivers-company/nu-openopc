@@ -6,7 +6,6 @@ from datetime import datetime
 from typing import Any, Callable, Coroutine
 
 from opc.core.models import (
-    ApprovalAction,
     OrgSnapshot,
     ReorgChangeSet,
     ReorgEventKind,

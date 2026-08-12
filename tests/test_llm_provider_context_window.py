@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from opc.core.config import LLMConfig
+from opc.integrations.nu_llm_routing import RoutedLLMTarget
 from opc.llm.provider import LLMProvider
 
 
@@ -29,6 +30,16 @@ class TestLLMProviderHasCredentials(unittest.TestCase):
         provider = LLMProvider(LLMConfig(default_model="openai/gpt-4o", api_key=""))
         with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env"}, clear=True):
             self.assertTrue(provider.has_credentials())
+
+    def test_unrelated_provider_key_does_not_mark_proxy_ready(self) -> None:
+        provider = LLMProvider(LLMConfig(
+            default_model="openai/gpt-5.4",
+            api_base="https://openrouter.ai/api/v1",
+        ))
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "wrong-provider"}, clear=True):
+            self.assertFalse(provider.default_transport_readiness()["transport_ready"])
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "correct-provider"}, clear=True):
+            self.assertTrue(provider.default_transport_readiness()["transport_ready"])
 
 
 class TestLLMProviderContextWindow(unittest.TestCase):
@@ -131,6 +142,34 @@ class TestLLMProviderContextWindow(unittest.TestCase):
         with patch("opc.llm.provider.litellm.get_model_info", return_value={"max_input_tokens": 128000}) as get_model_info:
             self.assertEqual(provider.get_context_window(), 50000)
             get_model_info.assert_not_called()
+
+    def test_subscription_cli_alias_uses_quiet_conservative_fallback(self) -> None:
+        provider = LLMProvider(LLMConfig(default_model="openai/gpt-4o"))
+        provider._last_route_target = RoutedLLMTarget(
+            provider="claude_opus",
+            model="opus",
+            transport_kind="subscription_cli",
+        )
+
+        with (
+            patch(
+                "opc.llm.provider.litellm.get_model_info",
+                side_effect=Exception("Model opus isn't mapped yet."),
+            ),
+            patch("opc.llm.provider.logger.warning") as warning,
+        ):
+            self.assertEqual(provider.get_context_window(model="opus"), 128000)
+            warning.assert_not_called()
+
+    def test_unmapped_cloud_model_still_reports_configuration_warning(self) -> None:
+        provider = LLMProvider(LLMConfig(default_model="openai/cloud-model-without-metadata"))
+
+        with (
+            patch("opc.llm.provider.litellm.get_model_info", return_value={}),
+            patch("opc.llm.provider.logger.warning") as warning,
+        ):
+            self.assertEqual(provider.get_context_window(), 128000)
+            warning.assert_called_once()
 
 
 if __name__ == "__main__":

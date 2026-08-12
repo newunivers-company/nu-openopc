@@ -21,6 +21,7 @@ from opc.core.company_tools import (
 )
 from opc.core.config import DEFAULT_EXTERNAL_AGENT_STARTUP_TIMEOUT_SECONDS, get_opc_home
 from opc.core.events import EventBus
+from opc.core.evidence import compact_verification_evidence
 from opc.core.models import ApprovalAction, ExternalSession, Task, TaskResult, TaskStatus, VerificationEvidence
 from opc.core.worker_envelope import classify_worker_message
 from opc.database.store import OPCStore
@@ -54,6 +55,7 @@ from opc.layer4_tools.collaboration_rpc import (
     OPC_COLLAB_RPC_PATH,
     OPC_COLLAB_RPC_PORT,
     OPC_COLLAB_RPC_TRANSPORT,
+    collaboration_rpc_transport_parent,
     start_collaboration_rpc_server,
 )
 
@@ -407,6 +409,26 @@ class ExternalAgentBroker:
             await self._persist_session(adapter, task, workspace_path, result.artifacts or {}, result)
             return result
 
+        call_budget = self._reserve_benchmark_external_call(
+            workspace_path=workspace_path,
+            task=task,
+            agent_type=adapter.agent_type,
+        )
+        metadata["benchmark_external_call_budget"] = call_budget
+        if call_budget.get("enabled") and not call_budget.get("allowed"):
+            result = TaskResult(
+                status=TaskStatus.FAILED,
+                content=(
+                    "External agent call budget exhausted for this benchmark "
+                    f"slot ({call_budget['used']}/{call_budget['limit']})."
+                ),
+                artifacts=metadata,
+            )
+            await self._persist_session(
+                adapter, task, workspace_path, result.artifacts or {}, result
+            )
+            return result
+
         if mode == "interactive" and adapter.supports_interactive():
             result = await self._run_interactive(
                 adapter,
@@ -445,6 +467,89 @@ class ExternalAgentBroker:
         result.artifacts = artifacts
         await self._persist_session(adapter, task, workspace_path, artifacts, result)
         return result
+
+    @staticmethod
+    def _reserve_benchmark_external_call(
+        *,
+        workspace_path: str,
+        task: Task,
+        agent_type: str,
+    ) -> dict[str, Any]:
+        """Atomically reserve one conservative call permit for benchmark runs.
+
+        Permit files are never removed: failed, cancelled, and timed-out calls
+        still consume the slot budget. ``O_EXCL`` makes the ceiling exact even
+        when multiple Company roles start concurrently.
+        """
+
+        raw_limit = str(
+            os.environ.get("OPC_BENCHMARK_EXTERNAL_CALL_LIMIT") or ""
+        ).strip()
+        if not raw_limit:
+            return {"enabled": False, "allowed": True, "limit": 0, "used": 0}
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return {
+                "enabled": True,
+                "allowed": False,
+                "limit": 0,
+                "used": 0,
+                "reason": "invalid_limit",
+            }
+        if limit < 1:
+            return {
+                "enabled": True,
+                "allowed": False,
+                "limit": limit,
+                "used": 0,
+                "reason": "non_positive_limit",
+            }
+
+        budget_dir = (
+            Path(workspace_path).expanduser().resolve()
+            / ".opc"
+            / "benchmark_external_call_budget"
+        )
+        budget_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "task_id": str(task.id or ""),
+            "project_id": str(task.project_id or ""),
+            "agent_type": str(agent_type or ""),
+            "reserved_at": datetime.now().isoformat(),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode(
+            "utf-8"
+        )
+        for index in range(1, limit + 1):
+            permit = budget_dir / f"call-{index:06d}.json"
+            try:
+                descriptor = os.open(
+                    permit,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                continue
+            try:
+                os.write(descriptor, encoded)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            return {
+                "enabled": True,
+                "allowed": True,
+                "limit": limit,
+                "used": index,
+                "permit": permit.name,
+            }
+        return {
+            "enabled": True,
+            "allowed": False,
+            "limit": limit,
+            "used": limit,
+            "reason": "exhausted",
+        }
 
     async def _restore_session_resume_from_store(
         self,
@@ -868,7 +973,15 @@ class ExternalAgentBroker:
                 return await dispatch_collaboration_tool_bound(tool_name, args, binding)
 
             try:
-                collab_rpc_server = await start_collaboration_rpc_server(_dispatch_collaboration_rpc)
+                collab_rpc_server = await start_collaboration_rpc_server(
+                    _dispatch_collaboration_rpc,
+                    # Root the FIFO inside the role workspace: external-agent
+                    # sandboxes only allow writes there, and a /tmp transport
+                    # fails every collaboration call with EROFS.
+                    transport_parent=collaboration_rpc_transport_parent(
+                        workspace_path
+                    ),
+                )
             except Exception as exc:
                 message = f"Company collaboration RPC setup failed: {exc}"
                 logger.warning(message)
@@ -1833,7 +1946,7 @@ class ExternalAgentBroker:
             evidence.status = "provided"
         if evidence.status != "provided":
             return {}
-        return evidence.__dict__
+        return compact_verification_evidence(evidence.__dict__)
 
     @staticmethod
     def _normalize_verification_line(line: str) -> str:
@@ -1887,13 +2000,15 @@ class ExternalAgentBroker:
             checks.append(dict(current))
         if not checks or not verdict:
             return {}
-        return VerificationEvidence(
-            status="provided",
-            verdict=verdict,
-            summary="\n".join(summary_lines).strip(),
-            checks=checks[:24],
-            raw_output=raw,
-        ).__dict__
+        return compact_verification_evidence(
+            VerificationEvidence(
+                status="provided",
+                verdict=verdict,
+                summary="\n".join(summary_lines).strip(),
+                checks=checks[:24],
+                raw_output=raw,
+            ).__dict__
+        )
 
     def _infer_verification_evidence_from_command_events(self, output: str) -> dict[str, Any]:
         raw = str(output or "").strip()
@@ -1946,13 +2061,15 @@ class ExternalAgentBroker:
             return {}
         verdict = "fail" if failure_seen else "pass"
         summary = "Derived verification evidence from external command execution events."
-        return VerificationEvidence(
-            status="provided",
-            verdict=verdict,
-            summary=summary,
-            checks=checks[:24],
-            raw_output=raw,
-        ).__dict__
+        return compact_verification_evidence(
+            VerificationEvidence(
+                status="provided",
+                verdict=verdict,
+                summary=summary,
+                checks=checks[:24],
+                raw_output=raw,
+            ).__dict__
+        )
 
     def _fallback_work_item_runtime_plan(self, task: Task) -> dict[str, Any]:
         work_item_assignment = dict(task.metadata.get("work_item_assignment", {}) or {})

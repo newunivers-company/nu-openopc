@@ -81,8 +81,6 @@ class SlackChannel(SocketChannel):
     async def run_socket_forever(self) -> None:
         if self.config.mode != "socket":
             raise RuntimeError(f"unsupported slack mode: {self.config.mode}")
-        from slack_sdk.socket_mode.websockets import SocketModeClient
-        from slack_sdk.web.async_client import AsyncWebClient
 
         self._web_client = self._create_web_client()
         auth = await self._web_client.auth_test()

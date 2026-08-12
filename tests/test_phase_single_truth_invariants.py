@@ -33,7 +33,6 @@ from opc.core.models import (
 from opc.database.store import OPCStore
 from opc.layer2_organization import phase_hooks  # noqa: F401  registers hooks
 from opc.layer2_organization.phase import (
-    _PHASE_TRANSITION_HOOKS,
     kanban_column,
     task_status_for_phase,
 )

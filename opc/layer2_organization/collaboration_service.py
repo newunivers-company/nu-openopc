@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,7 +10,6 @@ from typing import Any
 from opc.core.models import (
     AgentMessage,
     CommsSemanticType,
-    HandoffRecord,
     MeetingRoom,
     MeetingStatus,
     MessageStatus,
@@ -390,6 +388,8 @@ class CollaborationService:
                     sent_at=message.timestamp.isoformat(),
                     idempotency_key=f"{recipient}:{content_fp}",
                     extra_frontmatter={
+                        "msg_type": message.msg_type,
+                        "reply_needed": bool(message.reply_needed),
                         "task_id": message.task_id or "",
                         "context_ref": message.context_ref or "",
                         "requires_ack": bool(message.requires_ack),

@@ -16,6 +16,16 @@ assert.match(
 )
 assert.match(messageListSource, /scrollPolicy = 'follow'/, 'main transcript behavior should default to follow mode')
 assert.doesNotMatch(messageListSource, /useVirtualizer/, 'chat transcript must use stable normal DOM rows')
+assert.match(
+  messageListSource,
+  /resizeScheduler\.schedule\(undefined\)/,
+  'viewport reconciliation must run outside ResizeObserver delivery',
+)
+assert.match(
+  messageListSource,
+  /resizeScheduler\.dispose\(\)/,
+  'pending viewport reconciliation must be cancelled during effect cleanup',
+)
 assert.doesNotMatch(messageListSource, /PROGRAMMATIC_SCROLL_GRACE_MS/, 'scroll behavior must not regress to timer-based intent guessing')
 assert.doesNotMatch(
   messageListSource,

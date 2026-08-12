@@ -543,3 +543,33 @@ async def _respond(request: dict[str, Any], response: dict[str, Any]) -> None:
         return
     with contextlib.suppress(Exception):
         _write_fifo_nonblocking(response_path, response)
+
+
+def collaboration_rpc_transport_parent(
+    workspace_path: str | os.PathLike[str] | None,
+) -> Path | None:
+    """Root the FIFO transport inside the role's workspace, not /tmp.
+
+    External-agent sandboxes (e.g. the Codex CLI's workspace-write mode)
+    allow writes only under the workspace, so a broker RPC directory in the
+    host /tmp fails every collaboration call with EROFS — the 2026-07-29
+    pilot signature where company roles concluded "write access is
+    unavailable" and delivered blockage reports instead of work. Falling
+    back to None keeps the historical tempdir behavior for callers without
+    a workspace.
+    """
+
+    candidate_root = str(workspace_path or "").strip()
+    if not candidate_root:
+        return None
+    try:
+        parent = Path(candidate_root).resolve() / ".opc-comms" / "rpc"
+        parent.mkdir(parents=True, exist_ok=True)
+        return parent
+    except OSError as exc:
+        # A supplied workspace is a security and correctness boundary. Falling
+        # back to /tmp here silently recreates the EROFS failure inside
+        # workspace-write sandboxes, so fail setup visibly instead.
+        raise RuntimeError(
+            f"Cannot prepare collaboration RPC transport under workspace {candidate_root}: {exc}"
+        ) from exc

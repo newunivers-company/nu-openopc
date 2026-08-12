@@ -27,7 +27,7 @@ from typing import Any
 
 from loguru import logger
 
-from opc.core.models import Phase, TaskStatus
+from opc.core.models import Phase
 from opc.layer2_organization.phase import (
     DONE_PHASES,
     RUNNABLE_PHASES,
