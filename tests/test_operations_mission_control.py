@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from datetime import timedelta
 from pathlib import Path
@@ -230,6 +231,41 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(snapshot.judgment_queue), 20)
         self.assertEqual(snapshot.to_dict()["judgment_queue"], snapshot.judgment_queue)
 
+    async def test_snapshot_exposes_bounded_campaign_expansion_decision(self) -> None:
+        now = await self._seed_risky_portfolio()
+        for mode in ("task", "company"):
+            run_id = f"benchmark-campaign-content-r1-{mode}"
+            await self.repository.save_manifest(
+                RunManifest(
+                    run_id=run_id,
+                    goal_id="goal-risk",
+                    status=RunStatus.COMPLETED,
+                    completed_at=now,
+                    metadata={
+                        "benchmark_campaign_id": "campaign",
+                        "benchmark_slot_id": f"content/{mode}/1",
+                        "benchmark_case_id": "content",
+                        "benchmark_workload": "content",
+                        "benchmark_mode": mode,
+                        "benchmark_repetition": 1,
+                        "benchmark_expected_slots": 6,
+                    },
+                )
+            )
+
+        snapshot = await self.mission.snapshot(project_id="default", now=now)
+
+        active = snapshot.campaign_portfolio["active_campaign"]
+        self.assertEqual(active["campaign_id"], "campaign")
+        self.assertEqual(active["awaiting_judgment"], 2)
+        self.assertEqual(active["not_started"], 4)
+        self.assertEqual(active["batch_expansion"]["phase"], "blocked")
+        self.assertEqual(active["batch_expansion"]["next_pair_budget"], 0)
+        self.assertIn(
+            "awaiting_judgment",
+            active["batch_expansion"]["blockers"],
+        )
+
     async def test_daily_brief_is_deterministic_and_actionable(self) -> None:
         now = await self._seed_risky_portfolio()
         brief = await self.mission.daily_brief(project_id="default", now=now)
@@ -239,6 +275,41 @@ class MissionControlServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Approvals 1 pending", brief)
         self.assertIn("[CRITICAL]", brief)
         self.assertIn("Recommended next actions", brief)
+
+    async def test_storage_inventory_is_dry_run_and_surfaces_retention_risk(self) -> None:
+        now = utc_now()
+        backup_dir = Path(self._tmp.name) / "projects" / "demo"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        newest = backup_dir / "tasks.db.backup-new"
+        old = backup_dir / "tasks.db.backup-old"
+        newest.write_bytes(b"new")
+        old.write_bytes(b"old-backup")
+        old_timestamp = (now - timedelta(days=90)).timestamp()
+        os.utime(old, (old_timestamp, old_timestamp))
+        mission = MissionControlService(
+            self.repository,
+            self.kernel,
+            storage_root=self._tmp.name,
+            storage_keep_latest=1,
+            storage_max_age_days=30,
+            storage_warning_bytes=1,
+            storage_critical_bytes=2,
+        )
+
+        snapshot = await mission.snapshot(project_id="default", now=now)
+
+        self.assertTrue(snapshot.storage["available"])
+        self.assertTrue(snapshot.storage["dry_run"])
+        self.assertFalse(snapshot.storage["automatic_cleanup"])
+        self.assertEqual(snapshot.storage["candidate_count"], 1)
+        self.assertEqual(snapshot.storage["apply_command"][-1], "--apply")
+        self.assertTrue(newest.exists())
+        self.assertTrue(old.exists())
+        self.assertIn("storage_capacity", {item.kind for item in snapshot.alerts})
+        self.assertIn("storage_retention", {item.kind for item in snapshot.alerts})
+
+        brief = await mission.daily_brief(project_id="default", now=now)
+        self.assertIn("1 retention candidate(s) / dry-run only", brief)
 
     async def test_snapshot_surfaces_exhausted_subscription_call_quota(self) -> None:
         await self.repository.reserve_provider_call(

@@ -49,6 +49,7 @@ from opc.operations.learning_experiments import (
 from opc.operations.mission_control import MissionControlService
 from opc.operations.mode_advisor import (
     ModeAssessmentRequest,
+    ModeOutcomeObservation,
     assess_execution_mode,
 )
 from opc.operations.operator_actions import OperatorActionService
@@ -99,6 +100,7 @@ __all__ = [
     "verify_release_playbook_experiment",
     "MissionControlService",
     "ModeAssessmentRequest",
+    "ModeOutcomeObservation",
     "assess_execution_mode",
     "OperatorActionService",
     "build_promotion_dossier",

@@ -12,8 +12,11 @@ from opc.operations.canary import (
     ProviderCanaryScheduler,
     ProviderCanaryService,
     build_readiness_campaign_plan,
+    run_readiness_campaign,
     summarize_provider_readiness,
     summarize_provider_slo,
+    validate_failure_drill_result,
+    verify_readiness_campaign_plan,
 )
 from opc.operations.models import (
     CapabilityKind,
@@ -465,6 +468,70 @@ class ProviderCanaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first["automatic_failure_injection"])
         self.assertEqual(len(first["failure_drills"]), 2)
         self.assertEqual(len(first["plan_digest"]), 64)
+
+        verified = verify_readiness_campaign_plan(first)
+        self.assertEqual(verified["plan_digest"], first["plan_digest"])
+        tampered = {**first, "provider": "other"}
+        with self.assertRaisesRegex(ValueError, "digest mismatch"):
+            verify_readiness_campaign_plan(tampered)
+
+    async def test_campaign_runner_records_real_samples_with_plan_provenance(self) -> None:
+        plan = build_readiness_campaign_plan(
+            campaign_id="ollama-readiness",
+            provider="ollama-local",
+            start_at=datetime.now(timezone.utc),
+            interval_seconds=1,
+            observation_seconds=60,
+            required_failure_scenarios=["transport_timeout"],
+        )
+        sleeps: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            sleeps.append(delay)
+
+        request = CapabilityRequest(
+            capability_kind=CapabilityKind.LLM,
+            task_type="dialogue",
+            allow_live=True,
+        )
+        report = await run_readiness_campaign(
+            self.service,
+            request,
+            plan,
+            iterations=2,
+            sleep=fake_sleep,
+        )
+
+        self.assertEqual(report["samples"], 2)
+        self.assertFalse(report["generation_allowed"])
+        self.assertEqual(sleeps, [1.0])
+        self.assertFalse(request.allow_live)
+        self.assertEqual(request.preferred_providers, ["ollama-local"])
+        rows = await self.repository.list_provider_canary_results(project_id="default")
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row.metadata["readiness_campaign_id"], "ollama-readiness")
+            self.assertEqual(row.metadata["readiness_campaign_plan_digest"], plan["plan_digest"])
+
+    async def test_drill_pack_validation_requires_every_observed_check(self) -> None:
+        payload = {
+            "authority": "independent_observer",
+            "evidence": ["artifact://drill/transport-timeout"],
+            "actual_injection": True,
+            "expected_failure_observed": True,
+            "fallback_verified": True,
+            "alert_verified": True,
+            "recovery_verified": False,
+        }
+        with self.assertRaisesRegex(ValueError, "recovery_verified"):
+            validate_failure_drill_result(
+                "transport_timeout", payload, require_passed=True,
+            )
+        payload["recovery_verified"] = True
+        validated = validate_failure_drill_result(
+            "transport_timeout", payload, require_passed=True,
+        )
+        self.assertTrue(validated["passed"])
 
 
 if __name__ == "__main__":

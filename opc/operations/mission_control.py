@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
+from pathlib import Path
 from statistics import fmean
 from typing import Any
 
 from opc.operations.canary import summarize_provider_readiness
+from opc.operations.campaign_portfolio import build_campaign_portfolio
 from opc.operations.durable import DurableRunKernel
 from opc.operations.models import (
     GateStatus,
@@ -18,6 +21,7 @@ from opc.operations.models import (
     utc_now,
 )
 from opc.operations.repository import OperationsRepository
+from opc.operations.storage_retention import inspect_storage_retention
 
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -31,10 +35,25 @@ class MissionControlService:
         repository: OperationsRepository,
         durable_kernel: DurableRunKernel,
         provider_config: Any | None = None,
+        storage_root: str | Path | None = None,
+        storage_keep_latest: int = 3,
+        storage_max_age_days: int = 30,
+        storage_warning_bytes: int = 5 * 1024**3,
+        storage_critical_bytes: int = 10 * 1024**3,
     ) -> None:
         self.repository = repository
         self.durable_kernel = durable_kernel
         self.provider_config = provider_config
+        self.storage_root = Path(storage_root).expanduser() if storage_root else None
+        self.storage_keep_latest = storage_keep_latest
+        self.storage_max_age_days = storage_max_age_days
+        self.storage_warning_bytes = storage_warning_bytes
+        self.storage_critical_bytes = storage_critical_bytes
+
+    def rebind_storage_root(self, storage_root: str | Path | None) -> None:
+        """Follow a rebound project store without mutating any storage content."""
+
+        self.storage_root = Path(storage_root).expanduser() if storage_root else None
 
     async def snapshot(
         self,
@@ -84,6 +103,7 @@ class MissionControlService:
             and (item.expires_at is None or item.expires_at > timestamp)
         ]
         pending_approvals = await self._pending_approval_count(project_id)
+        storage = await self._storage_snapshot(timestamp)
         alerts: list[MissionAlert] = []
         unmeasured_usage_events = sum(not item.measured for item in usage_events)
         availability_target = float(
@@ -288,6 +308,7 @@ class MissionControlService:
             "all_runs": funnel_stage(manifest_run_ids),
             "benchmark": funnel_stage(benchmark_run_ids),
         }
+        campaign_portfolio = build_campaign_portfolio(manifests, scorecards)
         judgment_candidates = sorted(
             (
                 run
@@ -481,6 +502,53 @@ class MissionControlService:
                     )
                 )
 
+        if storage.get("available"):
+            total_bytes = int(storage.get("total_bytes", 0) or 0)
+            candidate_count = int(storage.get("candidate_count", 0) or 0)
+            candidate_bytes = int(storage.get("candidate_bytes", 0) or 0)
+            if total_bytes >= self.storage_critical_bytes:
+                alerts.append(
+                    MissionAlert(
+                        severity="critical",
+                        kind="storage_capacity",
+                        title="OpenOPC storage exceeded the critical threshold",
+                        detail=(
+                            f"{total_bytes} bytes are stored under the configured root; "
+                            f"the critical threshold is {self.storage_critical_bytes} bytes."
+                        ),
+                        action="Review the storage inventory before expanding active workloads.",
+                    )
+                )
+            elif total_bytes >= self.storage_warning_bytes:
+                alerts.append(
+                    MissionAlert(
+                        severity="medium",
+                        kind="storage_capacity",
+                        title="OpenOPC storage is nearing its capacity threshold",
+                        detail=(
+                            f"{total_bytes} bytes are stored under the configured root; "
+                            f"the warning threshold is {self.storage_warning_bytes} bytes."
+                        ),
+                        action="Review databases, logs, and generated backups in the storage inventory.",
+                    )
+                )
+            if candidate_count:
+                alerts.append(
+                    MissionAlert(
+                        severity="low",
+                        kind="storage_retention",
+                        title=f"{candidate_count} generated backup(s) are retention candidates",
+                        detail=(
+                            f"The dry-run policy identified {candidate_bytes} reclaimable bytes; "
+                            "no file was deleted."
+                        ),
+                        action=(
+                            "Review the exact candidates, then run the displayed retention "
+                            "command with --apply only if approved."
+                        ),
+                    )
+                )
+
         alerts.sort(
             key=lambda item: (
                 _SEVERITY_ORDER.get(item.severity, 99),
@@ -510,7 +578,9 @@ class MissionControlService:
             unmeasured_usage_events=unmeasured_usage_events,
             provider_slo=provider_slo,
             provider_call_quotas=provider_call_quotas,
+            storage=storage,
             evidence_funnel=evidence_funnel,
+            campaign_portfolio=campaign_portfolio,
             judgment_queue=judgment_queue,
             alerts=alerts,
             recommendations=recommendations,
@@ -553,6 +623,13 @@ class MissionControlService:
                 f"{len(snapshot.provider_call_quotas)} call quota(s)"
             ),
         ]
+        if snapshot.storage.get("available"):
+            lines.append(
+                "Storage "
+                f"{int(snapshot.storage.get('total_bytes', 0))} bytes / "
+                f"{int(snapshot.storage.get('candidate_count', 0))} retention candidate(s) / "
+                "dry-run only"
+            )
         if snapshot.alerts:
             lines.append("Alerts:")
             lines.extend(
@@ -574,6 +651,77 @@ class MissionControlService:
         ) as cursor:
             row = await cursor.fetchone()
         return int(row[0] if row else 0)
+
+    async def _storage_snapshot(self, now: datetime) -> dict[str, Any]:
+        """Return a bounded, dry-run-only storage inventory for Mission Control."""
+
+        if self.storage_root is None:
+            return {
+                "available": False,
+                "reason": "storage root is not bound",
+                "dry_run": True,
+                "automatic_cleanup": False,
+            }
+        root = self.storage_root.resolve()
+        try:
+            report = await asyncio.to_thread(
+                inspect_storage_retention,
+                root,
+                keep_latest=self.storage_keep_latest,
+                max_age_days=self.storage_max_age_days,
+                now=now,
+            )
+        except (FileNotFoundError, PermissionError, OSError, ValueError) as exc:
+            return {
+                "available": False,
+                "reason": str(exc),
+                "root": str(root),
+                "dry_run": True,
+                "automatic_cleanup": False,
+            }
+        command = [
+            "python",
+            "-m",
+            "opc.operations.storage_retention",
+            report.root,
+            "--keep-latest",
+            str(self.storage_keep_latest),
+            "--max-age-days",
+            str(self.storage_max_age_days),
+        ]
+        return {
+            "available": True,
+            "root": report.root,
+            "dry_run": True,
+            "automatic_cleanup": False,
+            "apply_requires_explicit_flag": True,
+            "policy": {
+                "keep_latest": self.storage_keep_latest,
+                "max_age_days": self.storage_max_age_days,
+                "warning_bytes": self.storage_warning_bytes,
+                "critical_bytes": self.storage_critical_bytes,
+            },
+            "total_bytes": report.total_bytes,
+            "database_bytes": report.database_bytes,
+            "backup_bytes": report.backup_bytes,
+            "log_bytes": report.log_bytes,
+            "file_count": report.file_count,
+            "database_count": report.database_count,
+            "backup_count": report.backup_count,
+            "candidate_count": len(report.candidates),
+            "candidate_bytes": report.candidate_bytes,
+            "candidates": [
+                {
+                    "path": item.path,
+                    "size_bytes": item.size_bytes,
+                    "modified_at": item.modified_at,
+                }
+                for item in report.candidates[:20]
+            ],
+            "largest_files": report.largest_files[:10],
+            "inspect_command": command,
+            "apply_command": [*command, "--apply"],
+        }
 
 
 def _recommendations(

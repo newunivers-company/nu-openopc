@@ -151,7 +151,7 @@ class SkillAssemblyService:
         roles: list[dict[str, Any]],
         required: list[str],
     ) -> dict[str, list[str]]:
-        assignments = {
+        assignments: dict[str, list[str]] = {
             str(role.get("role_id") or role.get("id") or "").strip(): []
             for role in roles
         }
@@ -332,9 +332,13 @@ class SkillAssemblyService:
         for item in additions:
             covered_tokens.update(_tokens(" ".join(item["matched_capabilities"])))
         for existing_name in existing:
-            row = next((item for item in catalog if item["name"] == existing_name), None)
-            if row:
-                covered_tokens.update(row["tokens"])
+            existing_row: dict[str, Any] | None = None
+            for catalog_item in catalog:
+                if catalog_item["name"] == existing_name:
+                    existing_row = catalog_item
+                    break
+            if existing_row:
+                covered_tokens.update(existing_row["tokens"])
         gaps = [
             capability
             for capability in [*required, *role_capabilities]

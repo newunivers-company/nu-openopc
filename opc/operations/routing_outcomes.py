@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from statistics import fmean
-from typing import Any
+from typing import Any, cast
 
 from opc.operations.learning import LearningAssetManager
 from opc.operations.models import GateStatus, LearningAsset
@@ -75,8 +75,8 @@ class RoutingOutcomeService:
                 if item.run_id in scorecard_by_run
                 and scorecard_by_run[item.run_id].gate_status == GateStatus.PASS
             ]
-            known_costs = [
-                usage_by_contract[item.contract_id].cost_usd
+            known_costs: list[float] = [
+                float(cast(float, usage_by_contract[item.contract_id].cost_usd))
                 for item in values
                 if item.contract_id in usage_by_contract
                 and usage_by_contract[item.contract_id].cost_usd is not None

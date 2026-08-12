@@ -398,6 +398,9 @@ class OperationsRepository:
     """Typed access to operations tables in one project-scoped ``OPCStore``."""
 
     def __init__(self, store: "OPCStore") -> None:
+        self._bind_store(store)
+
+    def _bind_store(self, store: "OPCStore") -> None:
         self.store = store
         lock = getattr(store, "_operations_transaction_lock", None)
         if lock is None:
@@ -413,7 +416,7 @@ class OperationsRepository:
         await self.store.ensure_ready()
 
     def rebind(self, store: "OPCStore") -> None:
-        self.__init__(store)
+        self._bind_store(store)
 
     def assert_project(self, project_id: str) -> None:
         """Reject access that does not match the bound project database."""
@@ -550,6 +553,7 @@ class OperationsRepository:
         latest_goal = await self.get_goal(manifest.goal_id)
         if latest_goal is None:
             raise KeyError(f"goal contract not found: {manifest.goal_id}")
+        goal: GoalContract | None
         if manifest.goal_version == 0:
             manifest.goal_version = latest_goal.version
             goal = latest_goal
@@ -1315,7 +1319,8 @@ class OperationsRepository:
                WHERE project_id = ? ORDER BY provider""",
             (project_id,),
         ) as cursor:
-            return [str(row[0]) for row in await cursor.fetchall() if str(row[0]).strip()]
+            rows = await cursor.fetchall()
+        return [str(row[0]) for row in rows if str(row[0]).strip()]
 
     async def reserve_provider_call(
         self,

@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Iterable, Mapping
 
 from opc.operations.capabilities import UnifiedCapabilityBroker
 from opc.operations.models import CapabilityKind, CapabilityRequest, utc_now
@@ -500,7 +500,8 @@ class ApprovedResourcePipeline:
                 )
             },
         }
-        if self.quality_executor is None:
+        quality_executor = self.quality_executor
+        if quality_executor is None:
             stages["artifact_quality"] = {
                 "performed": False,
                 "decision": "review",
@@ -523,7 +524,7 @@ class ApprovedResourcePipeline:
 
         async def evaluate_quality(_route: Any, _request: Any) -> Any:
             return await _maybe_await(
-                self.quality_executor(quality_metadata, generated_map)
+                quality_executor(quality_metadata, generated_map)
             )
 
         try:
@@ -618,6 +619,7 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
 
 
 def _string_list(value: Any) -> list[str]:
+    items: Iterable[Any]
     if isinstance(value, str):
         items = value.split(",")
     elif isinstance(value, (list, tuple, set)):

@@ -714,8 +714,12 @@ class DurableRunKernel:
                         "idempotency key collision across a different event identity: "
                         f"{idempotency_key!r}"
                     )
-                outbox = await self._outbox_for_event(duplicate.event_id)
-                return AppendResult(event=duplicate, outbox=outbox, duplicate=True)
+                duplicate_outbox = await self._outbox_for_event(duplicate.event_id)
+                return AppendResult(
+                    event=duplicate,
+                    outbox=duplicate_outbox,
+                    duplicate=True,
+                )
         if fencing_token is not None or lease_owner:
             if fencing_token is None or not lease_owner:
                 raise ValueError("lease_owner and fencing_token must be supplied together")

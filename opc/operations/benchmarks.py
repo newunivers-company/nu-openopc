@@ -10,7 +10,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from statistics import fmean, stdev
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, cast
 
 from opc.operations.models import GateStatus, GoalContract, RunManifest, RunScorecard, RunStatus
 
@@ -974,7 +974,8 @@ def _paired_report(
         and candidate.cost_usd is not None
     ]
     cost_deltas = [
-        float(candidate.cost_usd) - float(baseline.cost_usd)
+        float(cast(float, candidate.cost_usd))
+        - float(cast(float, baseline.cost_usd))
         for baseline, candidate in measured_cost_pairs
     ]
     quality_ci = _mean_confidence_interval(quality_deltas)

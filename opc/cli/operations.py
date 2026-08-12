@@ -31,7 +31,10 @@ from opc.operations.models import (
 from opc.operations.canary import (
     build_drill_result_template,
     build_readiness_campaign_plan,
+    run_readiness_campaign,
     run_status_canary_loop,
+    validate_failure_drill_result,
+    verify_readiness_campaign_plan,
 )
 from opc.operations.shadow_artifacts import ShadowArtifactStore
 from opc.operations.shadow_traffic import drive_shadow_prompts, load_prompts
@@ -59,6 +62,7 @@ from opc.operations.campaign_runner import (
     refresh_workspace_artifacts,
     slot_execution_project_id,
     subprocess_executor_preflight,
+    validate_artifact_index,
     verify_plan,
 )
 from opc.operations.judging import (
@@ -141,6 +145,7 @@ def register_operations_cli(app: typer.Typer) -> None:
     ) -> None:
         """Produce an LLM DRAFT of criterion scores. Drafts carry no authority."""
 
+        artifact_validation = validate_artifact_index(Path(artifacts_dir))
         artifacts: dict[str, str] = {}
         for path in sorted(Path(artifacts_dir).rglob("*")):
             if not path.is_file() or path.name in {
@@ -193,6 +198,7 @@ def register_operations_cli(app: typer.Typer) -> None:
                 run_id=run_id,
                 judge_model=_served_judge_model(provider, config.llm.default_model),
                 response_text=response,
+                artifact_digest=str(artifact_validation["artifact_digest"]),
             )
             return draft.to_dict()
 
@@ -241,6 +247,9 @@ def register_operations_cli(app: typer.Typer) -> None:
             authority=authority,
             adjusted_scores=adjustments,
             evidence=skeleton_payload.get("evidence", {}),
+            artifact_digest=str(
+                skeleton_payload.get("artifact_digest", "") or ""
+            ),
         )
         if skeleton_payload.get("metrics"):
             result["metrics"] = skeleton_payload["metrics"]
@@ -1035,6 +1044,7 @@ def register_operations_cli(app: typer.Typer) -> None:
 
         def _slot_artifacts(slot: Mapping[str, Any]) -> dict[str, str]:
             directory = artifacts_root / str(slot["artifact_directory"])
+            validate_artifact_index(directory)
             artifacts: dict[str, str] = {}
             if directory.exists():
                 for path in sorted(directory.rglob("*")):
@@ -1106,6 +1116,11 @@ def register_operations_cli(app: typer.Typer) -> None:
                         run_id=run_id,
                         judge_model=judge_model,
                         max_artifact_chars=max_artifact_chars,
+                        artifact_digest=str(
+                            validate_artifact_index(
+                                artifacts_root / str(slot["artifact_directory"])
+                            )["artifact_digest"]
+                        ),
                     )
                     draft.judge_model = _served_judge_model(provider, judge_model)
                     draft_path = output_dir / f"{run_id}.draft.json"
@@ -1248,6 +1263,196 @@ def register_operations_cli(app: typer.Typer) -> None:
                 encoding="utf-8",
             )
         _emit(report)
+
+    @capability_app.command("campaign-scaffold")
+    def capability_campaign_scaffold(
+        campaign_id: str = typer.Option(..., "--campaign-id"),
+        provider: str = typer.Option(..., "--provider"),
+        request_json: Path = typer.Option(..., "--request"),
+        output_dir: Path = typer.Option(..., "--output-dir"),
+        model: str = typer.Option("", "--model"),
+        start_at: str = typer.Option("", "--start-at"),
+        overwrite: bool = typer.Option(False, "--overwrite"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Create a status-only campaign pack and fail-closed drill templates."""
+        config_dir = get_opc_home() / "config"
+        config = (
+            OPCConfig.load(config_dir)
+            if config_dir.exists()
+            else OPCConfig()
+        ).system.operations.providers
+        parsed_start = (
+            datetime.fromisoformat(start_at.replace("Z", "+00:00"))
+            if start_at
+            else datetime.now(timezone.utc)
+        )
+        request = CapabilityRequest.from_dict(_load_mapping(request_json))
+        request.project_id = project
+        request.allow_live = False
+        request.preferred_providers = [provider]
+        request.require_preferred_provider = True
+        plan = build_readiness_campaign_plan(
+            campaign_id=campaign_id,
+            provider=provider,
+            model=model,
+            start_at=parsed_start,
+            interval_seconds=config.status_canary_interval_seconds,
+            observation_seconds=config.readiness_min_observation_seconds,
+            time_bucket_seconds=config.readiness_time_bucket_seconds,
+            minimum_time_buckets=config.readiness_min_time_buckets,
+            maximum_sample_age_seconds=config.readiness_max_sample_age_seconds,
+            maximum_gap_seconds=config.readiness_max_gap_seconds,
+            failure_drill_max_age_seconds=config.readiness_failure_drill_max_age_seconds,
+            required_failure_scenarios=config.readiness_required_failure_scenarios,
+        )
+        targets: dict[Path, dict[str, Any]] = {
+            output_dir / "plan.json": plan,
+            output_dir / "request.json": request.to_dict(),
+        }
+        for item in plan["failure_drills"]:
+            scenario = str(item["scenario"])
+            targets[output_dir / f"drill-{scenario}.json"] = build_drill_result_template(
+                scenario,
+                provider=provider,
+                model=model,
+            )
+        existing = sorted(str(path) for path in targets if path.exists())
+        if existing and not overwrite:
+            raise ValueError(
+                "campaign scaffold refuses to overwrite existing files: "
+                + ", ".join(existing)
+            )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for path, payload in targets.items():
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        manifest = {
+            "campaign_id": campaign_id,
+            "provider": provider,
+            "project_id": project,
+            "plan_digest": plan["plan_digest"],
+            "generation_allowed": False,
+            "automatic_failure_injection": False,
+            "files": [str(path) for path in sorted(targets)],
+            "run_command": [
+                "opc", "ops", "capability", "campaign-run",
+                "--plan", str(output_dir / "plan.json"),
+                "--request", str(output_dir / "request.json"),
+                "--project", project,
+            ],
+            "record_drills_command": [
+                "opc", "ops", "capability", "campaign-record-drills",
+                "--plan", str(output_dir / "plan.json"),
+                "--results-dir", str(output_dir),
+                "--project", project,
+            ],
+        }
+        (output_dir / "scaffold.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        _emit(manifest)
+
+    @capability_app.command("campaign-run")
+    def capability_campaign_run(
+        plan_path: Path = typer.Option(..., "--plan"),
+        request_json: Path = typer.Option(..., "--request"),
+        iterations: int = typer.Option(1, "--iterations", min=0),
+        interval_seconds: Optional[float] = typer.Option(None, "--interval-seconds", min=1.0),
+        stream: bool = typer.Option(False, "--stream"),
+        output: Optional[Path] = typer.Option(None, "--output"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Collect genuine status-only samples for a verified campaign plan."""
+        plan = verify_readiness_campaign_plan(_load_mapping(plan_path))
+        request = CapabilityRequest.from_dict(_load_mapping(request_json))
+        request.project_id = project
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            samples = await run_readiness_campaign(
+                service.canaries,
+                request,
+                plan,
+                iterations=iterations,
+                interval_seconds=interval_seconds,
+                on_result=(
+                    lambda sample: typer.echo(json.dumps(sample, ensure_ascii=False, sort_keys=True, default=str))
+                    if stream
+                    else None
+                ),
+            )
+            config = service.config.providers
+            readiness = await service.canaries.readiness_summary(
+                project_id=project,
+                provider=str(plan["provider"]),
+                availability_target=config.slo_availability_target,
+                p95_latency_target_ms=config.slo_p95_latency_target_ms,
+                minimum_samples=config.slo_min_samples,
+                trend_window_samples=config.slo_trend_window_samples,
+                minimum_observation_seconds=config.readiness_min_observation_seconds,
+                time_bucket_seconds=config.readiness_time_bucket_seconds,
+                minimum_time_buckets=config.readiness_min_time_buckets,
+                minimum_samples_per_bucket=config.readiness_min_samples_per_bucket,
+                maximum_sample_age_seconds=config.readiness_max_sample_age_seconds,
+                maximum_gap_seconds=config.readiness_max_gap_seconds,
+                failure_drill_max_age_seconds=config.readiness_failure_drill_max_age_seconds,
+                required_failure_scenarios=config.readiness_required_failure_scenarios,
+            )
+            return {"campaign": samples, "readiness": readiness}
+
+        report = _run(project, action, integrations=True)
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        _emit(report)
+
+    @capability_app.command("campaign-record-drills")
+    def capability_campaign_record_drills(
+        plan_path: Path = typer.Option(..., "--plan"),
+        results_dir: Path = typer.Option(..., "--results-dir"),
+        project: str = typer.Option("default", "--project", "-p"),
+    ) -> None:
+        """Record a complete campaign drill pack only after every result passes validation."""
+        plan = verify_readiness_campaign_plan(_load_mapping(plan_path))
+        validated: list[tuple[str, dict[str, Any]]] = []
+        for item in plan["failure_drills"]:
+            scenario = str(item["scenario"])
+            result_path = results_dir / f"drill-{scenario}.json"
+            result = _load_mapping(result_path)
+            embedded = str(result.get("scenario", scenario) or scenario)
+            if embedded != scenario:
+                raise ValueError(
+                    f"failure drill scenario mismatch in {result_path}: {embedded!r}"
+                )
+            validate_failure_drill_result(scenario, result, require_passed=True)
+            validated.append((scenario, result))
+
+        async def action(service: OperationsService) -> dict[str, Any]:
+            rows = []
+            for scenario, result in validated:
+                row = await service.canaries.record_failure_drill(
+                    project_id=project,
+                    provider=str(plan["provider"]),
+                    scenario=scenario,
+                    result=result,
+                    model=str(plan.get("model", "") or ""),
+                )
+                rows.append(row.to_dict())
+            return {
+                "campaign_id": plan["campaign_id"],
+                "plan_digest": plan["plan_digest"],
+                "recorded": len(rows),
+                "drills": rows,
+                "automatic_failure_injection": False,
+            }
+
+        _emit(_run(project, action))
 
     @capability_app.command("readiness")
     def capability_readiness(

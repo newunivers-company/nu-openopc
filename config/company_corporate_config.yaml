@@ -14,7 +14,7 @@ employees:
   employee_id: devops_engineer-engineering-engineering-devops-automator
   metadata:
     source_path: engineering/engineering-devops-automator.md
-    source_repo: /data2/bjdwhzzh/project-hku/agency-agents
+    source_repo: agency-agents
     source_revision: local
     talent_template_category: engineering
     talent_template_name: DevOps Automator
@@ -40,7 +40,7 @@ employees:
   employee_id: content_specialist-engineering-engineering-technical-writer
   metadata:
     source_path: engineering/engineering-technical-writer.md
-    source_repo: /data2/bjdwhzzh/project-hku/agency-agents
+    source_repo: agency-agents
     source_revision: local
     talent_template_category: engineering
     talent_template_name: Technical Writer
@@ -66,7 +66,7 @@ employees:
   employee_id: designer-design-design-ui-designer
   metadata:
     source_path: design/design-ui-designer.md
-    source_repo: /data2/bjdwhzzh/project-hku/agency-agents
+    source_repo: agency-agents
     source_revision: local
     talent_template_category: design
     talent_template_name: UI Designer
@@ -91,7 +91,7 @@ employees:
   employee_id: qa_analyst-engineering-engineering-security-engineer
   metadata:
     source_path: engineering/engineering-security-engineer.md
-    source_repo: /data2/bjdwhzzh/project-hku/agency-agents
+    source_repo: agency-agents
     source_revision: local
     talent_template_category: engineering
     talent_template_name: Security Engineer
@@ -226,7 +226,7 @@ employees:
   employee_id: cmo-design-design-ui-designer
   metadata:
     source_path: design/design-ui-designer.md
-    source_repo: /data2/bjdwhzzh/project-hku/agency-agents
+    source_repo: agency-agents
     source_revision: local
     talent_template_category: design
     talent_template_name: UI Designer

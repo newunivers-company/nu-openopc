@@ -118,6 +118,7 @@ class OperationsService:
             self.repository,
             self.durable,
             provider_config=self.config.providers,
+            storage_root=_storage_root_for_store(store),
         )
         self.outbox_dispatcher: OutboxDispatcher | None = None
         self._outbox_store: OPCStore | None = None
@@ -126,6 +127,7 @@ class OperationsService:
         self.repository.rebind(store)
         self.project_id = str(getattr(store, "project_id", "") or "default")
         self.canary_scheduler.project_id = self.project_id
+        self.mission_control.rebind_storage_root(_storage_root_for_store(store))
 
     def bind_adapter_registry(self, registry: Any | None) -> None:
         self.capabilities.bind_adapter_registry(registry)
@@ -328,6 +330,18 @@ class OperationsService:
         stop_shadow = getattr(self.llm_router, "stop_background_shadow", None)
         if callable(stop_shadow):
             await asyncio.to_thread(stop_shadow)
+
+
+def _storage_root_for_store(store: Any) -> Path | None:
+    """Resolve the narrow OPC root represented by a bound store path."""
+
+    raw_path = str(getattr(store, "db_path", "") or "").strip()
+    if not raw_path or raw_path == ":memory:":
+        return None
+    path = Path(raw_path).expanduser().resolve()
+    if path.name == "tasks.db" and path.parent.parent.name == "projects":
+        return path.parent.parent.parent
+    return path.parent
 
 
 def _resource_approval_issuer_from_environment(

@@ -153,6 +153,16 @@ def resolve_sandbox_config(config: OPCConfig | None = None) -> dict[str, Any]:
         "fail_if_unavailable": bool(sandbox_cfg.fail_if_unavailable),
         "allow_direct_fallback": bool(sandbox_cfg.allow_direct_fallback),
         "allow_network": bool(sandbox_cfg.allow_network),
+        "production_ready": bool(
+            not sandbox_cfg.enabled
+            or mode == "elevated"
+            or mode == "workspace-write"
+        ),
+        "readiness_blocker": (
+            f"sandbox is enabled but configured off on {platform}"
+            if sandbox_cfg.enabled and mode == "off"
+            else ""
+        ),
     }
 
 
@@ -205,7 +215,20 @@ def wrap_command_for_context(
         "available": True,
         "fallback_used": False,
     }
-    if mode in {"", "off", "elevated"}:
+    if mode in {"", "off"}:
+        if (
+            bool(sandbox.get("enabled", False))
+            and bool(sandbox.get("fail_if_unavailable", False))
+            and not bool(sandbox.get("allow_direct_fallback", True))
+        ):
+            raise RuntimeError(
+                f"Sandbox is enabled but configured off on {platform}; "
+                "direct fallback is disabled."
+            )
+        meta["fallback_used"] = bool(sandbox.get("enabled", False))
+        meta["effective_mode"] = "off"
+        return args, meta
+    if mode == "elevated":
         return args, meta
     wrapper = requested_wrapper
     if wrapper in {"", "auto"}:
@@ -248,7 +271,8 @@ def _wrap_with_bwrap(
     context: dict[str, Any],
     meta: dict[str, Any],
 ) -> list[str]:
-    workspace = str(Path(context.get("workspace_root") or cwd).resolve())
+    workspace_path = Path(context.get("workspace_root") or cwd).resolve()
+    workspace = str(workspace_path)
     wrapped = [
         "bwrap",
         "--die-with-parent",
@@ -256,18 +280,25 @@ def _wrap_with_bwrap(
         "--ro-bind",
         "/",
         "/",
-        "--bind",
-        workspace,
-        workspace,
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--chdir",
-        cwd,
     ]
+    if not workspace_path.is_relative_to(Path("/tmp")):
+        # A private /tmp is safe only when it cannot hide the workspace, its
+        # interpreter, or source paths. Workspaces below /tmp instead inherit
+        # the host directory read-only and overlay only the workspace writable.
+        wrapped.extend(["--tmpfs", "/tmp"])
+    wrapped.extend(
+        [
+            "--bind",
+            workspace,
+            workspace,
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--chdir",
+            cwd,
+        ]
+    )
     sandbox = dict(context.get("sandbox", {}) or {})
     if not bool(sandbox.get("allow_network", True)):
         wrapped.append("--unshare-net")

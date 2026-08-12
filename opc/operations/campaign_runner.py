@@ -318,9 +318,12 @@ class CampaignSlotRunner:
                 "benchmark_campaign_id": plan.get("campaign_id", ""),
                 "benchmark_slot_id": slot_id,
                 "benchmark_case_id": slot.get("case_id", ""),
+                "benchmark_workload": slot.get("workload", ""),
                 "benchmark_mode": slot.get("mode", ""),
                 "benchmark_repetition": slot.get("repetition", 0),
                 "benchmark_suite_digest": plan.get("suite_digest", ""),
+                "benchmark_expected_slots": plan.get("slot_count", 0),
+                "benchmark_expected_pairs": plan.get("pair_count", 0),
             },
         )
         if existing is None:
@@ -609,6 +612,89 @@ def write_artifact_index(artifact_dir: Path) -> str:
         encoding="utf-8",
     )
     return digest
+
+
+def validate_artifact_index(
+    artifact_dir: Path,
+    *,
+    expected_digest: str = "",
+) -> dict[str, Any]:
+    """Verify that judgment reads the exact sealed slot artifact set."""
+
+    root = Path(artifact_dir).resolve()
+    index_path = root / ARTIFACT_INDEX_NAME
+    if not index_path.is_file():
+        raise FileNotFoundError(f"artifact index not found: {index_path}")
+    raw = json.loads(index_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping) or int(raw.get("schema_version", 0) or 0) != 1:
+        raise ValueError("artifact index must be a schema_version 1 object")
+    files = raw.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("artifact index must contain at least one artifact")
+
+    normalized: list[dict[str, Any]] = []
+    indexed_paths: set[str] = set()
+    for item in files:
+        if not isinstance(item, Mapping):
+            raise ValueError("artifact index entries must be objects")
+        relative_text = str(item.get("path", "") or "").strip()
+        relative = Path(relative_text)
+        if (
+            not relative_text
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative_text in {ARTIFACT_INDEX_NAME, RESULT_SKELETON_NAME}
+        ):
+            raise ValueError(f"artifact index contains unsafe path: {relative_text!r}")
+        normalized_path = relative.as_posix()
+        if normalized_path in indexed_paths:
+            raise ValueError(f"artifact index contains duplicate path: {normalized_path}")
+        target = (root / relative).resolve()
+        if root not in target.parents or not target.is_file():
+            raise ValueError(
+                f"indexed artifact is missing or escapes its directory: {normalized_path}"
+            )
+        data = target.read_bytes()
+        actual_digest = hashlib.sha256(data).hexdigest()
+        claimed_digest = str(item.get("sha256", "") or "").strip().lower()
+        claimed_bytes = int(item.get("bytes", -1))
+        if claimed_digest != actual_digest or claimed_bytes != len(data):
+            raise ValueError(f"indexed artifact changed after sealing: {normalized_path}")
+        indexed_paths.add(normalized_path)
+        normalized.append(
+            {
+                "path": normalized_path,
+                "sha256": actual_digest,
+                "bytes": len(data),
+            }
+        )
+
+    actual_paths = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+        and path.name not in {ARTIFACT_INDEX_NAME, RESULT_SKELETON_NAME}
+    }
+    unindexed = sorted(actual_paths - indexed_paths)
+    if unindexed:
+        raise ValueError(
+            "artifact directory contains unsealed files: " + ", ".join(unindexed[:10])
+        )
+    normalized.sort(key=lambda item: str(item["path"]))
+    digest = _canonical_digest({"schema_version": 1, "files": normalized})
+    claimed = str(raw.get("artifact_digest", "") or "").strip().lower()
+    if claimed != digest:
+        raise ValueError("artifact index digest does not match its sealed entries")
+    expected = str(expected_digest or "").strip().lower()
+    if expected and expected != digest:
+        raise ValueError("artifact digest does not match the expected judgment identity")
+    return {
+        "schema_version": 1,
+        "artifact_digest": digest,
+        "file_count": len(normalized),
+        "total_bytes": sum(int(item["bytes"]) for item in normalized),
+        "files": normalized,
+    }
 
 
 def write_result_skeleton(

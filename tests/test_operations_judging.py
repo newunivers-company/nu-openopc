@@ -69,11 +69,16 @@ class ParseDraftTests(unittest.TestCase):
             "\nDone."
         )
         draft = parse_draft_response(
-            self.rubric, run_id="run-1", judge_model="m-1", response_text=response
+            self.rubric,
+            run_id="run-1",
+            judge_model="m-1",
+            response_text=response,
+            artifact_digest="a" * 64,
         )
         self.assertEqual(draft.authority, DRAFT_AUTHORITY)
         self.assertEqual(draft.criterion_scores["correctness"], 0.92)
         self.assertEqual(draft.rubric_digest, self.rubric.digest)
+        self.assertEqual(draft.artifact_digest, "a" * 64)
 
     def test_missing_criterion_fails_closed(self) -> None:
         with self.assertRaises(ValueError):
@@ -107,6 +112,7 @@ class ConfirmDraftTests(unittest.TestCase):
                 '{"criterion_scores": {"correctness": 0.92, "evidence": 0.88},'
                 ' "criterion_notes": {"correctness": "ok", "evidence": "ok"}}'
             ),
+            artifact_digest="a" * 64,
         ).to_dict()
 
     def test_draft_authority_is_never_trusted_by_benchmark_gates(self) -> None:
@@ -118,6 +124,7 @@ class ConfirmDraftTests(unittest.TestCase):
             operator_id="ops-kim",
             adjusted_scores={"evidence": 0.8},
             evidence={"correctness": ["output.md"]},
+            artifact_digest="a" * 64,
         )
         self.assertEqual(result["criterion_scores"]["evidence"], 0.8)
         self.assertEqual(result["criterion_scores"]["correctness"], 0.92)
@@ -127,26 +134,56 @@ class ConfirmDraftTests(unittest.TestCase):
         self.assertEqual(metadata["llm_draft"]["judge_model"], "m-1")
         self.assertEqual(metadata["llm_draft"]["draft_scores"]["evidence"], 0.88)
         self.assertEqual(metadata["llm_draft"]["adjusted"], ["evidence"])
+        self.assertEqual(metadata["benchmark_artifact_digest"], "a" * 64)
+
+    def test_confirmation_rejects_a_different_or_missing_artifact_digest(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires the sealed artifact"):
+            confirm_draft(self.draft, operator_id="ops")
+        with self.assertRaisesRegex(ValueError, "differs from the reviewed draft"):
+            confirm_draft(
+                self.draft,
+                operator_id="ops",
+                artifact_digest="b" * 64,
+            )
 
     def test_confirming_a_non_draft_is_rejected(self) -> None:
         confirmed = {**self.draft, "authority": "human_confirmed"}
         with self.assertRaises(ValueError):
-            confirm_draft(confirmed, operator_id="ops-kim")
+            confirm_draft(
+                confirmed,
+                operator_id="ops-kim",
+                artifact_digest="a" * 64,
+            )
 
     def test_confirmation_requires_operator_and_valid_authority(self) -> None:
         with self.assertRaises(ValueError):
-            confirm_draft(self.draft, operator_id="  ")
+            confirm_draft(
+                self.draft,
+                operator_id="  ",
+                artifact_digest="a" * 64,
+            )
         with self.assertRaises(ValueError):
-            confirm_draft(self.draft, operator_id="ops", authority="simulation")
+            confirm_draft(
+                self.draft,
+                operator_id="ops",
+                authority="simulation",
+                artifact_digest="a" * 64,
+            )
 
     def test_adjustments_cannot_invent_criteria_or_exceed_range(self) -> None:
         with self.assertRaises(ValueError):
             confirm_draft(
-                self.draft, operator_id="ops", adjusted_scores={"style": 0.9}
+                self.draft,
+                operator_id="ops",
+                adjusted_scores={"style": 0.9},
+                artifact_digest="a" * 64,
             )
         with self.assertRaises(ValueError):
             confirm_draft(
-                self.draft, operator_id="ops", adjusted_scores={"evidence": 1.5}
+                self.draft,
+                operator_id="ops",
+                adjusted_scores={"evidence": 1.5},
+                artifact_digest="a" * 64,
             )
 
 

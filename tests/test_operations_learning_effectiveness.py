@@ -5,6 +5,7 @@ from opc.operations.learning_effectiveness import (
     build_learning_effectiveness_report,
 )
 from opc.operations.models import (
+    CriterionResult,
     GateStatus,
     RunManifest,
     RunMetrics,
@@ -53,6 +54,15 @@ def _scorecard(
             duration_seconds=100,
             cost_usd=1,
         ),
+        criterion_results=[
+            CriterionResult(
+                criterion_id="quality",
+                score=quality,
+                passed=quality >= 0.75,
+                evidence=["deliverable.md"],
+            )
+        ],
+        metadata={"judgment_authority": "independent_judge"},
     )
 
 
@@ -62,24 +72,25 @@ def test_effectiveness_report_measures_quality_and_operating_lift() -> None:
     for index in range(3):
         control_id = f"control-{index}"
         treated_id = f"treated-{index}"
+        cohort = f"pair-{index}"
         manifests.extend(
             [
-                _simple_manifest(control_id, "same-goal", treated=False),
-                _simple_manifest(treated_id, "same-goal", treated=True),
+                _simple_manifest(control_id, cohort, treated=False),
+                _simple_manifest(treated_id, cohort, treated=True),
             ]
         )
         scorecards.extend(
             [
                 _scorecard(
                     control_id,
-                    "same-goal",
+                    cohort,
                     0.8,
                     interventions=2,
                     rework=2,
                 ),
                 _scorecard(
                     treated_id,
-                    "same-goal",
+                    cohort,
                     0.9,
                     interventions=1,
                     rework=0,
@@ -118,7 +129,10 @@ def test_effectiveness_report_fails_closed_without_matched_controls() -> None:
     assert report["status"] == "insufficient_evidence"
     assert report["promotion_evidence_eligible"] is False
     assert report["control"]["samples"] == 0
-    assert report["blockers"] == ["control samples 0 < 1"]
+    assert report["blockers"] == [
+        "trusted matched pairs 0 < 1",
+        "1 cohort(s) lack exactly one treated and one control arm",
+    ]
 
 
 def test_effectiveness_report_rejects_regression() -> None:
@@ -169,3 +183,68 @@ def test_effectiveness_report_counts_missing_evidence_violations() -> None:
     assert report["control"]["mean_missing_required_evidence"] == 2.0
     assert report["treated"]["mean_missing_required_evidence"] == 0.0
     assert report["delta"]["mean_missing_required_evidence"] == -2.0
+
+
+def test_effectiveness_report_rejects_untrusted_and_duplicate_arms() -> None:
+    manifests = [
+        _simple_manifest("control-a", "pair-a", treated=False),
+        _simple_manifest("control-b", "pair-a", treated=False),
+        _simple_manifest("treated", "pair-a", treated=True),
+    ]
+    untrusted = _scorecard(
+        "treated",
+        "pair-a",
+        0.9,
+        interventions=0,
+        rework=0,
+    )
+    untrusted.metadata = {"judgment_authority": "llm_draft"}
+    report = build_learning_effectiveness_report(
+        ASSET_ID,
+        manifests=manifests,
+        scorecards=[
+            _scorecard("control-a", "pair-a", 0.8, interventions=0, rework=0),
+            _scorecard("control-b", "pair-a", 0.8, interventions=0, rework=0),
+            untrusted,
+        ],
+        policy=LearningEffectivenessPolicy(minimum_samples_per_arm=1),
+    )
+
+    assert report["promotion_evidence_eligible"] is False
+    assert report["excluded"]["untrusted_judgment"] == 1
+    assert report["cohort"]["duplicate_arm_cohorts"] == ["pair-a"]
+
+
+def test_effectiveness_report_rejects_operating_cost_regression() -> None:
+    manifests = [
+        _simple_manifest("control", "pair-a", treated=False),
+        _simple_manifest("treated", "pair-a", treated=True),
+    ]
+    control = _scorecard(
+        "control",
+        "pair-a",
+        0.9,
+        interventions=0,
+        rework=0,
+    )
+    treated = _scorecard(
+        "treated",
+        "pair-a",
+        0.95,
+        interventions=0,
+        rework=1,
+    )
+    treated.metrics.duration_seconds = 400
+    treated.metrics.cost_usd = 10
+
+    report = build_learning_effectiveness_report(
+        ASSET_ID,
+        manifests=manifests,
+        scorecards=[control, treated],
+        policy=LearningEffectivenessPolicy(minimum_samples_per_arm=1),
+    )
+
+    assert report["status"] == "regressed"
+    assert report["promotion_evidence_eligible"] is False
+    assert report["delta"]["duration_ratio"] == 4.0
+    assert report["delta"]["cost_ratio"] == 10.0

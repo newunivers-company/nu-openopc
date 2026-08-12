@@ -388,6 +388,78 @@ class OperationsCliTests(unittest.TestCase):
             ["credential_expiry"],
         )
 
+    def test_readiness_campaign_scaffold_run_and_verified_drill_pack(self) -> None:
+        request = self._write_json(
+            "campaign-request.json",
+            {
+                "capability_kind": "llm",
+                "task_type": "dialogue",
+                "project_id": "demo",
+                "allow_live": True,
+            },
+        )
+        campaign_dir = self.root / "provider-campaign"
+        scaffold = self._invoke([
+            "ops", "capability", "campaign-scaffold",
+            "--campaign-id", "openopc-readiness",
+            "--provider", "openopc_config",
+            "--request", str(request),
+            "--output-dir", str(campaign_dir),
+            "--project", "demo",
+        ])
+        scaffold_payload = json.loads(scaffold.output)
+        self.assertFalse(scaffold_payload["generation_allowed"])
+        self.assertFalse(scaffold_payload["automatic_failure_injection"])
+        plan = json.loads((campaign_dir / "plan.json").read_text(encoding="utf-8"))
+        saved_request = json.loads((campaign_dir / "request.json").read_text(encoding="utf-8"))
+        self.assertFalse(saved_request["allow_live"])
+        self.assertEqual(saved_request["preferred_providers"], ["openopc_config"])
+        self.assertEqual(len(plan["failure_drills"]), 4)
+
+        run = self._invoke([
+            "ops", "capability", "campaign-run",
+            "--plan", str(campaign_dir / "plan.json"),
+            "--request", str(campaign_dir / "request.json"),
+            "--iterations", "1",
+            "--project", "demo",
+        ])
+        run_payload = json.loads(run.output)
+        self.assertEqual(run_payload["campaign"]["samples"], 1)
+        self.assertEqual(run_payload["campaign"]["campaign_id"], "openopc-readiness")
+        self.assertFalse(run_payload["readiness"]["providers"]["openopc_config"]["production_ready"])
+
+        rejected = self.runner.invoke(app, [
+            "ops", "capability", "campaign-record-drills",
+            "--plan", str(campaign_dir / "plan.json"),
+            "--results-dir", str(campaign_dir),
+            "--project", "demo",
+        ])
+        self.assertNotEqual(rejected.exit_code, 0)
+
+        for item in plan["failure_drills"]:
+            path = campaign_dir / f"drill-{item['scenario']}.json"
+            result = json.loads(path.read_text(encoding="utf-8"))
+            result.update({
+                "actual_injection": True,
+                "expected_failure_observed": True,
+                "fallback_verified": True,
+                "alert_verified": True,
+                "recovery_verified": True,
+                "authority": "independent_observer",
+                "evidence": [f"artifact://drill/{item['scenario']}"],
+            })
+            path.write_text(json.dumps(result), encoding="utf-8")
+
+        recorded = self._invoke([
+            "ops", "capability", "campaign-record-drills",
+            "--plan", str(campaign_dir / "plan.json"),
+            "--results-dir", str(campaign_dir),
+            "--project", "demo",
+        ])
+        recorded_payload = json.loads(recorded.output)
+        self.assertEqual(recorded_payload["recorded"], 4)
+        self.assertFalse(recorded_payload["automatic_failure_injection"])
+
     def test_release_playbook_plan_seals_existing_candidate_without_promotion(self) -> None:
         candidate = self._write_json(
             "release-playbook.json",

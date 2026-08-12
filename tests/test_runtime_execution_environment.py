@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock, patch
 from opc.core.config import OPCConfig
 from opc.core.models import Task
 from opc.layer3_agent.runtime_v2.worktree import _prepare_execution_environment
-from opc.layer4_tools.execution_context import ensure_task_execution_context, venv_python_path
+from opc.layer4_tools.execution_context import (
+    ensure_task_execution_context,
+    resolve_sandbox_config,
+    venv_python_path,
+    wrap_command_for_context,
+)
 from opc.layer4_tools.python_exec import python_exec
 from opc.layer4_tools.shell import shell_exec
 
@@ -104,6 +109,91 @@ class ExecutionEnvironmentContextTests(unittest.TestCase):
         self.assertEqual(context["comms_root"], str(Path("/tmp/demo-workspace/.opc-comms").resolve()))
         self.assertIn("sandbox", context)
         self.assertEqual(task.metadata["_execution_context"]["workspace_root"], context["workspace_root"])
+
+    def test_enabled_but_off_platform_sandbox_is_explicitly_not_ready(self) -> None:
+        config = OPCConfig()
+        sandbox = config.system.native_runtime.execution_environment.sandbox
+        sandbox.enabled = True
+        sandbox.windows.mode = "off"
+        sandbox.windows.wrapper = "none"
+        sandbox.fail_if_unavailable = True
+        sandbox.allow_direct_fallback = False
+
+        with patch(
+            "opc.layer4_tools.execution_context.platform_key",
+            return_value="windows",
+        ):
+            resolved = resolve_sandbox_config(config)
+
+        self.assertFalse(resolved["production_ready"])
+        self.assertIn("configured off", resolved["readiness_blocker"])
+        with self.assertRaisesRegex(RuntimeError, "configured off on windows"):
+            wrap_command_for_context(
+                ["python", "-V"],
+                cwd=".",
+                context={"sandbox": resolved},
+            )
+
+    def test_explicit_direct_fallback_records_unisolated_execution(self) -> None:
+        command, metadata = wrap_command_for_context(
+            ["python", "-V"],
+            cwd=".",
+            context={
+                "sandbox": {
+                    "platform": "windows",
+                    "enabled": True,
+                    "mode": "off",
+                    "wrapper": "none",
+                    "fail_if_unavailable": False,
+                    "allow_direct_fallback": True,
+                }
+            },
+        )
+
+        self.assertEqual(command, ["python", "-V"])
+        self.assertTrue(metadata["fallback_used"])
+        self.assertEqual(metadata["effective_mode"], "off")
+
+    def test_bwrap_preserves_tools_for_workspace_below_tmp(self) -> None:
+        workspace = str(Path("/tmp/demo-workspace").resolve())
+
+        command, metadata = wrap_command_for_context(
+            ["python", "-V"],
+            cwd=workspace,
+            context={
+                "workspace_root": workspace,
+                "sandbox": {
+                    "platform": "linux",
+                    "enabled": True,
+                    "mode": "workspace-write",
+                    "wrapper": "bwrap",
+                },
+            },
+        )
+
+        self.assertNotIn("--tmpfs", command)
+        bind_index = command.index("--bind")
+        self.assertEqual(command[bind_index + 1 : bind_index + 3], [workspace, workspace])
+        self.assertEqual(metadata["effective_wrapper"], "bwrap")
+
+    def test_bwrap_uses_private_tmp_for_workspace_outside_tmp(self) -> None:
+        workspace = str(Path("/workspace/demo").resolve())
+
+        command, _ = wrap_command_for_context(
+            ["python", "-V"],
+            cwd=workspace,
+            context={
+                "workspace_root": workspace,
+                "sandbox": {
+                    "platform": "linux",
+                    "enabled": True,
+                    "mode": "workspace-write",
+                    "wrapper": "bwrap",
+                },
+            },
+        )
+
+        self.assertLess(command.index("--tmpfs"), command.index("--bind"))
 
 
 class WorktreeEnvironmentTests(unittest.IsolatedAsyncioTestCase):

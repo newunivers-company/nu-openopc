@@ -21,6 +21,11 @@ class LearningEffectivenessPolicy:
     minimum_samples_per_arm: int = 3
     maximum_quality_regression: float = 0.02
     minimum_quality_improvement: float = 0.0
+    maximum_rework_regression: float = 0.0
+    maximum_missing_evidence_regression: float = 0.0
+    maximum_duration_ratio: float = 3.0
+    maximum_cost_ratio: float = 8.0
+    require_trusted_judgment: bool = True
 
     def validate(self) -> None:
         if self.minimum_samples_per_arm < 1:
@@ -29,6 +34,16 @@ class LearningEffectivenessPolicy:
             raise ValueError("maximum_quality_regression must be between 0 and 1")
         if not 0 <= self.minimum_quality_improvement <= 1:
             raise ValueError("minimum_quality_improvement must be between 0 and 1")
+        if self.maximum_rework_regression < 0:
+            raise ValueError("maximum_rework_regression must be non-negative")
+        if self.maximum_missing_evidence_regression < 0:
+            raise ValueError(
+                "maximum_missing_evidence_regression must be non-negative"
+            )
+        if self.maximum_duration_ratio < 1:
+            raise ValueError("maximum_duration_ratio must be at least 1")
+        if self.maximum_cost_ratio < 1:
+            raise ValueError("maximum_cost_ratio must be at least 1")
 
 
 class LearningEffectivenessService:
@@ -127,6 +142,7 @@ def build_learning_effectiveness_report(
     excluded: dict[str, int] = {
         "missing_manifest": 0,
         "missing_cohort": 0,
+        "untrusted_judgment": 0,
     }
     for scorecard in scorecards:
         manifest = manifests_by_run.get(scorecard.run_id)
@@ -141,6 +157,12 @@ def build_learning_effectiveness_report(
         if not cohort:
             excluded["missing_cohort"] += 1
             continue
+        if (
+            effective_policy.require_trusted_judgment
+            and not _scorecard_has_trusted_judgment(scorecard)
+        ):
+            excluded["untrusted_judgment"] += 1
+            continue
         rows.append(
             {
                 "cohort": cohort,
@@ -149,12 +171,24 @@ def build_learning_effectiveness_report(
             }
         )
 
-    treated_cohorts = {
-        str(row["cohort"])
-        for row in rows
-        if bool(row["treated"])
-    }
-    comparable = [row for row in rows if row["cohort"] in treated_cohorts]
+    rows_by_cohort: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_cohort.setdefault(str(row["cohort"]), []).append(row)
+    comparable_cohorts: list[str] = []
+    incomplete_cohorts: list[str] = []
+    duplicate_arm_cohorts: list[str] = []
+    comparable: list[dict[str, Any]] = []
+    for cohort, cohort_rows in sorted(rows_by_cohort.items()):
+        treated_rows = [item for item in cohort_rows if bool(item["treated"])]
+        control_rows = [item for item in cohort_rows if not bool(item["treated"])]
+        if len(treated_rows) > 1 or len(control_rows) > 1:
+            duplicate_arm_cohorts.append(cohort)
+            continue
+        if len(treated_rows) != 1 or len(control_rows) != 1:
+            incomplete_cohorts.append(cohort)
+            continue
+        comparable_cohorts.append(cohort)
+        comparable.extend([control_rows[0], treated_rows[0]])
     treated = [
         row["scorecard"]
         for row in comparable
@@ -167,10 +201,8 @@ def build_learning_effectiveness_report(
     ]
     treated_summary = _summarize(treated)
     control_summary = _summarize(control)
-    enough_samples = (
-        len(treated) >= effective_policy.minimum_samples_per_arm
-        and len(control) >= effective_policy.minimum_samples_per_arm
-    )
+    matched_pairs = len(comparable_cohorts)
+    enough_samples = matched_pairs >= effective_policy.minimum_samples_per_arm
     quality_delta = _delta(treated_summary, control_summary, "quality_score")
     total_delta = _delta(treated_summary, control_summary, "total_score")
     success_delta = _delta(treated_summary, control_summary, "success_rate")
@@ -184,11 +216,43 @@ def build_learning_effectiveness_report(
         control_summary,
         "mean_rework_cycles",
     )
+    missing_evidence_delta = _delta(
+        treated_summary,
+        control_summary,
+        "mean_missing_required_evidence",
+    )
+    duration_ratio = _ratio(
+        treated_summary,
+        control_summary,
+        "mean_duration_seconds",
+    )
+    cost_ratio = _ratio(
+        treated_summary,
+        control_summary,
+        "mean_cost_usd",
+    )
+    operating_regressed = bool(
+        enough_samples
+        and (
+            rework_delta > effective_policy.maximum_rework_regression
+            or missing_evidence_delta
+            > effective_policy.maximum_missing_evidence_regression
+            or (
+                duration_ratio is not None
+                and duration_ratio > effective_policy.maximum_duration_ratio
+            )
+            or (
+                cost_ratio is not None
+                and cost_ratio > effective_policy.maximum_cost_ratio
+            )
+        )
+    )
     regressed = bool(
         enough_samples
         and (
             quality_delta < -effective_policy.maximum_quality_regression
             or success_delta < -effective_policy.maximum_quality_regression
+            or operating_regressed
         )
     )
     if not enough_samples:
@@ -201,19 +265,23 @@ def build_learning_effectiveness_report(
         status = "non_regressed"
 
     blockers: list[str] = []
-    if len(treated) < effective_policy.minimum_samples_per_arm:
+    if matched_pairs < effective_policy.minimum_samples_per_arm:
         blockers.append(
-            f"treated samples {len(treated)} < "
+            f"trusted matched pairs {matched_pairs} < "
             f"{effective_policy.minimum_samples_per_arm}"
         )
-    if len(control) < effective_policy.minimum_samples_per_arm:
+    if incomplete_cohorts:
         blockers.append(
-            f"control samples {len(control)} < "
-            f"{effective_policy.minimum_samples_per_arm}"
+            f"{len(incomplete_cohorts)} cohort(s) lack exactly one treated and one control arm"
+        )
+    if duplicate_arm_cohorts:
+        blockers.append(
+            f"{len(duplicate_arm_cohorts)} cohort(s) contain duplicate experiment arms"
         )
     if regressed:
         blockers.append(
-            "quality or success regression exceeds the configured ceiling"
+            "quality, success, evidence, rework, duration, or cost regression "
+            "exceeds the configured ceiling"
         )
 
     return {
@@ -235,10 +303,24 @@ def build_learning_effectiveness_report(
             "minimum_quality_improvement": (
                 effective_policy.minimum_quality_improvement
             ),
+            "maximum_rework_regression": (
+                effective_policy.maximum_rework_regression
+            ),
+            "maximum_missing_evidence_regression": (
+                effective_policy.maximum_missing_evidence_regression
+            ),
+            "maximum_duration_ratio": effective_policy.maximum_duration_ratio,
+            "maximum_cost_ratio": effective_policy.maximum_cost_ratio,
+            "require_trusted_judgment": (
+                effective_policy.require_trusted_judgment
+            ),
         },
         "cohort": {
             "metadata_key": str(cohort_key or ""),
-            "comparable_cohorts": sorted(treated_cohorts),
+            "comparable_cohorts": comparable_cohorts,
+            "matched_pairs": matched_pairs,
+            "incomplete_cohorts": incomplete_cohorts,
+            "duplicate_arm_cohorts": duplicate_arm_cohorts,
         },
         "treated": treated_summary,
         "control": control_summary,
@@ -248,11 +330,7 @@ def build_learning_effectiveness_report(
             "success_rate": success_delta,
             "mean_interventions": intervention_delta,
             "mean_rework_cycles": rework_delta,
-            "mean_missing_required_evidence": _delta(
-                treated_summary,
-                control_summary,
-                "mean_missing_required_evidence",
-            ),
+            "mean_missing_required_evidence": missing_evidence_delta,
             "mean_duration_seconds": _delta(
                 treated_summary,
                 control_summary,
@@ -263,6 +341,8 @@ def build_learning_effectiveness_report(
                 control_summary,
                 "mean_cost_usd",
             ),
+            "duration_ratio": duration_ratio,
+            "cost_ratio": cost_ratio,
         },
         "blockers": blockers,
         "excluded": excluded,
@@ -271,6 +351,29 @@ def build_learning_effectiveness_report(
             "control_run_ids": sorted(item.run_id for item in control),
         },
     }
+
+
+def _scorecard_has_trusted_judgment(scorecard: RunScorecard) -> bool:
+    authority = str(
+        scorecard.metadata.get("judgment_authority", "") or ""
+    ).strip()
+    return bool(
+        authority in {"human_confirmed", "independent_judge"}
+        and scorecard.criterion_results
+        and all(item.evidence for item in scorecard.criterion_results)
+    )
+
+
+def _ratio(
+    treated: Mapping[str, Any],
+    control: Mapping[str, Any],
+    key: str,
+) -> float | None:
+    baseline = float(control.get(key, 0.0) or 0.0)
+    candidate = float(treated.get(key, 0.0) or 0.0)
+    if baseline <= 0:
+        return 1.0 if candidate <= 0 else None
+    return round(candidate / baseline, 6)
 
 
 def _activated_asset_ids(manifest: RunManifest) -> set[str]:

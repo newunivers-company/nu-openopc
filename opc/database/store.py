@@ -72,6 +72,10 @@ from opc.core.transcript_visibility import (
     normalize_transcript_detail_level,
     transcript_visibility_sql,
 )
+from opc.database.schema_migrations import (
+    complete_component_migration,
+    prepare_component_migration,
+)
 from opc.layer2_organization.phase import (
     DONE_PHASES,
     IN_PROGRESS_PHASES,
@@ -99,6 +103,9 @@ from opc.layer2_organization.work_item_runtime import (
 from opc.layer2_organization.work_item_runtime_invariants import (
     validate_work_item_runtime_projection,
 )
+
+
+CORE_SCHEMA_VERSION = 1
 
 _SQLITE_LOCK_RETRY_ATTEMPTS = 2
 _SQLITE_LOCK_RETRY_BASE_DELAY_SECONDS = 0.25
@@ -355,6 +362,11 @@ class OPCStore:
             return
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
+        core_migration = await prepare_component_migration(
+            self._db,
+            component="openopc_core",
+            target_version=CORE_SCHEMA_VERSION,
+        )
         await self._create_tables()
         await self._ensure_schema()
         await self._sweep_stale_claims()
@@ -372,6 +384,7 @@ class OPCStore:
         await self._purge_cross_project_runtime_rows()
         await self._validate_work_item_runtime_links()
         await self._ensure_indexes()
+        await complete_component_migration(self._db, core_migration)
 
     async def _table_columns(self, table: str) -> list[str]:
         assert self._db is not None

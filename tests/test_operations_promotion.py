@@ -28,6 +28,12 @@ def _reports(*, passed: bool):
                 "codex": {
                     "production_ready": passed,
                     "readiness_state": "ready" if passed else "pending_evidence",
+                    "samples": 6 if passed else 0,
+                    "sample_target": 3,
+                    "observation_target_met": passed,
+                    "freshness_target_met": passed,
+                    "failure_drill_target_met": passed,
+                    "trend": {"ready": passed},
                     "blockers": [] if passed else ["latest sample is stale"],
                 }
             }
@@ -55,3 +61,26 @@ def test_promotion_dossier_preserves_source_blockers() -> None:
     assert "outcomes:missing outcome pairs" in report["blockers"]
     assert "shadow:missing shadow judgments" in report["blockers"]
     assert "canary:codex:latest sample is stale" in report["blockers"]
+
+
+def test_promotion_dossier_rejects_green_flags_without_evidence() -> None:
+    reports = _reports(passed=True)
+    reports["outcome_report"]["trusted_pair_count"] = 0
+    reports["shadow_report"]["trusted_observation_count"] = 0
+    provider = reports["canary_report"]["providers"]["codex"]
+    provider.update(
+        {
+            "samples": 0,
+            "observation_target_met": False,
+            "freshness_target_met": False,
+            "failure_drill_target_met": False,
+            "trend": {"ready": False},
+        }
+    )
+
+    report = build_promotion_dossier(**reports)
+
+    assert report["promotion_ready"] is False
+    assert "outcomes:no trusted outcome pair evidence" in report["blockers"]
+    assert "shadow:no trusted shadow observation evidence" in report["blockers"]
+    assert any(item.startswith("canary:codex:") for item in report["blockers"])

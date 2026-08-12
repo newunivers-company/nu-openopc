@@ -36,20 +36,13 @@ class OutboxDispatchReport:
 
 
 @dataclass(frozen=True)
-class IndependentOutboxReport:
-    claimed: int = 0
-    delivered: int = 0
+class IndependentOutboxReport(OutboxDispatchReport):
     deduplicated: int = 0
-    failed: int = 0
-    dead_lettered: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
-            "claimed": self.claimed,
-            "delivered": self.delivered,
+            **super().to_dict(),
             "deduplicated": self.deduplicated,
-            "failed": self.failed,
-            "dead_lettered": self.dead_lettered,
         }
 
 

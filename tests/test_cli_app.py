@@ -27,6 +27,7 @@ from opc.cli.app import (
     _OPCSlashCompleter,
     _chat_bottom_toolbar_text,
     _company_staffing_default_draft,
+    _disable_unavailable_default_external_agents,
     _company_staffing_filter_options,
     _company_staffing_resume_metadata,
     _render_company_staffing_context_preview,
@@ -44,6 +45,7 @@ from opc.cli.app import (
     _format_escalation_option,
     _normalize_escalation_reply,
     _progress_callback,
+    _parse_org_members,
     _project_config_template_dir,
 )
 from opc.core.config import EmployeeConfig, OPCConfig, RoleConfig, SeatConfig, TeamConfig
@@ -173,6 +175,32 @@ class CliInitProjectTests(unittest.TestCase):
             )
             path.chmod(0o755)
 
+    def test_skipped_preflight_disables_only_unavailable_fresh_defaults(self) -> None:
+        class Adapter:
+            def __init__(self, *, config):
+                self.config = config
+
+            def resolve_binary(self):
+                return "/fake/ready" if self.config.command == "ready" else None
+
+        config = OPCConfig()
+        for item in config.agents.agents.values():
+            item.enabled = False
+        config.agents.agents["codex"].enabled = True
+        config.agents.agents["codex"].command = "ready"
+        config.agents.agents["cursor"].enabled = True
+        config.agents.agents["cursor"].command = "missing"
+
+        with patch(
+            "opc.layer3_agent.adapters.registry.ADAPTER_CLASSES",
+            {"codex": Adapter, "cursor": Adapter},
+        ):
+            disabled = _disable_unavailable_default_external_agents(config)
+
+        self.assertEqual(disabled, ["cursor"])
+        self.assertTrue(config.agents.agents["codex"].enabled)
+        self.assertFalse(config.agents.agents["cursor"].enabled)
+
     def test_external_agent_preflight_accepts_fake_agent_binaries(self) -> None:
         runner = CliRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -238,6 +266,9 @@ class CliInitProjectTests(unittest.TestCase):
             with patch("opc.core.config.get_opc_home", return_value=opc_home), patch(
                 "opc.cli.app.importlib_resources.files",
                 return_value=package_root,
+            ), patch(
+                "opc.cli.app._source_checkout_config_dir",
+                return_value=root / "missing-checkout-config",
             ):
                 self.assertEqual(Path(_project_config_template_dir()), template)
 
@@ -264,6 +295,9 @@ class CliInitProjectTests(unittest.TestCase):
             ), patch(
                 "opc.cli.app.importlib_resources.files",
                 return_value=package_root,
+            ), patch(
+                "opc.cli.app._source_checkout_config_dir",
+                return_value=root / "missing-checkout-config",
             ):
                 result = runner.invoke(app, ["init", "--no-external-agent-preflight", "--no-trust-external-agents"])
 
@@ -316,7 +350,7 @@ class CliInitProjectTests(unittest.TestCase):
             opc_home = root / ".opc"
             config_dir = opc_home / "config"
             workplace_root = root / "OpenOPC_workplace"
-            config_dir.mkdir(parents=True)
+            OPCConfig().save(config_dir)
             config_file = config_dir / "llm_config.yaml"
             config_file.write_text("llm:\n  api_key: keep-me\n", encoding="utf-8")
 
@@ -339,7 +373,7 @@ class CliInitProjectTests(unittest.TestCase):
             opc_home = root / ".opc"
             config_dir = opc_home / "config"
             workplace_root = root / "OpenOPC_workplace"
-            config_dir.mkdir(parents=True)
+            OPCConfig().save(config_dir)
             config_file = config_dir / "llm_config.yaml"
             config_file.write_text("llm:\n  api_key: keep-me\n", encoding="utf-8")
 
@@ -396,12 +430,15 @@ class CliInitProjectTests(unittest.TestCase):
             ), patch(
                 "opc.cli.app.importlib_resources.files",
                 return_value=package_root,
+            ), patch(
+                "opc.cli.app._source_checkout_config_dir",
+                return_value=root / "missing-checkout-config",
             ):
                 result = runner.invoke(
                     app,
                     [
                         "init",
-                        "--yes",
+                        "--repair",
                         "--no-external-agent-preflight",
                         "--no-trust-external-agents",
                     ],
@@ -419,6 +456,57 @@ class CliInitProjectTests(unittest.TestCase):
             self.assertTrue((config_dir / "system_config.yaml").is_file())
             self.assertTrue((config_dir / "agent_config.yaml").is_file())
             self.assertTrue((config_dir / "channel_config.yaml").is_file())
+
+    def test_partial_init_requires_explicit_repair(self) -> None:
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            opc_home = Path(tmpdir) / ".opc"
+            config_dir = opc_home / "config"
+            config_dir.mkdir(parents=True)
+            (config_dir / "company_orgs").mkdir()
+            (config_dir / "company_orgs" / "org_corporate_config.yaml").write_text("company: {}\n", encoding="utf-8")
+
+            with patch("opc.core.config.get_opc_home", return_value=opc_home):
+                rejected = runner.invoke(app, [
+                    "init", "--yes", "--no-external-agent-preflight", "--no-trust-external-agents",
+                ])
+                repaired = runner.invoke(app, [
+                    "init", "--repair", "--no-external-agent-preflight", "--no-trust-external-agents",
+                ])
+
+            self.assertEqual(rejected.exit_code, 1)
+            self.assertIn("Partial OPC initialization", rejected.output)
+            self.assertIn("opc init --repair", rejected.output)
+            self.assertEqual(repaired.exit_code, 0, repaired.output)
+            for name in ("system_config.yaml", "llm_config.yaml", "agent_config.yaml", "channel_config.yaml"):
+                self.assertTrue((config_dir / name).is_file(), name)
+
+    def test_ui_created_org_artifact_remains_repairable(self) -> None:
+        from opc.core.initialization import inspect_initialization
+
+        runner = CliRunner()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            opc_home = Path(tmpdir) / ".opc"
+            (opc_home / "config").mkdir(parents=True)
+            with patch("opc.core.config.get_opc_home", return_value=opc_home), patch(
+                "opc.plugins.office_ui._ensure_aiohttp",
+            ), patch(
+                "opc.plugins.office_ui._ensure_frontend",
+            ), patch(
+                "opc.plugins.office_ui.server.run_server",
+            ):
+                ui_result = runner.invoke(app, ["ui"])
+                before = inspect_initialization(opc_home)
+                repair_result = runner.invoke(app, [
+                    "init", "--repair", "--no-external-agent-preflight", "--no-trust-external-agents",
+                ])
+                after = inspect_initialization(opc_home)
+
+            self.assertEqual(ui_result.exit_code, 0, ui_result.output)
+            self.assertIn("configuration is uninitialized", ui_result.output)
+            self.assertEqual(before.state, "partial")
+            self.assertEqual(repair_result.exit_code, 0, repair_result.output)
+            self.assertTrue(after.ready)
 
 
 class CliExternalProgressDisplayTests(unittest.TestCase):
@@ -2856,6 +2944,9 @@ class CliSlashCommandTests(unittest.TestCase):
     def test_market_slash_presets_and_apply_vc_preset(self) -> None:
         console = Console(record=True, force_terminal=False, width=180)
         state, _engine = self._make_state(store=self._Store())
+        state.mode = "org"
+        state.company_profile = "custom"
+        state.config.org.organization_id = "demo_org"
 
         with patch("opc.cli.app.console", console), patch.object(OPCConfig, "save", autospec=True) as save:
             async def _run() -> None:
@@ -2866,8 +2957,8 @@ class CliSlashCommandTests(unittest.TestCase):
 
         rendered = console.export_text()
         self.assertIn("VC Investment Firm", rendered)
-        self.assertIn("Applied preset vc-investment-firm", rendered)
-        self.assertEqual(state.mode, "company")
+        self.assertIn("market_preset_applied", rendered)
+        self.assertEqual(state.mode, "org")
         self.assertEqual(state.company_profile, "custom")
         role_by_id = {role.id: role for role in state.config.org.roles}
         self.assertIn("managing_partner", role_by_id)
@@ -3220,6 +3311,73 @@ class CliChannelCommandTests(unittest.TestCase):
         self.assertIn("Runtime:", result.stdout)
         self.assertIn("running", result.stdout)
         self.assertIn("slack: enabled, available, configured, socket, runtime-active", result.stdout)
+
+
+class CliSavedOrgBootstrapTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runner = CliRunner()
+
+    def test_parse_org_members_accepts_compact_json_and_file_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            members_file = Path(tmpdir) / "members.yaml"
+            members_file.write_text(
+                "members:\n  - name: Lead\n  - name: Reviewer\n    reports_to_index: 0\n",
+                encoding="utf-8",
+            )
+            from_file = _parse_org_members(file_path=str(members_file))
+            inline = _parse_org_members(member_specs=[
+                "Lead|Sets direction",
+                '{"name":"Reviewer","responsibility":"Checks work","reports_to_index":0}',
+            ])
+
+        self.assertEqual(from_file[1]["reports_to_index"], 0)
+        self.assertEqual(inline[0]["responsibility"], "Sets direction")
+        self.assertEqual(inline[1]["name"], "Reviewer")
+
+    def test_create_then_apply_preset_keeps_custom_org_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            opc_home = Path(tmpdir) / ".opc"
+            with patch.dict(os.environ, {"OPC_HOME": str(opc_home)}, clear=False):
+                created = self.runner.invoke(app, [
+                    "org", "saved", "create", "Research Lab",
+                    "--member", "Lead|Owns direction",
+                    "--member", "Analyst|Runs analysis|0",
+                    "--json",
+                ])
+                applied = self.runner.invoke(app, [
+                    "market", "apply-preset", "vc-investment-firm", "--json",
+                ])
+
+            self.assertEqual(created.exit_code, 0, created.output)
+            self.assertEqual(applied.exit_code, 0, applied.output)
+            self.assertIn('"organization_id": "research_lab"', created.output)
+            self.assertIn('"action": "market_preset_applied"', applied.output)
+            self.assertIn('"employees": 0', applied.output)
+            self.assertIn('"persisted_employees": 0', applied.output)
+            self.assertIn('"runtime_default_employees": 21', applied.output)
+
+            index = yaml.safe_load((opc_home / "config" / "org_index.yaml").read_text(encoding="utf-8"))
+            org_path = opc_home / "config" / "company_orgs" / "org_research_lab_config.yaml"
+            org_payload = yaml.safe_load(org_path.read_text(encoding="utf-8"))
+            self.assertEqual(index["active_organization_id"], "research_lab")
+            self.assertEqual(org_payload["organization_id"], "research_lab")
+            self.assertIn("managing_partner", {role["id"] for role in org_payload["roles"]})
+            self.assertEqual(org_payload["employees"], [])
+            self.assertFalse((org_path.parent / "org_vc-investment-firm_config.yaml").exists())
+
+            conn = sqlite3.connect(opc_home / "ui_state.db")
+            server_state = dict(conn.execute("SELECT key, value FROM server_state").fetchall())
+            conn.close()
+            self.assertEqual(server_state["exec_mode"], "org")
+            self.assertEqual(server_state["company_profile"], "custom")
+
+    def test_create_requires_two_members_before_starting_services(self) -> None:
+        result = self.runner.invoke(app, [
+            "org", "saved", "create", "Solo Org", "--member", "Solo", "--json",
+        ])
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("at least two members", result.output)
 
 
 class CliAutomationCommandTests(unittest.TestCase):

@@ -78,6 +78,7 @@ class DraftJudgment:
     judge_model: str
     criterion_scores: dict[str, float]
     criterion_notes: dict[str, str]
+    artifact_digest: str = ""
     authority: str = DRAFT_AUTHORITY
     created_at: str = field(default_factory=lambda: utc_now().isoformat())
 
@@ -88,6 +89,7 @@ class DraftJudgment:
             "judge_model": self.judge_model,
             "criterion_scores": dict(self.criterion_scores),
             "criterion_notes": dict(self.criterion_notes),
+            "artifact_digest": self.artifact_digest,
             "authority": self.authority,
             "created_at": self.created_at,
         }
@@ -146,6 +148,7 @@ def parse_draft_response(
     run_id: str,
     judge_model: str,
     response_text: str,
+    artifact_digest: str = "",
 ) -> DraftJudgment:
     """Parse and validate the LLM draft; fail closed on malformed output."""
 
@@ -177,6 +180,7 @@ def parse_draft_response(
         judge_model=judge_model,
         criterion_scores=scores,
         criterion_notes=notes,
+        artifact_digest=str(artifact_digest or "").strip().lower(),
     )
 
 
@@ -188,6 +192,7 @@ def confirm_draft(
     adjusted_scores: Mapping[str, float] | None = None,
     adjusted_notes: Mapping[str, str] | None = None,
     evidence: Mapping[str, Any] | None = None,
+    artifact_digest: str = "",
 ) -> dict[str, Any]:
     """Turn a reviewed draft into an ``evaluate score`` result payload.
 
@@ -209,6 +214,19 @@ def confirm_draft(
     base_scores = dict(draft.get("criterion_scores", {}) or {})
     if not base_scores:
         raise ValueError("draft has no criterion scores to confirm")
+    draft_artifact_digest = str(draft.get("artifact_digest", "") or "").strip().lower()
+    confirmed_artifact_digest = str(artifact_digest or "").strip().lower()
+    if draft_artifact_digest:
+        if len(draft_artifact_digest) != 64:
+            raise ValueError("draft artifact_digest must be a SHA-256 digest")
+        if not confirmed_artifact_digest:
+            raise ValueError(
+                "confirmation requires the sealed artifact digest used by the draft"
+            )
+        if confirmed_artifact_digest != draft_artifact_digest:
+            raise ValueError(
+                "confirmation artifact digest differs from the reviewed draft"
+            )
     final_scores: dict[str, float] = {**base_scores, **dict(adjusted_scores or {})}
     unknown = set(final_scores) - set(base_scores)
     if unknown:
@@ -227,6 +245,9 @@ def confirm_draft(
             "judgment_authority": authority,
             "confirmed_by": operator,
             "confirmed_at": utc_now().isoformat(),
+            "benchmark_artifact_digest": (
+                confirmed_artifact_digest or draft_artifact_digest
+            ),
             "llm_draft": {
                 "judge_model": str(draft.get("judge_model", "")),
                 "rubric_digest": str(draft.get("rubric_digest", "")),
@@ -249,6 +270,7 @@ async def draft_for_goal(
     run_id: str,
     judge_model: str,
     max_artifact_chars: int = 24_000,
+    artifact_digest: str = "",
 ) -> DraftJudgment:
     """Produce one draft via an injected async ``chat(user, system) -> str``.
 
@@ -266,6 +288,7 @@ async def draft_for_goal(
         run_id=run_id,
         judge_model=judge_model,
         response_text=str(response or ""),
+        artifact_digest=artifact_digest,
     )
 
 

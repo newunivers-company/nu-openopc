@@ -46,6 +46,9 @@ from opc.core.models import (
 )
 from opc.core.worker_envelope import classify_worker_message, worker_message_is_actionable
 from opc.layer2_organization.company_runtime import CompanyRuntime, canonical_role_session_id
+from opc.layer2_organization.company_execution_lifecycle import (
+    run_governed_company_execution,
+)
 from opc.layer2_organization.phase import (
     DONE_PHASES,
     IN_PROGRESS_PHASES,
@@ -4558,21 +4561,18 @@ class CompanyWorkItemExecutor:
         plan: CompanyWorkItemRuntimePlan,
         tasks: list[Task],
     ) -> str:
-        ownership = self.acquire_driver_ownership(tasks)
-        try:
-            plan = _coerce_company_work_item_runtime_plan(plan) or CompanyWorkItemRuntimePlan()
-            plan.metadata = {
-                **dict(plan.metadata or {}),
-                "execution_model": "multi_team_org",
-                "runtime_model": "multi_team_org",
-            }
-            if ownership is None:
-                return await self._execute_multi_team_org(plan, tasks)
-            with ownership.bind():
-                return await self._execute_multi_team_org(plan, tasks)
-        finally:
-            if ownership is not None:
-                ownership.release()
+        normalized_plan = (
+            _coerce_company_work_item_runtime_plan(plan)
+            or CompanyWorkItemRuntimePlan()
+        )
+        return await run_governed_company_execution(
+            normalized_plan,
+            tasks,
+            acquire_ownership=self.acquire_driver_ownership,
+            execute_scheduler=self._execute_multi_team_org,
+            store=getattr(self, "store", None),
+            save_task=getattr(self, "save_task", None),
+        )
 
     async def _execute_multi_team_org(
         self,

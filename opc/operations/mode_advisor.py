@@ -9,7 +9,76 @@ integration contribute explicit evidence for Company Mode.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from statistics import fmean
 from typing import Any, Mapping
+
+
+_TRUSTED_OUTCOME_AUTHORITIES = {"human_confirmed", "independent_judge"}
+_PROVISIONAL_MAX_DURATION_RATIO = 3.0
+_PROVISIONAL_MAX_EXTERNAL_CALL_RATIO = 8.0
+
+
+@dataclass(frozen=True)
+class ModeOutcomeObservation:
+    """One trusted Task/Company comparison for a similar workload."""
+
+    workload_key: str
+    authority: str
+    task_quality: float
+    company_quality: float
+    task_duration_seconds: float
+    company_duration_seconds: float
+    task_external_calls: int
+    company_external_calls: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ModeOutcomeObservation":
+        observation = cls(
+            workload_key=str(data.get("workload_key", "") or "").strip().lower(),
+            authority=str(data.get("authority", "") or "").strip().lower(),
+            task_quality=float(data.get("task_quality", 0.0) or 0.0),
+            company_quality=float(data.get("company_quality", 0.0) or 0.0),
+            task_duration_seconds=float(
+                data.get("task_duration_seconds", 0.0) or 0.0
+            ),
+            company_duration_seconds=float(
+                data.get("company_duration_seconds", 0.0) or 0.0
+            ),
+            task_external_calls=int(data.get("task_external_calls", 0) or 0),
+            company_external_calls=int(
+                data.get("company_external_calls", 0) or 0
+            ),
+        )
+        observation.validate()
+        return observation
+
+    def validate(self) -> None:
+        if not self.workload_key:
+            raise ValueError("mode outcome observation requires workload_key")
+        if self.authority not in {
+            *_TRUSTED_OUTCOME_AUTHORITIES,
+            "llm_draft",
+            "simulation",
+        }:
+            raise ValueError("unsupported mode outcome observation authority")
+        for name, value in (
+            ("task_quality", self.task_quality),
+            ("company_quality", self.company_quality),
+        ):
+            if not 0 <= value <= 1:
+                raise ValueError(f"{name} must be between 0 and 1")
+        for name, value in (
+            ("task_duration_seconds", self.task_duration_seconds),
+            ("company_duration_seconds", self.company_duration_seconds),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.task_external_calls < 0 or self.company_external_calls < 0:
+            raise ValueError("external call counts must be non-negative")
+
+    @property
+    def trusted(self) -> bool:
+        return self.authority in _TRUSTED_OUTCOME_AUTHORITIES
 
 
 @dataclass(frozen=True)
@@ -26,6 +95,8 @@ class ModeAssessmentRequest:
     final_integration_required: bool = False
     risk_level: str = "low"
     estimated_duration_minutes: int | None = None
+    workload_key: str = ""
+    outcome_observations: tuple[ModeOutcomeObservation, ...] = ()
     schema_version: int = 1
 
     @classmethod
@@ -54,6 +125,12 @@ class ModeAssessmentRequest:
                 None
                 if data.get("estimated_duration_minutes") is None
                 else int(data["estimated_duration_minutes"])
+            ),
+            workload_key=str(data.get("workload_key", "") or "").strip().lower(),
+            outcome_observations=tuple(
+                ModeOutcomeObservation.from_dict(item)
+                for item in data.get("outcome_observations", []) or []
+                if isinstance(item, Mapping)
             ),
             schema_version=int(data.get("schema_version", 1) or 1),
         )
@@ -86,6 +163,10 @@ class ModeAssessmentRequest:
             and self.estimated_duration_minutes < 1
         ):
             raise ValueError("estimated_duration_minutes must be positive")
+        if self.outcome_observations and not self.workload_key:
+            raise ValueError(
+                "workload_key is required when outcome observations are supplied"
+            )
 
 
 def assess_execution_mode(request: ModeAssessmentRequest) -> dict[str, Any]:
@@ -176,12 +257,49 @@ def assess_execution_mode(request: ModeAssessmentRequest) -> dict[str, Any]:
             "The estimated duration and single deliverable favor a direct path.",
         )
 
+    structural_company_benefit_score = max(
+        0, min(10, sum(int(item["weight"]) for item in factors))
+    )
+    observed_evidence = _observed_evidence(request)
+    evidence_veto = False
+    if observed_evidence["matched_trusted_pairs"]:
+        quality_delta = float(observed_evidence["mean_quality_delta"])
+        within_budget = bool(observed_evidence["within_provisional_budget"])
+        if quality_delta < 0 or (not within_budget and quality_delta < 0.03):
+            factor(
+                "observed_company_underperformance",
+                -4,
+                (
+                    "Trusted matched outcomes show Company Mode does not repay "
+                    "its observed coordination cost for this workload."
+                ),
+            )
+            evidence_veto = True
+        elif quality_delta >= 0.03 and within_budget:
+            factor(
+                "observed_company_lift",
+                2,
+                "Trusted matched outcomes show material Company quality lift within budget.",
+            )
+        elif within_budget:
+            factor(
+                "observed_company_non_regression",
+                1,
+                "Trusted matched outcomes show Company non-regression within budget.",
+            )
     company_benefit_score = max(
         0, min(10, sum(int(item["weight"]) for item in factors))
     )
     if blockers:
         recommendation = "clarify"
         confidence = "high"
+    elif evidence_veto:
+        recommendation = "task"
+        confidence = (
+            "high"
+            if int(observed_evidence["matched_trusted_pairs"]) >= 3
+            else "medium"
+        )
     elif company_benefit_score >= 5:
         recommendation = "company"
         confidence = "high" if company_benefit_score >= 7 else "medium"
@@ -196,11 +314,18 @@ def assess_execution_mode(request: ModeAssessmentRequest) -> dict[str, Any]:
         "confidence": confidence,
         "advisory_only": True,
         "company_benefit_score": company_benefit_score,
+        "structural_company_benefit_score": structural_company_benefit_score,
         "decision_threshold": 5,
+        "evidence_veto": evidence_veto,
+        "observed_evidence": observed_evidence,
         "blockers": blockers,
         "factors": factors,
         "recommended_controls": controls,
-        "summary": _summary(recommendation, blockers),
+        "summary": _summary(
+            recommendation,
+            blockers,
+            evidence_veto=evidence_veto,
+        ),
     }
 
 
@@ -226,8 +351,97 @@ def _recommended_controls(
     return controls
 
 
+def _observed_evidence(request: ModeAssessmentRequest) -> dict[str, Any]:
+    matching = [
+        item
+        for item in request.outcome_observations
+        if item.trusted and item.workload_key == request.workload_key
+    ]
+    ignored = len(request.outcome_observations) - len(matching)
+    if not matching:
+        return {
+            "workload_key": request.workload_key,
+            "matched_trusted_pairs": 0,
+            "ignored_observations": ignored,
+            "confidence": "none",
+            "mean_quality_delta": 0.0,
+            "mean_duration_ratio": None,
+            "mean_external_call_ratio": None,
+            "within_provisional_budget": False,
+            "provisional_budget": {
+                "maximum_duration_ratio": _PROVISIONAL_MAX_DURATION_RATIO,
+                "maximum_external_call_ratio": (
+                    _PROVISIONAL_MAX_EXTERNAL_CALL_RATIO
+                ),
+            },
+            "expected": {},
+        }
+
+    duration_ratios = [
+        item.company_duration_seconds / item.task_duration_seconds
+        for item in matching
+    ]
+    call_ratios = [
+        item.company_external_calls / max(1, item.task_external_calls)
+        for item in matching
+    ]
+    quality_deltas = [
+        item.company_quality - item.task_quality for item in matching
+    ]
+    mean_duration_ratio = fmean(duration_ratios)
+    mean_call_ratio = fmean(call_ratios)
+    sample_count = len(matching)
+    return {
+        "workload_key": request.workload_key,
+        "matched_trusted_pairs": sample_count,
+        "ignored_observations": ignored,
+        "confidence": (
+            "high" if sample_count >= 5 else "medium" if sample_count >= 3 else "low"
+        ),
+        "mean_quality_delta": round(fmean(quality_deltas), 6),
+        "mean_duration_ratio": round(mean_duration_ratio, 6),
+        "mean_external_call_ratio": round(mean_call_ratio, 6),
+        "within_provisional_budget": bool(
+            mean_duration_ratio <= _PROVISIONAL_MAX_DURATION_RATIO
+            and mean_call_ratio <= _PROVISIONAL_MAX_EXTERNAL_CALL_RATIO
+        ),
+        "provisional_budget": {
+            "maximum_duration_ratio": _PROVISIONAL_MAX_DURATION_RATIO,
+            "maximum_external_call_ratio": _PROVISIONAL_MAX_EXTERNAL_CALL_RATIO,
+        },
+        "expected": {
+            "task_quality": _range(item.task_quality for item in matching),
+            "company_quality": _range(item.company_quality for item in matching),
+            "task_duration_seconds": _range(
+                item.task_duration_seconds for item in matching
+            ),
+            "company_duration_seconds": _range(
+                item.company_duration_seconds for item in matching
+            ),
+            "task_external_calls": _range(
+                float(item.task_external_calls) for item in matching
+            ),
+            "company_external_calls": _range(
+                float(item.company_external_calls) for item in matching
+            ),
+        },
+    }
+
+
+def _range(values: Any) -> dict[str, float]:
+    samples = [float(value) for value in values]
+    return {
+        "minimum": round(min(samples), 6),
+        "mean": round(fmean(samples), 6),
+        "maximum": round(max(samples), 6),
+    }
+
+
 def _summary(
-    recommendation: str, blockers: list[dict[str, str]]
+    recommendation: str,
+    blockers: list[dict[str, str]],
+    *,
+    evidence_veto: bool = False,
 ) -> str:
     if recommendation == "clarify":
         return (
@@ -238,6 +452,11 @@ def _summary(
         return (
             "Company Mode is recommended because coordination, independent "
             "ownership, review, or integration is expected to add material value."
+        )
+    if evidence_veto:
+        return (
+            "Task Mode is recommended because trusted matched outcomes show "
+            "that the current Company topology does not repay its coordination cost."
         )
     return (
         "Task Mode is recommended because one execution owner can take the "

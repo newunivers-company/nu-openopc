@@ -389,6 +389,76 @@ def build_readiness_campaign_plan(
     return report
 
 
+def verify_readiness_campaign_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate campaign integrity and its status-only safety contract."""
+    payload = dict(plan or {})
+    supplied_digest = str(payload.pop("plan_digest", "") or "").strip()
+    calculated_digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if not supplied_digest or supplied_digest != calculated_digest:
+        raise ValueError("readiness campaign plan digest mismatch")
+    campaign_id = str(payload.get("campaign_id", "") or "").strip()
+    provider = str(payload.get("provider", "") or "").strip()
+    if not _CAMPAIGN_ID.fullmatch(campaign_id) or not provider:
+        raise ValueError("readiness campaign identity is invalid")
+    status_canary = payload.get("status_canary")
+    if not isinstance(status_canary, Mapping):
+        raise ValueError("readiness campaign status_canary contract is missing")
+    if status_canary.get("generation_allowed") is not False:
+        raise ValueError("readiness campaign must prohibit generation")
+    if payload.get("automatic_failure_injection") is not False:
+        raise ValueError("readiness campaign must prohibit automatic failure injection")
+    return {**payload, "plan_digest": supplied_digest}
+
+
+def validate_failure_drill_result(
+    scenario: str,
+    result: Mapping[str, Any],
+    *,
+    require_passed: bool = False,
+) -> dict[str, Any]:
+    """Normalize independently evidenced drill results without inventing proof."""
+    drill = str(scenario or "").strip()
+    authority = str(result.get("authority", "") or "").strip()
+    evidence = [
+        str(item).strip()
+        for item in result.get("evidence", []) or []
+        if str(item).strip()
+    ]
+    checks = {
+        "actual_injection": bool(result.get("actual_injection", False)),
+        "expected_failure_observed": bool(result.get("expected_failure_observed", False)),
+        "fallback_verified": bool(result.get("fallback_verified", False)),
+        "alert_verified": bool(result.get("alert_verified", False)),
+        "recovery_verified": bool(result.get("recovery_verified", False)),
+    }
+    if not drill:
+        raise ValueError("failure drill scenario is required")
+    if authority not in {"human_confirmed", "independent_observer"}:
+        raise ValueError("failure drill requires independent authority")
+    if not evidence:
+        raise ValueError("failure drill requires durable evidence")
+    passed = all(checks.values())
+    if require_passed and not passed:
+        missing = [name for name, value in checks.items() if not value]
+        raise ValueError(
+            f"failure drill {drill!r} is incomplete: {', '.join(missing)}"
+        )
+    return {
+        "scenario": drill,
+        "authority": authority,
+        "evidence": evidence,
+        "passed": passed,
+        **checks,
+    }
+
+
 class ProviderCanaryService:
     def __init__(
         self,
@@ -403,6 +473,7 @@ class ProviderCanaryService:
         request: CapabilityRequest | Mapping[str, Any],
         *,
         expected_model: str = "",
+        evidence_metadata: Mapping[str, Any] | None = None,
     ) -> ProviderCanaryResult:
         parsed = request if isinstance(request, CapabilityRequest) else CapabilityRequest.from_dict(request)
         parsed.allow_live = False
@@ -438,6 +509,7 @@ class ProviderCanaryService:
                     "route_id": route.route_id,
                     "mode": route.mode,
                     "readiness": dict(route.readiness),
+                    **dict(evidence_metadata or {}),
                 },
             )
         except Exception as exc:
@@ -452,6 +524,7 @@ class ProviderCanaryService:
                 expected_model=expected_model,
                 error_category=_error_category(str(exc)),
                 error=f"{type(exc).__name__}: {exc}"[:4000],
+                metadata=dict(evidence_metadata or {}),
             )
         return await self.repository.save_provider_canary_result(result)
 
@@ -523,28 +596,11 @@ class ProviderCanaryService:
         """Persist an independently evidenced, controlled failure exercise."""
 
         drill = str(scenario or "").strip()
-        authority = str(result.get("authority", "") or "").strip()
-        evidence = [
-            str(item).strip()
-            for item in result.get("evidence", []) or []
-            if str(item).strip()
-        ]
-        checks = {
-            "actual_injection": bool(result.get("actual_injection", False)),
-            "expected_failure_observed": bool(
-                result.get("expected_failure_observed", False)
-            ),
-            "fallback_verified": bool(result.get("fallback_verified", False)),
-            "alert_verified": bool(result.get("alert_verified", False)),
-            "recovery_verified": bool(result.get("recovery_verified", False)),
-        }
         if not drill or not str(provider or "").strip():
             raise ValueError("failure drill provider and scenario are required")
-        if authority not in {"human_confirmed", "independent_observer"}:
-            raise ValueError("failure drill requires independent authority")
-        if not evidence:
-            raise ValueError("failure drill requires durable evidence")
-        passed = all(checks.values())
+        normalized = validate_failure_drill_result(drill, result)
+        passed = bool(normalized.pop("passed"))
+        normalized.pop("scenario", None)
         row = ProviderCanaryResult(
             project_id=project_id,
             capability_kind=CapabilityKind.LLM,
@@ -559,9 +615,7 @@ class ProviderCanaryService:
             error="" if passed else "controlled failure drill did not verify all required behavior",
             metadata={
                 "drill_scenario": drill,
-                "authority": authority,
-                "evidence": evidence,
-                **checks,
+                **normalized,
             },
         )
         return await self.repository.save_provider_canary_result(row)
@@ -824,6 +878,8 @@ async def run_status_canary_loop(
     iterations: int = 1,
     sleep: Callable[[float], Any] = asyncio.sleep,
     on_result: Callable[[dict[str, Any]], None] | None = None,
+    campaign_id: str = "",
+    plan_digest: str = "",
 ) -> dict[str, Any]:
     """Drive periodic status canaries without a resident engine process.
 
@@ -842,7 +898,18 @@ async def run_status_canary_loop(
     failures = 0
     last: dict[str, Any] | None = None
     while True:
-        result = await canaries.status_canary(request, expected_model=expected_model)
+        evidence_metadata = {
+            key: value
+            for key, value in {
+                "readiness_campaign_id": str(campaign_id or "").strip(),
+                "readiness_campaign_plan_digest": str(plan_digest or "").strip(),
+            }.items()
+            if value
+        }
+        status_kwargs: dict[str, Any] = {"expected_model": expected_model}
+        if evidence_metadata:
+            status_kwargs["evidence_metadata"] = evidence_metadata
+        result = await canaries.status_canary(request, **status_kwargs)
         last = result.to_dict()
         samples += 1
         if not result.success:
@@ -857,6 +924,51 @@ async def run_status_canary_loop(
         "failures": failures,
         "interval_seconds": interval_seconds,
         "last": last,
+        "campaign_id": str(campaign_id or "").strip(),
+        "plan_digest": str(plan_digest or "").strip(),
+    }
+
+
+async def run_readiness_campaign(
+    canaries: ProviderCanaryService,
+    request: CapabilityRequest,
+    plan: Mapping[str, Any],
+    *,
+    iterations: int = 1,
+    interval_seconds: float | None = None,
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    on_result: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Execute only the status-canary portion of a verified campaign plan."""
+    verified = verify_readiness_campaign_plan(plan)
+    provider = str(verified["provider"])
+    request.allow_live = False
+    request.preferred_providers = [provider]
+    request.require_preferred_provider = True
+    expected_model = str(verified.get("model", "") or "")
+    configured_interval = float(
+        dict(verified["status_canary"]).get("interval_seconds", 300.0)
+    )
+    report = await run_status_canary_loop(
+        canaries,
+        request,
+        expected_model=expected_model,
+        interval_seconds=(
+            configured_interval
+            if interval_seconds is None
+            else float(interval_seconds)
+        ),
+        iterations=iterations,
+        sleep=sleep,
+        on_result=on_result,
+        campaign_id=str(verified["campaign_id"]),
+        plan_digest=str(verified["plan_digest"]),
+    )
+    return {
+        **report,
+        "provider": provider,
+        "generation_allowed": False,
+        "automatic_failure_injection": False,
     }
 
 

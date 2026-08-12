@@ -25,6 +25,7 @@ from opc.operations.campaign_runner import (
     build_slot_command,
     slot_execution_project_id,
     subprocess_executor_preflight,
+    validate_artifact_index,
     verify_plan,
 )
 from opc.operations.models import RunMetrics, RunStatus
@@ -120,6 +121,24 @@ class CampaignSlotRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             skeleton["metadata"]["model_versions"], {"executor": "fake-model-1"}
         )
+        validation = validate_artifact_index(artifact_dir)
+        self.assertEqual(validation["artifact_digest"], result.artifact_digest)
+        self.assertEqual(validation["file_count"], 2)
+
+    async def test_artifact_validation_detects_tampering_and_unsealed_files(self) -> None:
+        slot = self._first_slot()
+        result = await self.runner.run_slot(self.plan, slot["slot_id"])
+        artifact_dir = Path(result.artifact_directory)
+
+        original = (artifact_dir / "output.md").read_text(encoding="utf-8")
+        (artifact_dir / "output.md").write_text("tampered", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "changed after sealing"):
+            validate_artifact_index(artifact_dir)
+
+        (artifact_dir / "output.md").write_text(original, encoding="utf-8")
+        (artifact_dir / "late.txt").write_text("not sealed", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unsealed files"):
+            validate_artifact_index(artifact_dir)
 
     async def test_run_slot_is_idempotent_without_force(self) -> None:
         slot_id = self._first_slot()["slot_id"]

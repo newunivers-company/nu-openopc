@@ -56,9 +56,16 @@ class RoutedLLMTarget:
 class NULlmRoutingBridge:
     """Load one shared router and expose compact, network-free decisions."""
 
-    def __init__(self, config: NULlmRoutingConfig, *, opc_home: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: NULlmRoutingConfig,
+        *,
+        opc_home: Path | None = None,
+        emit_load_logs: bool = True,
+    ) -> None:
         self.config = config
         self.opc_home = Path(opc_home) if opc_home is not None else None
+        self._emit_load_logs = bool(emit_load_logs)
         self._router: Any | None = None
         self._config_path: Path | None = None
         self._load_attempted = False
@@ -134,7 +141,8 @@ class NULlmRoutingBridge:
             from nu_llm_routing_lib.api import load_router_from_file
         except (ImportError, ModuleNotFoundError) as exc:
             self._load_error = f"nu-llm-routing-lib unavailable: {type(exc).__name__}"
-            logger.info(self._load_error)
+            if self._emit_load_logs:
+                logger.info(self._load_error)
             return None
 
         for path in self._candidate_config_paths():
@@ -143,13 +151,15 @@ class NULlmRoutingBridge:
             try:
                 self._router = load_router_from_file(path)
                 self._config_path = path
-                logger.info("NU LLM router loaded from {}", path)
+                if self._emit_load_logs:
+                    logger.info("NU LLM router loaded from {}", path)
                 return self._router
             except Exception as exc:
                 self._load_error = f"failed to load NU LLM router config {path}: {exc}"
                 if not self.config.fail_open:
                     raise RuntimeError(self._load_error) from exc
-                logger.warning(self._load_error)
+                if self._emit_load_logs:
+                    logger.warning(self._load_error)
                 return None
 
         self._load_error = (
@@ -158,7 +168,8 @@ class NULlmRoutingBridge:
         )
         if not self.config.fail_open:
             raise RuntimeError(self._load_error)
-        logger.info(self._load_error)
+        if self._emit_load_logs:
+            logger.info(self._load_error)
         return None
 
     def _workload(self, task_type: str | None, has_tools: bool) -> str:

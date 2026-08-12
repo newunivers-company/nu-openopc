@@ -6,7 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 
 def utc_now() -> datetime:
@@ -44,7 +44,7 @@ class ContractMixin:
     schema_version: int
 
     def to_dict(self) -> dict[str, Any]:
-        return _jsonable(asdict(self))
+        return _jsonable(asdict(cast(Any, self)))
 
 
 class GoalContractStatus(str, Enum):
@@ -1161,7 +1161,9 @@ class MissionControlSnapshot(ContractMixin):
     unmeasured_usage_events: int = 0
     provider_slo: dict[str, Any] = field(default_factory=dict)
     provider_call_quotas: dict[str, Any] = field(default_factory=dict)
+    storage: dict[str, Any] = field(default_factory=dict)
     evidence_funnel: dict[str, Any] = field(default_factory=dict)
+    campaign_portfolio: dict[str, Any] = field(default_factory=dict)
     judgment_queue: list[dict[str, Any]] = field(default_factory=list)
     alerts: list[MissionAlert] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
